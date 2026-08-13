@@ -1,12 +1,6 @@
 # Node Modules
 node_modules/
 dist/
+
+#备份
 backup/
-
-# 环境变量
-.env
-.env.local
-.env.*.local
-
-# Vercel 部署缓存
-.vercel/
