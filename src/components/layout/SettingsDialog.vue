@@ -408,7 +408,7 @@ function resetAll() {
               <h4 class="sd__about-heading">相关项目</h4>
               <ul class="sd__about-links">
                 <li><a href="https://ark.ncreeper.top/" target="_blank" rel="noopener">明日方舟：终末地风格LOGO生成器</a></li>
-                <li><a href="https://baker.ncreeper.top/" target="_blank" rel="noopener">明日方舟：终末地 Baker AI 聊天模拟器</a></li>
+                <li><a href="https://baker.ncreeper.top/" target="_blank" rel="noopener">明日方舟：终末地 Baker 模拟器</a></li>
               </ul>
             </div>
           </div>

@@ -6,7 +6,7 @@
 // 删除确认弹窗为独立组件(DeleteConfirmDialog),打开状态与删除动作在此持有。
 // 调试模式:URL 包含 #debug 时,useDebugMode 会在左下角渲染气泡尺寸信息。
 // =============================================================================
-import { ref } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import AppBackground from './components/layout/AppBackground.vue'
 import DesignCanvas from './components/layout/DesignCanvas.vue'
 import HeaderTop from './components/header/HeaderTop.vue'
@@ -29,6 +29,31 @@ useDebugMode()
 // 自定义页面背景(带 localStorage 持久化:刷新保留、不随 .baker 导出、
 // 不受清空对话影响;上传成功赋值后自动落库)
 const { customBg } = useCustomBackground()
+
+/**
+ * 右上角工具栏是否可见(E 键切换)
+ *
+ * 仅会话内生效,不持久化,刷新页面即恢复可见。
+ */
+const showToolbar = ref(true)
+
+/** 是否应忽略该键盘事件(输入框 / textarea / contenteditable 内按 E 不切换) */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable
+}
+
+/** E 键切换工具栏显隐 */
+function onToolbarToggleKeydown(event: KeyboardEvent) {
+  if (event.key.toLowerCase() !== 'e') return
+  if (event.ctrlKey || event.metaKey || event.altKey) return
+  if (isEditableTarget(event.target)) return
+  showToolbar.value = !showToolbar.value
+}
+
+onMounted(() => document.addEventListener('keydown', onToolbarToggleKeydown))
+onBeforeUnmount(() => document.removeEventListener('keydown', onToolbarToggleKeydown))
 
 /** 删除确认弹窗是否展开(删除按钮 toggle) */
 const confirmOpen = ref(false)
@@ -85,6 +110,8 @@ function onChatNew() {
     <CharacterCardList />
     <ChatArea @open-settings="settingsOpen = true" />
   </DesignCanvas>
+  <!-- 右上角工具栏(E 键整体隐藏/显示,刷新恢复可见) -->
+  <div v-show="showToolbar">
   <!-- 新建对话按钮:右上角起始位;选中子对话时在选中父级卡片下追加子会话(无论是否展开);
        未选中任何对话时弹出"请先选中会话"提示 -->
   <button
@@ -150,6 +177,7 @@ function onChatNew() {
   >
     <img :src="MATERIALS.loginBtnSetting" alt="设置" />
   </button>
+  </div>
 
   <!-- 删除对话确认弹窗:fixed 视口定位,1920 原始尺寸不缩放 -->
   <DeleteConfirmDialog :open="confirmOpen" @close="confirmOpen = false" />

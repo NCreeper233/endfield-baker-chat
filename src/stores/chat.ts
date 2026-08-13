@@ -578,12 +578,17 @@ export const useChatStore = defineStore('chat', () => {
    */
   function startAiResponse(speakerName: string, speakerAvatar: string): void {
     if (activeSub.value === null) return
-    // 锁定目标对话:后续所有 AI 操作都写入此对话,不受用户切换卡片影响
-    aiTargetSub.value = activeSub.value
+    // 锁定目标对话:仅在整体响应首次启动时锁定一次(后续分段不重锁),
+    // 保证等待期间切换角色后,分段消息仍写入原对话而非当前对话
+    if (aiTargetSub.value === null) {
+      aiTargetSub.value = activeSub.value
+    }
     pendingAiSpeaker.value = { name: speakerName, avatar: speakerAvatar }
-    isLoading.value = true
     isAiResponding.value = true
     aiAbortController = new AbortController()
+    // 仅当正在查看目标对话时才显示 LoadingBubble,
+    // 避免切换到其他角色时在错误的对话中闪现加载气泡
+    isLoading.value = activeSub.value === aiTargetSub.value
   }
 
   /**
