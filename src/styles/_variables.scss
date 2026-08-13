@@ -1,0 +1,70 @@
+// =============================================================================
+// 全局设计令牌(UI 视觉规范的唯一来源)
+// -----------------------------------------------------------------------------
+// 此文件定义 SCSS 变量,供组件 <style scoped lang="scss"> 引用。
+// 用于 SVG 属性 / inline style 的颜色定义在 constants/colors.ts(SCSS 无法引用)。
+//
+// 修改任意令牌前,必须确认其影响的所有 UI 区块,避免破坏像素级一致性。
+// =============================================================================
+
+// ---- 画布尺寸 -------------------------------------------------------------
+$design-w: 1920px;
+$design-h: 1080px;
+
+// ---- 字体 -----------------------------------------------------------------
+$font-harmony: 'HarmonyOS Sans SC Medium', 'HarmonyOS Sans SC', 'MiSans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+$font-bubble: 'HarmonyOS Sans SC Medium', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif;
+
+$font-size-title: 21.15px;   // 顶部 BAKER 标题
+$font-size-name: 24.12px;    // 干员名 / 聊天条姓名
+$font-size-subcard: 20.88px; // 子卡文字
+$font-size-bubble: 20.88px;  // 气泡文字
+
+// ---- 颜色(SCSS 专用,inline 颜色见 constants/colors.ts) -----------------
+$color-bg-root: #141413;             // html/body 背景
+
+$color-text-primary: #fff;
+$color-subcard-text: #e3e1e1;
+$color-subcard-text-selected: #1c1c1c;
+
+$color-card-bg: #3e3f3d;
+$color-subcard-bg: #2b2927;
+$color-subcard-icon-box: #353534;
+$color-subcard-line: #1c1c1c;
+$color-subcard-selected: #ffef00; // 子卡选中黄层
+
+$color-avatar-border: #575657;
+$color-avatar-border-hover: #5e5d5e;
+
+$color-hover-overlay: rgba(255, 255, 255, 0.12); // 主卡/子卡 hover 白层
+$color-hover-overlay-gray: rgba(0, 0, 0, 0.2);   // 输入面板圆形按钮 hover 灰遮罩
+$color-chat-tint: rgba(255, 255, 255, 0.05);     // 聊天条 detail 浅色叠加
+
+// ---- 聊天框(CSS 绘制边框,替代 chat_strip_detail.png) ----------------------
+$color-chat-frame: rgb(202, 201, 201);        // 框线(1.5px)
+$color-chat-bar-magenta: rgb(226, 2, 226);    // 三色条:品红
+$color-chat-bar-yellow: rgb(243, 241, 0);     // 三色条:黄
+$color-chat-bar-cyan: rgb(1, 241, 241);       // 三色条:青
+
+$color-panel-bg: #3c3b39;                        // 底部输入面板背景
+$color-btn-bg: #f0eeee;                          // 输入面板圆形按钮背景(同 mine 气泡色)
+$color-btn-icon: #444343;                        // 输入面板按钮图标颜色(白色图标压暗所得)
+
+$color-scrollbar-character: #cac9c9; // 干员卡片列表滚动条
+$color-scrollbar-chat: #c8c6c6;    // 聊天区滚动条
+
+$color-speaker-name: #b8b6b4;      // 聊天气泡上方角色名称(小号灰字)
+
+$icon-hover-gray-filter: brightness(0) invert(1) brightness(0.6); // 图标 hover 染为 #999898 灰
+
+// ---- 动画时长 / 缓动 ------------------------------------------------------
+$ease-default: ease;
+$ease-out: ease-out;
+
+$anim-fast: 0.2s;              // 主卡 hover 层
+$anim-card-collapse: 0.3s;     // 卡片折叠位移 / 箭头旋转
+$anim-subcard: 0.25s;          // 子卡 texture/icon/text/deco 联动
+$anim-subcard-arrow-first: 0.15s;  // 子卡首张 arrow
+$anim-subcard-selected: 0.1s;      // 子卡选中黄层 scaleX
+$anim-chat-in: 0.3s;          // 聊天区入场
+$anim-collapse: 0.25s;         // Vue <transition name="collapse">

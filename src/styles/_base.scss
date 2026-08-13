@@ -1,0 +1,36 @@
+// =============================================================================
+// 基础重置与字体注册
+// -----------------------------------------------------------------------------
+// 全局必需规则,与具体组件无关。所有像素值由设计稿测量,调整会波及全屏。
+// =============================================================================
+
+@use 'variables' as *;
+
+@font-face {
+  font-family: 'HarmonyOS Sans SC Medium';
+  src: url('../assets/fonts/HarmonyOS_Sans_SC_Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: $color-bg-root;
+}
+
+body {
+  font-family: $font-harmony;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

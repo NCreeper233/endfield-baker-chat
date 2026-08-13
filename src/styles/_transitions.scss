@@ -1,0 +1,66 @@
+// =============================================================================
+// 跨组件共享过渡与关键帧
+// -----------------------------------------------------------------------------
+// 1. `.collapse-*` 用于子卡 v-if 折叠/展开的 Vue <transition>
+// 2. `@keyframes chat-in` 用于聊天区切换对话时的入场动画
+// =============================================================================
+
+.collapse-enter-active,
+.collapse-leave-active {
+  transition:
+    opacity 0.25s ease,
+    transform 0.25s ease;
+}
+
+.collapse-enter-from,
+.collapse-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
+@keyframes chat-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+// 加载气泡内三个方形点的闪烁动画
+// 三点依次延迟 0 / 0.2s / 0.4s,纯透明度闪烁,无形变
+@keyframes loading-dot {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+// 消息气泡尺寸过渡完成后,文字淡入显示
+// 与 rect 的 width/height transition 配合:先尺寸过渡,再文字浮现
+@keyframes bubble-text-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+// 对话播完后末尾装饰入场:从上方滑入 + 淡入
+// translateY(-4px) → 0,opacity 0 → 1,呈现"从上到下落下"的效果(幅度小)
+@keyframes end-deco-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

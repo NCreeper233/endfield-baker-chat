@@ -1,0 +1,183 @@
+// =============================================================================
+// 共享 mixin(消灭重复样式块的唯一出口)
+// -----------------------------------------------------------------------------
+// 任何在两个以上组件出现的样式组合,必须收敛为此处的 mixin,而非复制粘贴。
+// =============================================================================
+
+@use 'variables' as *;
+
+/// 原点容器:零尺寸 + 绝对定位锚点,仅承载绝对定位子元素。
+///
+/// 设计理由:若布局容器使用 `inset:0` 会形成全屏透明层拦截鼠标事件,
+/// 造成"文字看得见但选不中"。原点容器既不拦截事件,视觉坐标也零变化。
+@mixin origin-container {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+}
+
+/// hover 白层:主卡 / 子卡共用的 12% 白色覆盖层。
+///
+/// @param {Number | String} $w       覆盖层宽
+/// @param {Number | String} $h       覆盖层高
+/// @param {Number | String} $radius  圆角
+@mixin hover-overlay($w, $h, $radius) {
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: #{$w};
+    height: #{$h};
+    border-radius: #{$radius};
+    background: $color-hover-overlay;
+    opacity: 0;
+    z-index: 10;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+
+  &:hover::before,
+  &.is-hover::before {
+    opacity: 1;
+  }
+}
+
+/// 滚动容器双 mask:顶部 / 底部 / 右侧三段渐隐。
+///
+/// @param {Number | String} $top-in       顶部渐隐终点(此点之前全透明)
+/// @param {Number | String} $top-out       顶部渐隐起点(此点之后不透明)
+/// @param {Number | String} $bottom-in    底部渐隐起点(此点之前不透明)
+/// @param {Number | String} $bottom-out   底部渐隐终点(此点之后全透明)
+/// @param {Number | String} $right-cut    右侧渐隐宽度
+@mixin scroll-mask($top-in, $top-out, $bottom-in, $bottom-out, $right-cut: 14px) {
+  -webkit-mask-image:
+    linear-gradient(to bottom, transparent 0, transparent #{$top-in}, #000 #{$top-out}, #000 #{$bottom-in}, transparent #{$bottom-out}, transparent 100%),
+    linear-gradient(to right, transparent calc(100% - #{$right-cut}), #000 calc(100% - #{$right-cut}));
+  mask-image:
+    linear-gradient(to bottom, transparent 0, transparent #{$top-in}, #000 #{$top-out}, #000 #{$bottom-in}, transparent #{$bottom-out}, transparent 100%),
+    linear-gradient(to right, transparent calc(100% - #{$right-cut}), #000 calc(100% - #{$right-cut}));
+}
+
+/// 弹窗外壳:遮罩 + 面板 + 关闭钮 + 标题 + 描述行 + 按钮 + 淡入淡出转场。
+///
+/// DeleteConfirmDialog 与 DataManagerDialog 共用同一套外壳样式,仅少量参数不同;
+/// 组件专属的补充规则(如收窄面板 / 危险按钮 / 统计行)各自留在组件内。
+///
+/// @param {String} $prefix      类名前缀(如 `dc` → `.dc` / `.dc__panel`)
+/// @param {Number | String} $panel-w   面板宽(px)
+/// @param {Number | String} $title-mb   标题下边距(px)
+/// @param {String} $text-el    描述行元素名(默认 `text`;dm 用 `stats`)
+/// @param {Boolean} $actions-wrap   操作区是否允许换行
+@mixin dialog-shell($prefix, $panel-w, $title-mb, $text-el: 'text', $actions-wrap: false) {
+  .#{$prefix} {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+
+    // 面板:圆角深色卡片,内容区统一内边距
+    &__panel {
+      position: relative;
+      width: #{$panel-w};
+      padding: 28px 32px 20px;
+      border-radius: 14px;
+      background: $color-card-bg;
+      border: 1px solid $color-chat-frame;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+
+      // 除右上角关闭按钮外的所有内容压在装饰之上,
+      // 保证按钮不透明且不被装饰遮挡
+      > *:not(.#{$prefix}__close) {
+        position: relative;
+        z-index: 1;
+      }
+    }
+
+    // 右上角 × 关闭按钮
+    &__close {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      z-index: 1;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: transparent;
+      color: $color-subcard-text;
+      font-family: $font-harmony;
+      font-size: 22px;
+      line-height: 1;
+      cursor: pointer;
+
+      &:hover {
+        background: $color-hover-overlay;
+      }
+    }
+
+    &__title {
+      margin: 0 0 #{$title-mb};
+      font-family: $font-harmony;
+      font-size: 22px;
+      font-weight: 500;
+      color: $color-text-primary;
+    }
+
+    // 描述行(dc 为确认文案 `__text`;dm 为数据统计 `__stats`)
+    &__#{$text-el} {
+      margin: 0 0 18px;
+      font-family: $font-harmony;
+      font-size: 15px;
+      color: $color-subcard-text;
+    }
+
+    &__actions {
+      display: flex;
+      gap: 12px;
+
+      @if $actions-wrap {
+        flex-wrap: wrap;
+      }
+    }
+
+    &__btn {
+      min-width: 132px;
+      padding: 10px 18px;
+      border: none;
+      border-radius: 999px;
+      background: $color-btn-bg;
+      color: $color-btn-icon;
+      font-family: $font-harmony;
+      font-size: 16px;
+      cursor: pointer;
+      transition: filter 0.15s ease;
+
+      &:hover {
+        filter: brightness(0.92);
+      }
+
+      &--primary {
+        background: $color-subcard-selected;
+        color: #1c1c1c;
+      }
+    }
+  }
+
+  // 淡入淡出(遮罩 + 面板整体)
+  .#{$prefix}-enter-active,
+  .#{$prefix}-leave-active {
+    transition: opacity 0.15s ease-out;
+  }
+
+  .#{$prefix}-enter-from,
+  .#{$prefix}-leave-to {
+    opacity: 0;
+  }
+}

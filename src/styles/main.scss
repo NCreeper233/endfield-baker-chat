@@ -1,0 +1,49 @@
+// =============================================================================
+// 全局样式入口
+// -----------------------------------------------------------------------------
+// 仅引入跨组件共享的 partial。
+//
+// 组件局部样式写在各自 `<style scoped lang="scss">` 中,通过 @use 引入
+// `../styles/variables` 与 `../styles/mixins` 获取令牌与 mixin。
+//
+// 顺序敏感:base 必须最先(包含 reset 与 @font-face)。
+// =============================================================================
+
+@use 'base';
+@use 'transitions';
+@use 'variables' as *;
+
+// -----------------------------------------------------------------------------
+// 角色名称悬浮(带头像消息的气泡上方,小号灰字)【已注释停用】
+// -----------------------------------------------------------------------------
+// ChatMessageRow 与 ChatArea(LoadingBubble 头像)共用,scoped 无法跨组件,
+// 故定义在全局。行高须与 utils/chatPosition.SPEAKER_NAME_LINE(15) 保持一致。
+// 角色名称显示功能整体停用,样式一并注释保留,便于日后恢复。
+// .chat-speaker-name {
+//   position: absolute;
+//   z-index: 1;
+//   font-family: $font-harmony;
+//   font-size: 15px;
+//   line-height: 15px;
+//   color: $color-speaker-name;
+//   white-space: nowrap;
+//   pointer-events: none;
+//   user-select: none;
+// }
+
+// -----------------------------------------------------------------------------
+// 表情图(全局样式,非 scoped)
+// -----------------------------------------------------------------------------
+// 表情 <img> 由 v-html / innerHTML / execCommand 注入,scoped 样式无法命中,
+// 必须在全局定义。高度固定 1em(随字号),宽度由 emojiImgHtml 内联的
+// 原图宽高比 em 值决定(如横幅 032 为 60:26,宽 = 2.31em),保持真实比例
+// 不被压扁;object-fit:contain 仅兜底,不影响已按比例设定的盒子。
+// - 气泡/输入框(20.88px)自动适配
+.sns-emoji {
+  display: inline-block;
+  height: 1em;
+  vertical-align: middle;
+  object-fit: contain;
+}
+
+
