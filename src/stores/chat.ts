@@ -19,6 +19,7 @@ import { defineStore } from 'pinia'
 import type { Card, ChatMessage, Conversation, MessageSpeaker } from '../types/chat'
 import {
   findCharacter,
+  CHARACTERS,
   DEFAULT_AVATAR_URL,
   MINE_AVATAR_URL,
   MINE_AVATAR_FEMALE_URL,
@@ -312,7 +313,17 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
-    // 唯一子卡:连带删除整张父卡
+    // 唯一子卡:内置角色卡片常驻,删除最后一段对话 = 清空该对话(卡片保留)
+    const cardChar = cards.value[cardIndex].conversations[0]?.name
+    const isBuiltin = CHARACTERS.some((c) => c.name === cardChar)
+    if (isBuiltin) {
+      const conv = cards.value[cardIndex].conversations[localIdx]
+      conv.messages = []
+      conv.contextHistory = []
+      return
+    }
+
+    // 自定义角色(非内置):仍可连带删除整张父卡
     cards.value.splice(cardIndex, 1)
     collapsed.value.splice(cardIndex, 1)
     if (cards.value.length === 0) {
@@ -491,6 +502,26 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 补齐缺失的内置角色卡片(全角色常驻)
+   *
+   * 导入 / 恢复 / 清空后保证每个内置角色都至少存在一张卡片,
+   * 防止"导出只含部分角色"导致空角色在界面消失。
+   * 自定义角色(不在 CHARACTERS 内)原样保留。
+   */
+  function mergeBuiltinCards(next: Card[]): Card[] {
+    const result = next.map((c) => ({ conversations: c.conversations }))
+    const known = new Set(result.map((c) => c.conversations[0]?.name))
+    for (const c of CHARACTERS) {
+      if (!known.has(c.name)) {
+        result.push({
+          conversations: [{ name: c.name, messages: [] }],
+        })
+      }
+    }
+    return result
+  }
+
+  /**
    * 整体替换卡片树并重置全部运行时态
    *
    * DataManagerDialog.applyCards(导入/清空)与 useChatPersistence.loadProject
@@ -502,8 +533,8 @@ export const useChatStore = defineStore('chat', () => {
    * @param next 新的卡片树(调用方负责 sanitize)
    */
   function replaceAllCards(next: Card[]) {
-    cards.value = next
-    collapsed.value = next.map(() => true)
+    cards.value = mergeBuiltinCards(next)
+    collapsed.value = cards.value.map(() => true)
     activeSub.value = null
     isLoading.value = false
   }

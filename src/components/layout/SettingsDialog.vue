@@ -393,6 +393,9 @@ function resetAll() {
               <div class="sd__about-log">
                 <p class="sd__about-log-date">2026-08-13</p>
                 <p class="sd__about-log-desc">预览版上线</p>
+                <p class="sd__about-log-date">2026-08-14</p>
+                <p class="sd__about-log-desc">修复了数据导入导致干员消失的问题</p>
+                <p class="sd__about-log-desc">预设模型换为agnes-2.5-flash</p>
               </div>
             </div>
 
