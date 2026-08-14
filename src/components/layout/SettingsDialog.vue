@@ -225,7 +225,7 @@ function resetAll() {
 
             <!-- 共享模式说明 -->
             <p v-if="!isCustomMode" class="sd__desc">
-              使用内置共享 API（agnes-2.0-flash），可识别图像。
+              使用内置共享 API（agnes-2.5-flash），可识别图像。
             </p>
 
             <!-- 自定义模式:baseUrl + apiKey + model -->
@@ -341,7 +341,7 @@ function resetAll() {
             <div class="sd__disclaimer-block">
               <h4 class="sd__disclaimer-heading">一、数据隐私与本地化</h4>
               <p class="sd__disclaimer-text">本工具完全开源，不会收集、存储、上传或传输您的任何个人信息、API密钥、聊天记录或生成内容。所有数据仅存在于您当前使用的本地设备中。</p>
-              <p class="sd__disclaimer-text">由于技术上我们完全无法接触您的数据，我们也无法应任何要求提供您本地对话的审查、删除或披露。</p>
+              <p class="sd__disclaimer-text">由于技术上完全无法接触您的数据，无法应任何要求提供您本地对话的审查、删除或披露。</p>
             </div>
 
             <div class="sd__disclaimer-block">

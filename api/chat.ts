@@ -20,7 +20,7 @@ export const config = {
 const UPSTREAM_BASE_URL = 'https://api.agnes-ai.cn/v1'
 
 /** 默认模型(前端未指定时使用) */
-const DEFAULT_MODEL = 'agnes-2.0-flash'
+const DEFAULT_MODEL = 'agnes-2.5-flash'
 
 /** 允许的跨域来源(* 表示任意,生产环境可改为具体域名) */
 const CORS_ORIGIN = '*'

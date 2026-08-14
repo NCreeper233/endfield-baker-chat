@@ -51,7 +51,7 @@ export type ApiMode = 'shared' | 'custom'
 
 /** 共享模式使用的固定配置(密钥存于 Vercel 环境变量,前端不持有) */
 export const SHARED_API_BASE_URL = '/api/chat'
-export const SHARED_API_MODEL = 'agnes-2.0-flash'
+export const SHARED_API_MODEL = 'agnes-2.5-flash'
 
 /** API 配置结构 */
 export interface ApiConfig {
