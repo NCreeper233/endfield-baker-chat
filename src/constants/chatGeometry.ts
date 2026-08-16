@@ -198,8 +198,9 @@ export const DESKTOP_GEOM: ChatGeometry = {
  * @param h 视口高
  */
 export function mobileGeometry(w: number, h: number): ChatGeometry {
-  // 视口高度兜底:键盘过渡等场景传入的 h 可能瞬时异常(0/极小),
-  // 用最小可用高度保证布局不塌缩(面板/滚动区始终在可视区域内)。
+  // 视口尺寸兜底:键盘过渡等场景传入的 w/h 可能瞬时异常(0/极小),
+  // 用最小可用尺寸保证布局不塌缩(头图缩放系数/锚点/面板始终在可视区域内)。
+  const safeW = Math.max(w, 320)
   const safeH = Math.max(h, 300)
   const padX = 12 // 消息区左右边距
   const avatarBox = 72 // 移动端头像盒(80 偏大,72 居中;我方/对方一致)
@@ -207,17 +208,17 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
   // 左右段素材原宽合计(各变体:25+440 / 19+458 / 21+451,取最大值保证任意变体可完整放下)
   const STRIP_SEGS_MAX_TOTAL_W = 477
   // 左右段优先完整等比放下:k = min(1, 视口宽 / 左右段最大总宽)
-  const stripK = Math.min(1, w / STRIP_SEGS_MAX_TOTAL_W)
+  const stripK = Math.min(1, safeW / STRIP_SEGS_MAX_TOTAL_W)
   const stripH = stripImgH * stripK // 头图占位高(左右段等比)
   const panelH = 56 // 底部输入面板高
   const scrollX = 0
   // 头部与聊天框之间留 6px 缝隙:滚动区整体下移 6px,高度相应减 6px
   const scrollY = stripH + 6
-  const scrollW = w
+  const scrollW = safeW
   const scrollH = Math.max(120, safeH - stripH - 6 - panelH)
 
   const otherAvatarX = padX
-  const mineAvatarX = w - padX - avatarBox
+  const mineAvatarX = safeW - padX - avatarBox
   // 与桌面几何同语义:
   // - other 侧气泡左缘 = 头像盒右缘 - 7.84(微压圆形头像盒的圆角外空白,视觉间距≈0)
   // - mine 侧气泡右缘 = 头像盒左缘(贴紧,与桌面 mineBubbleRight≈mineAvatarX 一致)
@@ -232,13 +233,13 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
   return {
     stripX: 0,
     stripY: 0,
-    stripW: w,
+    stripW: safeW,
     stripH,
     stripSegmented: true,
     stripImgH,
     detailX: 0,
     detailY: scrollY,
-    detailW: w,
+    detailW: safeW,
     detailH: scrollH,
     scrollX,
     scrollY,
@@ -255,19 +256,19 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
     gapCross: 26,
     gapSpeaker: 42,
     panelLeft: 0,
-    panelWidth: w,
+    panelWidth: safeW,
     panelHeight: panelH,
     panelTop,
     panelEdgeMaskH: 40,
-    panelTopDecoW: w,
+    panelTopDecoW: safeW,
     panelTopDecoH: 16,
     // 底部装饰:底边距 detail 底 13px(与桌面语义一致)
-    bottomDecoX: (w - 219) / 2,
+    bottomDecoX: (safeW - 219) / 2,
     bottomDecoY: (scrollY + scrollH) - 13 - 13,
     bottomDecoW: 219,
     bottomDecoH: 13,
     // 角落装饰:strip 右上角
-    cornerDecoX: w - 150 - 12,
+    cornerDecoX: safeW - 150 - 12,
     cornerDecoY: 12,
     emptyTop: EMPTY_TOP,
     emptyBottom: EMPTY_BOTTOM,
