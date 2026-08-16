@@ -21,6 +21,8 @@ const logs = ref<{ t: string; ev: string; info: string }[]>([])
 const now = ref('')
 /** 仅移动端视口显示(≤768px) */
 const showOverlay = ref(typeof window !== 'undefined' && window.innerWidth <= 768)
+/** 复制按钮反馈态("已复制" 1.5s) */
+const copied = ref(false)
 
 /** 记录一条事件日志(最多 30 条,最新的在最上) */
 function log(ev: string, info = '') {
@@ -71,6 +73,49 @@ function onVis() {
   log('vis', `${document.visibilityState} | ${snap()}`)
 }
 
+/** 复制兜底:clipboard API 在非 https/localhost 上下文不可用时的 textarea 方案 */
+function fallbackCopy(text: string) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+  } catch {
+    /* 忽略:复制失败时用户仍可手动长按选择文本 */
+  }
+  document.body.removeChild(ta)
+}
+
+/** 一键复制:版本标识 + 当前时间 + 实时快照 + 全部事件日志(旧→新) */
+function copyAll() {
+  const lines: string[] = []
+  lines.push(`版本: ${DIAG_VERSION}`)
+  lines.push(`时间: ${new Date().toLocaleString()}`)
+  lines.push(`快照: ${snap()}`)
+  lines.push('--- 事件日志(旧→新) ---')
+  for (let i = logs.value.length - 1; i >= 0; i--) {
+    const l = logs.value[i]
+    lines.push(`${l.t} ${l.ev} ${l.info}`)
+  }
+  const text = lines.join('\n')
+  const done = () => {
+    copied.value = true
+    setTimeout(() => (copied.value = false), 1500)
+  }
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => {
+      fallbackCopy(text)
+      done()
+    })
+  } else {
+    fallbackCopy(text)
+    done()
+  }
+}
+
 onMounted(() => {
   now.value = new Date().toLocaleString()
   log('mount', snap())
@@ -94,7 +139,10 @@ onBeforeUnmount(() => {
 <template>
   <div v-if="showOverlay" class="dbg">
     <div class="dbg__bar" @click="expanded = !expanded">
-      {{ DIAG_VERSION }} · {{ now }}
+      <span>{{ DIAG_VERSION }} · {{ now }}</span>
+      <button class="dbg__copy" type="button" @click.stop="copyAll">
+        {{ copied ? '已复制✓' : '复制' }}
+      </button>
       <span class="dbg__hint">{{ expanded ? '收起' : '展开' }}</span>
     </div>
     <div v-if="expanded" class="dbg__body">
@@ -131,9 +179,27 @@ onBeforeUnmount(() => {
   pointer-events: auto;
 
   &__bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     white-space: nowrap;
     cursor: pointer;
     color: #ff8;
+  }
+
+  &__copy {
+    padding: 1px 8px;
+    border: 1px solid #666;
+    border-radius: 8px;
+    background: #222;
+    color: #8cf;
+    font-size: 10px;
+    line-height: 1.4;
+    cursor: pointer;
+
+    &:active {
+      background: #333;
+    }
   }
 
   &__hint {
