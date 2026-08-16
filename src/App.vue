@@ -506,9 +506,12 @@ function onChatNew() {
 // 文档流布局(非 fixed):高度 = 几何布局高度(visualViewport 驱动,键盘弹出时
 // 自动收缩,输入面板始终贴在可视区底部),从根源绕开 Chromium 内核(夸克等)
 // 在软键盘场景对 fixed 容器内绝对定位元素的合成残留 bug。
+// z-index: 1 必须显式设置:AppBackground 是 fixed z-index: 0 的定位元素,
+// 会盖住 z-auto 的文档流元素(背景层遮住聊天区 = 黑屏)。
 .m-chat {
   position: relative;
   width: 100%;
+  z-index: 1;
   background: transparent;
 
   // 返回列表按钮:实心圆 SVG,位于头部右侧垂直居中,
