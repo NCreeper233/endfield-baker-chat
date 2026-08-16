@@ -84,23 +84,21 @@ provide('enterMobileChat', () => {
   if (isMobile.value) mobileView.value = 'chat'
 })
 
-// ---- 聊天区可见性自愈 -------------------------------------------------------
-// Edge/夸克等 Chromium 内核在软键盘弹出/收起时,对 fixed 容器内绝对定位元素
-// 存在合成层残留 bug:元素布局值正常但渲染丢失(页面只剩背景+返回按钮)。
-// 方案:键盘/视口变化后自检 .chat-scroll 是否在可视区域内,异常则通过
-// chatEpoch 变更强制重挂载 ChatArea,触发浏览器重新合成,黑屏自愈。
+// ---- 聊天区渲染自愈 ---------------------------------------------------------
+// Edge/夸克等 Chromium 内核在软键盘弹出/收起后,偶发"合成残留":布局值正常
+// 但聊天区内容不渲染(页面只剩背景+返回按钮)。
+// 布局根因已另作处理(见 .m-chat:容器高度随可视区收缩 + 不强制合成层,
+// 输入面板始终在可视区内,浏览器不会平移视口,合成 bug 不触发),
+// 此处仅作兜底:键盘/视口变化后自检 .chat-scroll 是否在可视区域内,
+// 异常则对 .m-chat 做一次轻量重光栅化(临时加/删强制合成层类,两帧内完成;
+// 不重建 DOM、不触碰输入焦点 —— 不会导致键盘闪退)。
 //
 // 误判防护(避免"键盘闪退"):
 //   1. 键盘压缩中(innerHeight < 几何高度)跳过检测——布局本来就按小视口排布
 //   2. rAF 后读数,确保渲染稳定
-//   3. 连续误判保护:同一次键盘会话最多自愈 3 次,防止无限重挂载循环
-//   4. 重挂载后恢复输入焦点(若之前聚焦在输入框),键盘不因重挂载收起
-const chatEpoch = ref(0)
+//   3. 连续误判保护:同一次键盘会话最多自愈 3 次
 let healTimer: number | null = null
 let healCount = 0
-
-/** 上次自愈触发前是否聚焦在聊天输入框(重挂载后恢复焦点用) */
-let wasChatInputFocused = false
 
 function scheduleChatHeal(focusDelay: boolean) {
   if (!isMobile.value || mobileView.value !== 'chat') return
@@ -111,6 +109,19 @@ function scheduleChatHeal(focusDelay: boolean) {
     healTimer = null
     checkChatVisible()
   }, delay)
+}
+
+/** 轻量自愈:强制 .m-chat 子树重新光栅化(加一帧合成层再移除),不重建 DOM */
+function nudgeChatRepaint() {
+  const chat = document.querySelector<HTMLElement>('.m-chat')
+  if (!chat) return
+  chat.classList.add('m-chat--repaint')
+  // 两帧后移除:让合成层真正创建一次再销毁,触发完整重光栅化
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      chat.classList.remove('m-chat--repaint')
+    })
+  })
 }
 
 function checkChatVisible() {
@@ -140,34 +151,22 @@ function checkChatVisible() {
         return
       }
       healCount++
-      console.warn('[App] 检测到聊天区不可见,强制重挂载自愈', {
+      console.warn('[App] 检测到聊天区渲染异常,强制重光栅化自愈', {
         rect: { l: r.left, t: r.top, w: r.width, h: r.height },
         vw,
         vh,
       })
-      chatEpoch.value++
-      // 重挂载后恢复输入焦点(若之前聚焦在输入框),避免键盘闪退
-      if (wasChatInputFocused) {
-        requestAnimationFrame(() => {
-          const field = document.querySelector<HTMLElement>('.m-chat .chat-input__field')
-          field?.focus()
-        })
-      }
+      nudgeChatRepaint()
     }
   })
 }
 
 /** 键盘/视口变化监听(自愈触发源):输入聚焦/失焦 + visualViewport 变化 */
 function onHealSignal(event?: Event) {
-  const type = event?.type
-  // 记录输入框焦点状态(重挂载后恢复用)
-  const t = event?.target as Node | null
-  wasChatInputFocused =
-    !!t && t instanceof Element && !!t.closest('.chat-input')
   // 键盘收起(focusout) = 一次键盘会话结束,重置自愈计数
-  if (type === 'focusout') healCount = 0
+  if (event?.type === 'focusout') healCount = 0
   // focusin(键盘弹出)延迟加长,避免布局过渡期误判
-  scheduleChatHeal(type === 'focusin')
+  scheduleChatHeal(event?.type === 'focusin')
 }
 
 /** 返回列表:切回列表视图并清除选中(回到未选中任何对话/角色的初始状态) */
@@ -184,6 +183,20 @@ const mobileGeom = computed<ChatGeometry>(() =>
 /** 返回按钮(51px 圆形)在头部内的垂直居中偏移(+1px 视觉微调) */
 const mBackTop = computed(() =>
   mobileGeom.value.stripSegmented ? (mobileGeom.value.stripH - 51) / 2 + 1 : 6,
+)
+
+/**
+ * 移动端聊天视图高度(px)= 面板贴底位置 + 面板高
+ *
+ * 容器高度跟随"当前可视高度"(visualViewport 驱动)收缩/恢复:
+ * 键盘弹出时输入面板始终贴在可视区底部,浏览器无需平移视口去
+ * 露出输入框 —— 从根源避开 Chromium 内核(Edge/夸克)在软键盘
+ * 场景对 fixed 容器合成层的光栅残留 bug(内容整块消失)。
+ */
+const mChatHeight = computed(() =>
+  mobileGeom.value.stripSegmented
+    ? mobileGeom.value.panelTop + mobileGeom.value.panelHeight
+    : 0,
 )
 
 /**
@@ -287,8 +300,10 @@ function onChatNew() {
     </div>
     <!-- 聊天视图:直接复用桌面端 ChatArea 组件与样式。
          布局由几何层(chatGeometry)按视口驱动;输入面板贴底。
-         fixed + 合成层 + 自愈,移动端输入框为原生 textarea -->
-    <div v-else class="m-chat">
+         容器高度 = 当前可视高度(visualViewport 驱动,键盘弹出自动收缩),
+         不强制合成层;渲染异常时由轻量重光栅化自愈(见 checkChatVisible)。
+         移动端输入框为原生 textarea -->
+    <div v-else class="m-chat" :style="{ height: mChatHeight + 'px' }">
       <!-- 返回列表按钮:白色圆形 SVG(源自 baker-maker 任务面板装饰按钮样式),
            位于头部右侧垂直居中 -->
       <button
@@ -321,8 +336,7 @@ function onChatNew() {
           />
         </svg>
       </button>
-      <!-- 自愈重挂载:chatEpoch 变化时强制重建 ChatArea(修复 Chromium 键盘合成残留) -->
-      <ChatArea :key="chatEpoch" @open-settings="settingsOpen = true" />
+      <ChatArea @open-settings="settingsOpen = true" />
     </div>
   </template>
 
@@ -495,18 +509,26 @@ function onChatNew() {
 }
 
 // ---- 移动端聊天视图 --------------------------------------------------------
-// fixed 全屏 + 强制合成层(规避 Chromium 内核键盘合成残留 bug) + 自愈兜底。
+// fixed 顶部锚定 + 高度跟随可视区(visualViewport 驱动,JS 内联注入):
+// 键盘弹出时容器收缩、输入面板始终贴可视区底,浏览器无需平移视口,
+// 从根源避开 Chromium 内核(Edge/夸克)软键盘场景的合成残留 bug。
+// 注意:此容器不强制合成层(will-change/translateZ 会加剧该 bug)。
 // 移动端输入框用原生 textarea(ChatInput 分支),绕开夸克等对 contenteditable
-// 的焦点 bug。
+// 的焦点 bug。渲染异常时由 JS 的 .m-chat--repaint 轻量自愈(见 checkChatVisible)。
 .m-chat {
   position: fixed;
-  inset: 0;
+  left: 0;
+  top: 0;
+  width: 100%;
   z-index: 110;
   background: transparent;
-  // 强制创建合成层:规避 Chromium 内核(Edge/夸克)在软键盘弹出/收起时
-  // 对 fixed 容器内绝对定位元素的合成残留 bug(黑屏只剩背景)
-  transform: translateZ(0);
-  will-change: transform;
+
+  // 轻量自愈标记(JS 在两帧内加/删):临时强制合成层再移除,
+  // 触发浏览器对聊天区子树完整重光栅化(修复软键盘后的合成残留)。
+  // 只影响渲染,不重建 DOM、不触碰输入焦点(键盘不闪退)。
+  &--repaint {
+    transform: translateZ(0);
+  }
 
   // 返回列表按钮:实心圆 SVG,位于头部右侧垂直居中,
   // 层级高于头图(strip z1)与滚动区
