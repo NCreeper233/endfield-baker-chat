@@ -23,6 +23,8 @@ export { width as viewportWidth, height as viewportHeight, isMobile as isMobileV
 
 let raf = 0
 let activeCount = 0
+/** 高度轮询定时器(兜底 resize 事件丢失) */
+let checkTimer: number | null = null
 
 /**
  * 视口高度有效下限(px)
@@ -44,6 +46,48 @@ function update() {
   isMobile.value = window.innerWidth <= MOBILE_BREAKPOINT
 }
 
+/**
+ * 定时轮询兜底:部分浏览器/WebView 在软键盘收起后不触发 resize
+ * (或只触发一次异常值),布局会卡在键盘弹出时的高度。
+ * 每 500ms 比对 innerHeight 与当前值,发现有效差异即同步,
+ * 保证任何浏览器最终都收敛到正确布局。
+ */
+function startPolling() {
+  if (checkTimer !== null) return
+  checkTimer = window.setInterval(() => {
+    const h = window.innerHeight
+    if (h >= MIN_VALID_HEIGHT && Math.abs(h - height.value) > 1) {
+      update()
+    }
+  }, 500)
+}
+
+function stopPolling() {
+  if (checkTimer !== null) {
+    clearInterval(checkTimer)
+    checkTimer = null
+  }
+}
+
+/** 失焦刷新延迟(ms):等待软键盘收起动画结束(约 250-300ms)后再读视口尺寸 */
+const FOCUSOUT_DELAY = 350
+/** 失焦刷新定时器句柄 */
+let focusTimer: number | null = null
+
+/**
+ * 失焦兜底:输入框失焦(软键盘收起)后,等待键盘动画结束再强制刷新一次视口尺寸,
+ * 兜住"键盘收起不触发 resize"的浏览器;同时复位可能被键盘滚动过的文档,
+ * 避免 iOS 上 fixed 元素残留错位。定时轮询(startPolling)继续兜底极端场景。
+ */
+function onFocusOut() {
+  if (focusTimer !== null) clearTimeout(focusTimer)
+  focusTimer = window.setTimeout(() => {
+    focusTimer = null
+    update()
+    window.scrollTo(0, 0)
+  }, FOCUSOUT_DELAY)
+}
+
 function onResize() {
   cancelAnimationFrame(raf)
   raf = requestAnimationFrame(update)
@@ -60,6 +104,9 @@ export function useMobile() {
     if (activeCount === 1) {
       update()
       window.addEventListener('resize', onResize)
+      // 兜底:轮询同步 + 失焦刷新(resize 事件丢失场景)
+      startPolling()
+      document.addEventListener('focusout', onFocusOut)
     }
   })
 
@@ -67,6 +114,9 @@ export function useMobile() {
     activeCount = Math.max(0, activeCount - 1)
     if (activeCount === 0) {
       window.removeEventListener('resize', onResize)
+      document.removeEventListener('focusout', onFocusOut)
+      stopPolling()
+      if (focusTimer !== null) clearTimeout(focusTimer)
       cancelAnimationFrame(raf)
       raf = 0
     }
