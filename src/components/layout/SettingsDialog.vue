@@ -503,6 +503,7 @@ function onBgReset() {
               <h4 class="sd__about-heading">更新日志</h4>
               <div class="sd__about-log">
                 <p class="sd__about-log-date">2026-08-16</p>
+                <p class="sd__about-log-desc">t1</p>
                 <p class="sd__about-log-desc">优化移动端界面操作体验</p>
                 <p class="sd__about-log-date">2026-08-14</p>
                 <p class="sd__about-log-desc">修复了数据导入导致干员消失的问题</p>
