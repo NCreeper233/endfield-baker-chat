@@ -186,13 +186,6 @@ const mBackTop = computed(() =>
   mobileGeom.value.stripSegmented ? (mobileGeom.value.stripH - 51) / 2 + 1 : 6,
 )
 
-/** 移动端聊天视图高度(px)= 面板贴底位置 + 面板高(文档流布局,随键盘动态收缩) */
-const mChatHeight = computed(() =>
-  mobileGeom.value.stripSegmented
-    ? mobileGeom.value.panelTop + mobileGeom.value.panelHeight
-    : 0,
-)
-
 /**
  * 右上角工具栏是否可见(E 键切换)
  *
@@ -293,10 +286,9 @@ function onChatNew() {
       </div>
     </div>
     <!-- 聊天视图:直接复用桌面端 ChatArea 组件与样式。
-         布局由几何层(chatGeometry)按视口驱动:字号不变、气泡流式换行、
-         输入面板贴底。文档流布局(非 fixed)+ visualViewport 高度驱动,
-         彻底绕开 Chromium 内核(夸克等)在软键盘场景对 fixed 容器的合成 bug -->
-    <div v-else class="m-chat" :style="{ height: mChatHeight + 'px' }">
+         布局由几何层(chatGeometry)按视口驱动;输入面板贴底。
+         fixed + 合成层 + 自愈,移动端输入框为原生 textarea -->
+    <div v-else class="m-chat">
       <!-- 返回列表按钮:白色圆形 SVG(源自 baker-maker 任务面板装饰按钮样式),
            位于头部右侧垂直居中 -->
       <button
@@ -503,16 +495,18 @@ function onChatNew() {
 }
 
 // ---- 移动端聊天视图 --------------------------------------------------------
-// 文档流布局(非 fixed):高度 = 几何布局高度(visualViewport 驱动,键盘弹出时
-// 自动收缩,输入面板始终贴在可视区底部),从根源绕开 Chromium 内核(夸克等)
-// 在软键盘场景对 fixed 容器内绝对定位元素的合成残留 bug。
-// z-index: 1 必须显式设置:AppBackground 是 fixed z-index: 0 的定位元素,
-// 会盖住 z-auto 的文档流元素(背景层遮住聊天区 = 黑屏)。
+// fixed 全屏 + 强制合成层(规避 Chromium 内核键盘合成残留 bug) + 自愈兜底。
+// 移动端输入框用原生 textarea(ChatInput 分支),绕开夸克等对 contenteditable
+// 的焦点 bug。
 .m-chat {
-  position: relative;
-  width: 100%;
-  z-index: 1;
+  position: fixed;
+  inset: 0;
+  z-index: 110;
   background: transparent;
+  // 强制创建合成层:规避 Chromium 内核(Edge/夸克)在软键盘弹出/收起时
+  // 对 fixed 容器内绝对定位元素的合成残留 bug(黑屏只剩背景)
+  transform: translateZ(0);
+  will-change: transform;
 
   // 返回列表按钮:实心圆 SVG,位于头部右侧垂直居中,
   // 层级高于头图(strip z1)与滚动区
