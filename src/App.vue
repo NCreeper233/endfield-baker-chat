@@ -89,14 +89,34 @@ provide('enterMobileChat', () => {
 // 存在合成层残留 bug:元素布局值正常但渲染丢失(页面只剩背景+返回按钮)。
 // 方案:键盘/视口变化后自检 .chat-scroll 是否在可视区域内,异常则通过
 // chatEpoch 变更强制重挂载 ChatArea,触发浏览器重新合成,黑屏自愈。
+//
+// 误判防护(避免"键盘闪退"):
+//   1. 键盘压缩中(innerHeight < 几何高度)跳过检测——布局本来就按小视口排布
+//   2. rAF 后读数,确保渲染稳定
+//   3. 连续误判保护:同一次键盘会话最多自愈 3 次,防止无限重挂载循环
+//   4. 重挂载后恢复输入焦点(若之前聚焦在输入框),键盘不因重挂载收起
 const chatEpoch = ref(0)
 let healTimer: number | null = null
+let healCount = 0
 
-function scheduleChatHeal() {
+/** 上次自愈触发前是否聚焦在聊天输入框(重挂载后恢复焦点用) */
+let wasChatInputFocused = false
+
+function scheduleChatHeal(focusDelay: boolean) {
   if (!isMobile.value || mobileView.value !== 'chat') return
   if (healTimer !== null) clearTimeout(healTimer)
+  // 键盘弹出(focusin)时布局在过渡,延迟加长;收起(focusout)时较短
+  const delay = focusDelay ? 1200 : 600
   healTimer = window.setTimeout(() => {
     healTimer = null
+    checkChatVisible()
+  }, delay)
+}
+
+function checkChatVisible() {
+  // 键盘压缩中:innerHeight 明显小于几何高度 → 键盘还开着,跳过检测
+  if (window.innerHeight < height.value - 30) return
+  requestAnimationFrame(() => {
     const el = document.querySelector('.m-chat .chat-scroll') as HTMLElement | null
     if (!el) return
     const r = el.getBoundingClientRect()
@@ -110,19 +130,44 @@ function scheduleChatHeal() {
       r.top >= -10 &&
       r.bottom <= vh + 10
     if (!visible) {
+      // 连续误判保护:同一次键盘会话最多自愈 3 次
+      if (healCount >= 3) {
+        console.warn('[App] 聊天区不可见且自愈已达上限,停止尝试', {
+          rect: { l: r.left, t: r.top, w: r.width, h: r.height },
+          vw,
+          vh,
+        })
+        return
+      }
+      healCount++
       console.warn('[App] 检测到聊天区不可见,强制重挂载自愈', {
         rect: { l: r.left, t: r.top, w: r.width, h: r.height },
         vw,
         vh,
       })
       chatEpoch.value++
+      // 重挂载后恢复输入焦点(若之前聚焦在输入框),避免键盘闪退
+      if (wasChatInputFocused) {
+        requestAnimationFrame(() => {
+          const field = document.querySelector<HTMLElement>('.m-chat .chat-input__field')
+          field?.focus()
+        })
+      }
     }
-  }, 600)
+  })
 }
 
 /** 键盘/视口变化监听(自愈触发源):输入聚焦/失焦 + visualViewport 变化 */
-function onHealSignal() {
-  scheduleChatHeal()
+function onHealSignal(event?: Event) {
+  const type = event?.type
+  // 记录输入框焦点状态(重挂载后恢复用)
+  const t = event?.target as Node | null
+  wasChatInputFocused =
+    !!t && t instanceof Element && !!t.closest('.chat-input')
+  // 键盘收起(focusout) = 一次键盘会话结束,重置自愈计数
+  if (type === 'focusout') healCount = 0
+  // focusin(键盘弹出)延迟加长,避免布局过渡期误判
+  scheduleChatHeal(type === 'focusin')
 }
 
 /** 返回列表:切回列表视图并清除选中(回到未选中任何对话/角色的初始状态) */
