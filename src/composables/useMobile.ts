@@ -36,46 +36,34 @@ let checkTimer: number | null = null
  */
 const MIN_VALID_SIZE = 100
 
-/**
- * 读取布局基准高度(overlays 门控的 visualViewport)
- *
- * 移动端软键盘有两种模式:
- *   - resizes-content(多数浏览器,含 vivo/Edge):innerHeight 随键盘压缩,
- *     visualViewport.height 与其一致 → 返回 innerHeight,与旧行为完全一致
- *   - overlays-content(夸克等):innerHeight 不变,只有 visualViewport.height
- *     明显小于 innerHeight(键盘覆盖),此时 vv 才是真实可视高度
- * 门控保证:resizes 模式/无键盘场景数值与 innerHeight 逐帧一致,零行为差异;
- * 仅键盘覆盖时切换为 vv,面板才能贴到键盘上方。不支持 vv 时回退 innerHeight。
- */
-function readHeight(): number {
-  const vv = window.visualViewport
-  const ih = window.innerHeight
-  if (!vv || vv.height <= 0) return ih
-  return vv.height < ih - 20 ? Math.round(vv.height) : ih
-}
-
 function update() {
   const w = window.innerWidth
-  const h = readHeight()
+  const h = window.innerHeight
   // 键盘过渡瞬间的异常尺寸:不更新,保留上一次有效值
   if (w >= MIN_VALID_SIZE && h >= MIN_VALID_SIZE) {
     width.value = w
     height.value = h
   }
-  isMobile.value = window.innerWidth <= MOBILE_BREAKPOINT
+  // isMobile 只在宽度有效时更新:键盘弹出/收起动画期间部分浏览器会瞬时
+  // 报告 innerWidth = 0/极小值,若此时刷新判定会翻转移动/桌面分支,
+  // 导致聊天视图整棵卸载(textarea 销毁 → 键盘闪退、内容消失)。
+  // 异常区间内保持上一次判定,等稳定值再更新。
+  if (w >= MIN_VALID_SIZE) {
+    isMobile.value = w <= MOBILE_BREAKPOINT
+  }
 }
 
 /**
  * 定时轮询兜底:部分浏览器/WebView 在软键盘收起后不触发 resize
  * (或只触发一次异常值),布局会卡在键盘弹出时的高度。
- * 每 500ms 比对可视高度与当前值,发现有效差异即同步,
+ * 每 500ms 比对 innerHeight 与当前值,发现有效差异即同步,
  * 保证任何浏览器最终都收敛到正确布局。
  */
 function startPolling() {
   if (checkTimer !== null) return
   checkTimer = window.setInterval(() => {
     const w = window.innerWidth
-    const h = readHeight()
+    const h = window.innerHeight
     if (
       w >= MIN_VALID_SIZE &&
       h >= MIN_VALID_SIZE &&
@@ -128,10 +116,6 @@ export function useMobile() {
     if (activeCount === 1) {
       update()
       window.addEventListener('resize', onResize)
-      // visualViewport 变化(overlays 键盘模式 innerHeight 不变,必须监听它;
-      // scroll 兜住浏览器为露出输入框而平移可视区的场景)
-      window.visualViewport?.addEventListener('resize', onResize)
-      window.visualViewport?.addEventListener('scroll', onResize)
       // 兜底:轮询同步 + 失焦刷新(resize 事件丢失场景)
       startPolling()
       document.addEventListener('focusout', onFocusOut)
@@ -142,8 +126,6 @@ export function useMobile() {
     activeCount = Math.max(0, activeCount - 1)
     if (activeCount === 0) {
       window.removeEventListener('resize', onResize)
-      window.visualViewport?.removeEventListener('resize', onResize)
-      window.visualViewport?.removeEventListener('scroll', onResize)
       document.removeEventListener('focusout', onFocusOut)
       stopPolling()
       if (focusTimer !== null) clearTimeout(focusTimer)
