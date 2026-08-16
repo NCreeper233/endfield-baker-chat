@@ -20,6 +20,7 @@ import { computed, inject, onMounted, onUnmounted, ref, toValue } from 'vue'
 import {
   chatGeometryKey,
   globalChatGeometry,
+  DESKTOP_GEOM,
   type ChatGeometry,
 } from '../../constants/chatGeometry'
 import { LOADING_DOT_COLOR_OTHER, LOADING_DOT_COLOR_MINE } from '../../constants/colors'
@@ -35,8 +36,10 @@ const props = defineProps<{
   top: number
 }>()
 
-/** 注入几何(加载气泡尺寸/圆角;默认全局,导出模式由 ChatExportStage 覆盖) */
-const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+/** 注入几何(加载气泡尺寸/圆角;默认全局,导出模式由 ChatExportStage 覆盖)。
+ * 注意:inject 必须在 setup 期间立即调用(见 ChatArea 同款注释)。 */
+const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
+const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
 /** rect 目标宽高(px):几何层提供(桌面 100×单行高,移动端更小) */
 const RECT_W = computed(() => geom.value.loadingRectW)

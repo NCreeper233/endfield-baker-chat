@@ -21,6 +21,7 @@ import { useMobile } from './composables/useMobile'
 import {
   chatGeometryKey,
   globalChatGeometry,
+  DESKTOP_GEOM,
   type ChatGeometry,
 } from './constants/chatGeometry'
 import { MATERIALS } from './constants/materials'
@@ -37,11 +38,15 @@ useDebugMode()
 // ChatArea 子树 DOM 消失,疑似渲染期异常。此处捕获子组件渲染/生命周期
 // 错误写入 window.__dshVueErr,由 DebugOverlay 浮层实时显示,真机测试时
 // 直接看到崩溃原因,修复后删除。
-onErrorCaptured((err, _instance, info) => {
+onErrorCaptured((err, instance, info) => {
   const msg = err instanceof Error ? err.message : String(err)
-  console.error('[App] 渲染错误捕获:', msg, info)
+  const stack = err instanceof Error ? (err.stack ?? '').split('\n').slice(0, 3).join(' | ') : ''
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const comp = String((instance as any)?.type?.name ?? (instance as any)?.type ?? '?')
+  const detail = `${msg} | ${info} | ${comp} | ${stack}`.slice(0, 300)
+  console.error('[App] 渲染错误捕获:', detail)
   try {
-    ;(window as unknown as { __dshVueErr?: string }).__dshVueErr = `${msg} | ${info}`.slice(0, 240)
+    ;(window as unknown as { __dshVueErr?: string }).__dshVueErr = detail
   } catch {
     /* 忽略写入失败 */
   }
@@ -193,10 +198,11 @@ function onMobileBack() {
   chatStore.clearSelection()
 }
 
-/** 移动端聊天区几何(返回按钮垂直对齐头部用;桌面/导出模式由 ChatExportStage 覆盖) */
-const mobileGeom = computed<ChatGeometry>(() =>
-  toValue(inject(chatGeometryKey, globalChatGeometry)),
-)
+/** 移动端聊天区几何(返回按钮垂直对齐头部用;桌面/导出模式由 ChatExportStage 覆盖)。
+ * 注意:inject 必须在 setup 期间立即调用(此时 currentInstance 必然存在);
+ * 在 computed getter 内惰性调用会在组件上下文之外求值时返回 undefined。 */
+const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
+const mobileGeom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
 /** 返回按钮(51px 圆形)在头部内的垂直居中偏移(+1px 视觉微调) */
 const mBackTop = computed(() =>

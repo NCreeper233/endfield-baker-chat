@@ -19,6 +19,7 @@ import { MATERIALS } from '../../constants/materials'
 import {
   chatGeometryKey,
   globalChatGeometry,
+  DESKTOP_GEOM,
   type ChatGeometry,
 } from '../../constants/chatGeometry'
 import { CHAT_IMAGE } from '../../constants/design'
@@ -36,8 +37,10 @@ const emit = defineEmits<{
   (e: 'open-settings'): void
 }>()
 
-/** 注入几何(面板位置/尺寸;默认全局,导出模式由 ChatExportStage 覆盖) */
-const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+/** 注入几何(面板位置/尺寸;默认全局,导出模式由 ChatExportStage 覆盖)。
+ * 注意:inject 必须在 setup 期间立即调用(见 ChatArea 同款注释)。 */
+const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
+const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
 /** 是否移动端输入(几何层 stripSegmented 仅移动端为 true):移动端用原生 textarea
  * 替代 contenteditable——夸克等魔改内核浏览器对 contenteditable 的焦点支持差,

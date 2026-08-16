@@ -28,6 +28,7 @@ import {
 import {
   chatGeometryKey,
   globalChatGeometry,
+  DESKTOP_GEOM,
   type ChatGeometry,
 } from '../constants/chatGeometry'
 import { bubbleSvgWidth, type BubbleBox } from '../utils/measure'
@@ -81,8 +82,14 @@ export function useChatRows(options: ChatRowsOptions) {
   const chatStore = useChatStore()
   const { playedMessages, isLoading, loadingSide, pendingAiSpeaker } = storeToRefs(chatStore)
 
-  /** 注入几何(默认全局;导出模式由 ChatExportStage 覆盖为桌面几何) */
-  const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+  /** 注入几何(默认全局;导出模式由 ChatExportStage 覆盖为桌面几何)。
+   * 注意:必须在 setup 期间立即 inject(此时 currentInstance 必然存在)。
+   * 若在 computed getter 内惰性调用 inject,当 getter 在组件上下文之外
+   * (调度 flush 边缘/异步回调)求值时,inject 返回 undefined 且默认值被忽略,
+   * 会导致 geom 为 undefined → 渲染期抛异常 → ChatArea 子树崩溃(移动端
+   * 键盘弹出/收起触发重渲染时必现,表现为主界面消失只剩背景)。 */
+  const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
+  const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
   /** 当前对话的对话名(旧数据消息无 speakerName 时的身份回退,未选中时为空串) */
   const activeConvName = computed(() =>

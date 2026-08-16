@@ -30,6 +30,7 @@ import { CHAT_FRAME } from '../../constants/design'
 import {
   chatGeometryKey,
   globalChatGeometry,
+  DESKTOP_GEOM,
   type ChatGeometry,
 } from '../../constants/chatGeometry'
 import { MATERIALS } from '../../constants/materials'
@@ -46,8 +47,11 @@ import ChatInput from './ChatInput.vue'
 
 const chatStore = useChatStore()
 
-/** 注入几何(默认全局:桌面 = 设计稿,移动端 = 视口;导出模式由 ChatExportStage 覆盖为桌面) */
-const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+/** 注入几何(默认全局:桌面 = 设计稿,移动端 = 视口;导出模式由 ChatExportStage 覆盖为桌面)。
+ * 注意:inject 必须在 setup 期间立即调用;在 computed getter 内惰性调用会在
+ * 组件上下文之外求值时返回 undefined(键盘重渲染时触发,导致子树崩溃)。 */
+const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
+const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
 /**
  * 导出模式(离屏截图表现层)

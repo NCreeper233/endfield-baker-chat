@@ -27,6 +27,7 @@ import { type BubbleBox, bubbleSvgWidth, BUBBLE_FONT } from '../../utils/measure
 import {
   chatGeometryKey,
   globalChatGeometry,
+  DESKTOP_GEOM,
   type ChatGeometry,
 } from '../../constants/chatGeometry'
 import { BUBBLE_TEXT_MINE, BUBBLE_TEXT_OTHER } from '../../constants/colors'
@@ -58,8 +59,10 @@ const props = defineProps<{
   prevRect?: { w: number; h: number }
 }>()
 
-/** 注入几何(气泡字号/边距/圆角;默认全局,导出模式由 ChatExportStage 覆盖) */
-const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+/** 注入几何(气泡字号/边距/圆角;默认全局,导出模式由 ChatExportStage 覆盖)。
+ * 注意:inject 必须在 setup 期间立即调用(见 ChatArea 同款注释)。 */
+const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
+const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
 /** 当前 rect 尺寸(响应式,过渡用)
  *

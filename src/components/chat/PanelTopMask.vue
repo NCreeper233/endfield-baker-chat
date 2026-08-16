@@ -14,6 +14,7 @@ import { computed, inject, toValue } from 'vue'
 import {
   chatGeometryKey,
   globalChatGeometry,
+  DESKTOP_GEOM,
   type ChatGeometry,
 } from '../../constants/chatGeometry'
 
@@ -22,8 +23,10 @@ const props = defineProps<{
   top: number
 }>()
 
-/** 注入几何(面板位置/遮罩高;默认全局,导出模式由 ChatExportStage 覆盖) */
-const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+/** 注入几何(面板位置/遮罩高;默认全局,导出模式由 ChatExportStage 覆盖)。
+ * 注意:inject 必须在 setup 期间立即调用(见 ChatArea 同款注释)。 */
+const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
+const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
 /** 遮罩横条坐标:与面板同宽,底边对齐面板上边缘,向上延展遮罩高 */
 const maskStyle = computed(() => ({

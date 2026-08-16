@@ -11,6 +11,7 @@ import { computed, inject, onMounted, onUnmounted, ref, toValue } from 'vue'
 import {
   chatGeometryKey,
   globalChatGeometry,
+  DESKTOP_GEOM,
   type ChatGeometry,
 } from '../../constants/chatGeometry'
 import {
@@ -44,8 +45,10 @@ const emit = defineEmits<{
   'avatar-click': [row: ChatRow]
 }>()
 
-/** 注入几何(头像盒尺寸等;默认全局,导出模式由 ChatExportStage 覆盖) */
-const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+/** 注入几何(头像盒尺寸等;默认全局,导出模式由 ChatExportStage 覆盖)。
+ * 注意:inject 必须在 setup 期间立即调用(见 ChatArea 同款注释)。 */
+const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
+const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
 /**
  * 图片消息展开动画
