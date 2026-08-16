@@ -87,16 +87,14 @@ provide('enterMobileChat', () => {
 // ---- 聊天区渲染自愈 ---------------------------------------------------------
 // Edge/夸克等 Chromium 内核在软键盘弹出/收起后,偶发"合成残留":布局值正常
 // 但聊天区内容不渲染(页面只剩背景+返回按钮)。
-// 布局根因已另作处理(见 .m-chat:容器高度随可视区收缩 + 不强制合成层,
-// 输入面板始终在可视区内,浏览器不会平移视口,合成 bug 不触发),
-// 此处仅作兜底:键盘/视口变化后自检 .chat-scroll 是否在可视区域内,
-// 异常则对 .m-chat 做一次轻量重光栅化(临时加/删强制合成层类,两帧内完成;
-// 不重建 DOM、不触碰输入焦点 —— 不会导致键盘闪退)。
+// 方案(事件驱动,不依赖可见性检测 —— 布局值正常时检测不到绘制级故障):
+// 键盘/视口变化稳定后,对 .m-chat 做一次轻量重光栅化:临时摘除强制合成层
+// 两帧再恢复(层销毁→重建→完整重光栅化)。不重建 DOM、不触碰输入焦点,
+// 不会导致键盘闪退(旧方案重挂载 ChatArea 会销毁输入框 → 键盘闪退)。
 //
-// 误判防护(避免"键盘闪退"):
-//   1. 键盘压缩中(innerHeight < 几何高度)跳过检测——布局本来就按小视口排布
-//   2. rAF 后读数,确保渲染稳定
-//   3. 连续误判保护:同一次键盘会话最多自愈 3 次
+// 触发源:输入聚焦/失焦 + visualViewport/window resize/scroll。键盘动画期间
+// 事件连续触发,定时器持续重置,自然落在动画结束后的稳定时刻。
+// 防护:同一次键盘会话最多自愈 3 次(focusout 重置),避免无限循环。
 let healTimer: number | null = null
 let healCount = 0
 
@@ -104,24 +102,38 @@ function scheduleChatHeal(focusDelay: boolean) {
   if (!isMobile.value || mobileView.value !== 'chat') return
   if (healTimer !== null) clearTimeout(healTimer)
   // 键盘弹出(focusin)时布局在过渡,延迟加长;收起(focusout)时较短
-  const delay = focusDelay ? 1200 : 600
+  const delay = focusDelay ? 1000 : 600
   healTimer = window.setTimeout(() => {
     healTimer = null
-    checkChatVisible()
+    healChatArea()
   }, delay)
 }
 
-/** 轻量自愈:强制 .m-chat 子树重新光栅化(加一帧合成层再移除),不重建 DOM */
+/** 轻量自愈:强制 .m-chat 子树重新光栅化(摘除合成层两帧再恢复),不重建 DOM */
 function nudgeChatRepaint() {
   const chat = document.querySelector<HTMLElement>('.m-chat')
   if (!chat) return
   chat.classList.add('m-chat--repaint')
-  // 两帧后移除:让合成层真正创建一次再销毁,触发完整重光栅化
+  // 两帧后恢复:让合成层销毁一次再重建,触发完整重光栅化
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       chat.classList.remove('m-chat--repaint')
     })
   })
+}
+
+/** 键盘/视口变化稳定后执行自愈 */
+function healChatArea() {
+  if (healCount >= 3) {
+    console.warn('[App] 聊天区自愈已达上限,停止尝试')
+    return
+  }
+  healCount++
+  // 事件驱动自愈是常规操作(每次键盘弹出/收起各一次),非异常,仅记录
+  console.log('[App] 键盘/视口变化后强制聊天区重光栅化自愈')
+  nudgeChatRepaint()
+  // 布局异常(而非渲染异常)兜底:自愈后仍做一次可见性检测
+  checkChatVisible()
 }
 
 function checkChatVisible() {
@@ -151,7 +163,7 @@ function checkChatVisible() {
         return
       }
       healCount++
-      console.warn('[App] 检测到聊天区渲染异常,强制重光栅化自愈', {
+      console.warn('[App] 检测到聊天区不可见,强制重光栅化自愈', {
         rect: { l: r.left, t: r.top, w: r.width, h: r.height },
         vw,
         vh,
@@ -161,7 +173,7 @@ function checkChatVisible() {
   })
 }
 
-/** 键盘/视口变化监听(自愈触发源):输入聚焦/失焦 + visualViewport 变化 */
+/** 键盘/视口变化监听(自愈触发源):输入聚焦/失焦 + visualViewport/window 变化 */
 function onHealSignal(event?: Event) {
   // 键盘收起(focusout) = 一次键盘会话结束,重置自愈计数
   if (event?.type === 'focusout') healCount = 0
@@ -183,20 +195,6 @@ const mobileGeom = computed<ChatGeometry>(() =>
 /** 返回按钮(51px 圆形)在头部内的垂直居中偏移(+1px 视觉微调) */
 const mBackTop = computed(() =>
   mobileGeom.value.stripSegmented ? (mobileGeom.value.stripH - 51) / 2 + 1 : 6,
-)
-
-/**
- * 移动端聊天视图高度(px)= 面板贴底位置 + 面板高
- *
- * 容器高度跟随"当前可视高度"(visualViewport 驱动)收缩/恢复:
- * 键盘弹出时输入面板始终贴在可视区底部,浏览器无需平移视口去
- * 露出输入框 —— 从根源避开 Chromium 内核(Edge/夸克)在软键盘
- * 场景对 fixed 容器合成层的光栅残留 bug(内容整块消失)。
- */
-const mChatHeight = computed(() =>
-  mobileGeom.value.stripSegmented
-    ? mobileGeom.value.panelTop + mobileGeom.value.panelHeight
-    : 0,
 )
 
 /**
@@ -223,11 +221,12 @@ function onToolbarToggleKeydown(event: KeyboardEvent) {
 
 onMounted(() => {
   document.addEventListener('keydown', onToolbarToggleKeydown)
-  // 聊天区可见性自愈监听:输入聚焦/失焦(键盘弹出/收起) + visualViewport 变化
+  // 聊天区自愈监听:输入聚焦/失焦(键盘弹出/收起) + visualViewport/window 变化
   document.addEventListener('focusin', onHealSignal)
   document.addEventListener('focusout', onHealSignal)
   window.visualViewport?.addEventListener('resize', onHealSignal)
   window.visualViewport?.addEventListener('scroll', onHealSignal)
+  window.addEventListener('resize', onHealSignal)
 })
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onToolbarToggleKeydown)
@@ -235,6 +234,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('focusout', onHealSignal)
   window.visualViewport?.removeEventListener('resize', onHealSignal)
   window.visualViewport?.removeEventListener('scroll', onHealSignal)
+  window.removeEventListener('resize', onHealSignal)
   if (healTimer !== null) clearTimeout(healTimer)
 })
 
@@ -300,10 +300,11 @@ function onChatNew() {
     </div>
     <!-- 聊天视图:直接复用桌面端 ChatArea 组件与样式。
          布局由几何层(chatGeometry)按视口驱动;输入面板贴底。
-         容器高度 = 当前可视高度(visualViewport 驱动,键盘弹出自动收缩),
-         不强制合成层;渲染异常时由轻量重光栅化自愈(见 checkChatVisible)。
+         容器 fixed 全屏 + 强制合成层(单一稳定图层),键盘弹出/收起时
+         容器本身不产生样式突变(子元素全部绝对定位),规避 Chromium
+         合成残留;渲染异常由事件驱动的轻量重光栅化自愈(见 healChatArea)。
          移动端输入框为原生 textarea -->
-    <div v-else class="m-chat" :style="{ height: mChatHeight + 'px' }">
+    <div v-else class="m-chat">
       <!-- 返回列表按钮:白色圆形 SVG(源自 baker-maker 任务面板装饰按钮样式),
            位于头部右侧垂直居中 -->
       <button
@@ -509,25 +510,29 @@ function onChatNew() {
 }
 
 // ---- 移动端聊天视图 --------------------------------------------------------
-// fixed 顶部锚定 + 高度跟随可视区(visualViewport 驱动,JS 内联注入):
-// 键盘弹出时容器收缩、输入面板始终贴可视区底,浏览器无需平移视口,
-// 从根源避开 Chromium 内核(Edge/夸克)软键盘场景的合成残留 bug。
-// 注意:此容器不强制合成层(will-change/translateZ 会加剧该 bug)。
+// fixed 全屏 + 强制合成层:把聊天区固化为单一稳定图层,键盘弹出/收起时
+// 容器自身零样式突变(子元素全部绝对定位,布局由几何层按可视高度驱动:
+// resizes 模式随 innerHeight、夸克 overlays 模式随 visualViewport),
+// 规避 Chromium 内核(Edge/夸克)对 fixed 容器内绝对定位元素的合成残留 bug。
+// 渲染异常时由 JS 的 .m-chat--repaint 轻量重光栅化自愈(见 healChatArea)。
 // 移动端输入框用原生 textarea(ChatInput 分支),绕开夸克等对 contenteditable
-// 的焦点 bug。渲染异常时由 JS 的 .m-chat--repaint 轻量自愈(见 checkChatVisible)。
+// 的焦点 bug。
 .m-chat {
   position: fixed;
-  left: 0;
-  top: 0;
-  width: 100%;
+  inset: 0;
   z-index: 110;
   background: transparent;
+  // 强制创建合成层:规避 Chromium 内核(Edge/夸克)在软键盘弹出/收起时
+  // 对 fixed 容器内绝对定位元素的合成残留 bug(黑屏只剩背景)
+  transform: translateZ(0);
+  will-change: transform;
 
-  // 轻量自愈标记(JS 在两帧内加/删):临时强制合成层再移除,
-  // 触发浏览器对聊天区子树完整重光栅化(修复软键盘后的合成残留)。
+  // 轻量自愈标记(JS 在两帧内加/删):临时摘除强制合成层再恢复,
+  // 层销毁→重建 → 强制浏览器对聊天区子树完整重光栅化。
   // 只影响渲染,不重建 DOM、不触碰输入焦点(键盘不闪退)。
   &--repaint {
-    transform: translateZ(0);
+    transform: none !important;
+    will-change: auto;
   }
 
   // 返回列表按钮:实心圆 SVG,位于头部右侧垂直居中,

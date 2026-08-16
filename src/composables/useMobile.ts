@@ -37,17 +37,21 @@ let checkTimer: number | null = null
 const MIN_VALID_SIZE = 100
 
 /**
- * 读取布局基准高度:优先 visualViewport.height
+ * 读取布局基准高度(overlays 门控的 visualViewport)
  *
  * 移动端软键盘有两种模式:
- *   - resizes-content(多数浏览器,含 Edge/vivo):innerHeight 随键盘压缩
- *   - overlays-content(夸克等):innerHeight 不变,只有 visualViewport.height 收缩
- * visualViewport.height 在两种模式下都等于"当前实际可视高度",是唯一一致
- * 的正确来源;无键盘/桌面端与 innerHeight 相等。不支持时回退 innerHeight。
+ *   - resizes-content(多数浏览器,含 vivo/Edge):innerHeight 随键盘压缩,
+ *     visualViewport.height 与其一致 → 返回 innerHeight,与旧行为完全一致
+ *   - overlays-content(夸克等):innerHeight 不变,只有 visualViewport.height
+ *     明显小于 innerHeight(键盘覆盖),此时 vv 才是真实可视高度
+ * 门控保证:resizes 模式/无键盘场景数值与 innerHeight 逐帧一致,零行为差异;
+ * 仅键盘覆盖时切换为 vv,面板才能贴到键盘上方。不支持 vv 时回退 innerHeight。
  */
 function readHeight(): number {
   const vv = window.visualViewport
-  return vv && vv.height > 0 ? Math.round(vv.height) : window.innerHeight
+  const ih = window.innerHeight
+  if (!vv || vv.height <= 0) return ih
+  return vv.height < ih - 20 ? Math.round(vv.height) : ih
 }
 
 function update() {
