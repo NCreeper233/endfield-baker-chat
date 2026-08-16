@@ -15,8 +15,18 @@
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import { streamChat, buildMessages } from '../utils/llm'
+import { buildBackendRequest, fetchBackendReply } from '../utils/backend'
 
-/** 延迟工具(ms) */
+/** 聊天历史条目(与 chat store 的 contextHistory 形状一致) */
+type ChatHistoryEntry = { side: 'other' | 'mine'; text: string; image?: string }
+
+/** 后端模式输入:当前消息 + 发送前截取的历史(不含当前输入) */
+interface BackendInput {
+  message: string
+  history: ChatHistoryEntry[]
+}
+
+/** 延迟工具(ms):分段显示模拟"对方正在输入"的节奏 */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -28,11 +38,15 @@ export function useAiChat() {
   /**
    * 触发 AI 流式回复(内部公共逻辑)
    *
-   * 从当前对话读取角色信息 + 历史消息,构建 LLM 请求。
+   * 从当前对话读取角色信息 + 历史消息,构建请求。
+   * - 后端模式(传入 backendInput):只传递原始数据(message/history/character),
+   *   提示词与处理全部由后端 Python 脚本负责,一次性拿到 { reply } 后分段显示。
+   * - 其他模式:沿用原有 system + 角色提示词 + OpenAI 格式流式调用。
+   *
    * 流式缓冲完整回复后,按换行分段,逐段创建气泡顺序显示。
    * 每段之间有短暂假 loading 动画,模拟"逐条发送"的聊天节奏。
    */
-  async function triggerAiResponse(): Promise<void> {
+  async function triggerAiResponse(backendInput?: BackendInput): Promise<void> {
     if (chatStore.activeSub === null) return
     const conv = chatStore.conversations[chatStore.activeSub]
     if (!conv) return
@@ -43,33 +57,47 @@ export function useAiChat() {
     const speakerName = characterName
     const speakerAvatar = meta?.avatar ?? ''
 
-    // 构建系统提示词 + 角色提示词 + 历史消息
-    const systemPrompt = settingsStore.getFullSystemPrompt()
-    const characterPrompt = settingsStore.getCharacterPrompt(characterName)
-    const history = chatStore.getChatHistory()
-
-    const messages = buildMessages(systemPrompt, characterPrompt, history)
-
     // 创建第一个 loading 气泡
     chatStore.startAiResponse(speakerName, speakerAvatar)
 
-    // ---- 流式缓冲完整回复(loading 动画持续,不实时显示文字) -------------
+    // ---- 请求并缓冲完整回复(loading 动画持续,不实时显示文字) -------------
     let fullText = ''
 
     try {
-      await streamChat({
-        config: settingsStore.apiConfig,
-        messages,
-        signal: chatStore.getAiSignal(),
-        onChunk: (chunk) => {
-          fullText += chunk
-        },
-        onDone: (full) => {
-          fullText = full
-        },
-      })
+      if (backendInput) {
+        // 后端模式:前端只负责传递,不拼接任何提示词
+        const request = buildBackendRequest(
+          backendInput.message,
+          characterName,
+          backendInput.history,
+        )
+        fullText = await fetchBackendReply(
+          settingsStore.apiConfig,
+          request,
+          chatStore.getAiSignal(),
+        )
+      } else {
+        // 原有模式:系统提示词 + 角色提示词 + 历史消息,SSE 流式调用
+        const systemPrompt = settingsStore.getFullSystemPrompt()
+        const characterPrompt = settingsStore.getCharacterPrompt(characterName)
+        const history = chatStore.getChatHistory()
+
+        const messages = buildMessages(systemPrompt, characterPrompt, history)
+
+        await streamChat({
+          config: settingsStore.apiConfig,
+          messages,
+          signal: chatStore.getAiSignal(),
+          onChunk: (chunk) => {
+            fullText += chunk
+          },
+          onDone: (full) => {
+            fullText = full
+          },
+        })
+      }
     } catch (err) {
-      // AbortError:用户主动中止,streamChat 返回空串而非抛错,此处仅兜底
+      // AbortError:用户主动中止,请求层返回空串而非抛错,此处仅兜底
       if (err instanceof DOMException && err.name === 'AbortError') {
         return
       }
@@ -156,8 +184,8 @@ export function useAiChat() {
    *
    * 完整流程:
    *   1. 检查 API 配置(未配置时抛出错误,由调用方引导用户配置)
-   *   2. 添加用户消息到对话(含上下文历史同步)
-   *   3. 触发 AI 响应(分段顺序显示)
+   *   2. 后端模式:先截取历史(不含当前输入),再添加用户消息到对话
+   *   3. 触发 AI 响应(后端模式拿到 reply 后 / 原有模式流式分段顺序显示)
    *
    * @param text 用户输入文本
    * @throws API 未配置时抛出错误
@@ -170,18 +198,25 @@ export function useAiChat() {
       throw new Error('API 未配置：请先在设置中填写 Base URL、API Key 和模型名')
     }
 
+    // 后端模式:先截取历史(此时尚未写入当前输入,天然不含它)
+    const isBackend = settingsStore.apiConfig.apiMode === 'backend'
+    const backendInput: BackendInput | undefined = isBackend
+      ? { message: text, history: chatStore.getChatHistory() }
+      : undefined
+
     // 1. 添加用户消息(含上下文历史同步)
     chatStore.sendUserMessage(text)
 
     // 2. 触发 AI 响应
-    await triggerAiResponse()
+    await triggerAiResponse(backendInput)
   }
 
   /**
    * 图片发送后触发 AI 流式回复
    *
    * 图片消息已由 store.sendImage 添加(含上下文历史同步),
-   * 此方法仅负责触发 AI 响应流程(分段顺序显示)。
+   * 此方法仅负责触发 AI 响应流程(后端模式:message 传 "[图片]",
+   * 历史弹出刚写入的图片条目;原有模式:分段顺序显示)。
    *
    * @throws API 未配置时抛出错误
    */
@@ -193,8 +228,20 @@ export function useAiChat() {
       throw new Error('API 未配置：请先在设置中填写 Base URL、API Key 和模型名')
     }
 
+    // 后端模式:图片已由 sendImage 写入 contextHistory(最后一条),
+    // 用 slice 弹出它(不修改 store 数据),历史中不含当前输入
+    const isBackend = settingsStore.apiConfig.apiMode === 'backend'
+    let backendInput: BackendInput | undefined
+    if (isBackend) {
+      const history = chatStore.getChatHistory()
+      backendInput = {
+        message: '[图片]',
+        history: history.slice(0, -1),
+      }
+    }
+
     // 图片消息已由 sendImage 添加,直接触发 AI 响应
-    await triggerAiResponse()
+    await triggerAiResponse(backendInput)
   }
 
   /** 中止当前 AI 响应(中止流式请求 + 停止后续分段显示) */

@@ -166,14 +166,42 @@ export const useChatStore = defineStore('chat', () => {
     })),
   )
 
-  /** 当前激活的主卡索引(activeSub 所属主卡;null 时为 0) */
-  const activeCardIndex = computed(() => {
-    if (activeSub.value === null) return 0
+  /**
+   * 当前选中的主卡索引(null = 未选中任何角色)
+   *
+   * 由用户点击主卡(selectCard)或选中子对话(selectSub)设置:
+   * - 点击主卡:仅选中主卡(白色遮罩),不改变 activeSub(可不进入子对话)
+   * - 选中子对话:同时同步所属主卡
+   * 新建对话以它为准:选中父卡后即使未进入子对话也可新建。
+   */
+  const activeCardIndex = ref<number | null>(null)
+
+  /** 由子对话索引反查所属主卡(不存在返回 null) */
+  function cardIndexOfSub(sub: number): number | null {
+    if (sub < 0) return null
     for (let i = cardSubStarts.value.length - 1; i >= 0; i--) {
-      if (activeSub.value >= cardSubStarts.value[i]) return i
+      if (sub >= cardSubStarts.value[i]) return i
     }
-    return 0
-  })
+    return null
+  }
+
+  /** 同步 activeCardIndex 到 activeSub 所属主卡(activeSub 为 null 时不动,保留用户选中) */
+  function syncActiveCardFromSub(): void {
+    if (activeSub.value === null) return
+    activeCardIndex.value = cardIndexOfSub(activeSub.value)
+  }
+
+  /**
+   * 选中主卡(父级角色卡片)
+   *
+   * 仅设置选中态(白色遮罩)并折叠切换由调用方负责;不改变 activeSub,
+   * 因此"未进入子对话"时也能选中父卡,用于在其下新建对话。
+   *
+   * @param index 主卡索引
+   */
+  function selectCard(index: number): void {
+    activeCardIndex.value = index
+  }
 
   /**
    * 每段子对话的派生数据(title/avatar)
@@ -240,17 +268,19 @@ export const useChatStore = defineStore('chat', () => {
    */
   const canDeleteActiveConversation = computed(() => {
     if (activeSub.value === null) return false
-    const cardIndex = activeCardIndex.value
+    const cardIndex = cardIndexOfSub(activeSub.value)
+    if (cardIndex === null) return false
     return cardSubStarts.value[cardIndex + 1] - cardSubStarts.value[cardIndex] > 1
   })
 
   /**
-   * 新建会话:在选中子对话所在父卡下追加子会话
+   * 新建会话:在选中的主卡下追加子会话
    *
-   * 新子卡自动选中。若父级卡片处于折叠状态,自动展开以显示新子卡。
+   * 选中来源:点击主卡(selectCard,无需进入子对话)或选中子对话(selectSub)。
+   * 新子卡自动选中并进入。若父级卡片处于折叠状态,自动展开以显示新子卡。
    */
   function createChildConversation() {
-    if (activeSub.value === null) return
+    if (activeCardIndex.value === null) return
     const idx = activeCardIndex.value
     const card = cards.value[idx]
     // 新子对话继承父卡角色名(与第一张子对话一致),
@@ -300,7 +330,8 @@ export const useChatStore = defineStore('chat', () => {
   function deleteActiveConversation() {
     if (activeSub.value === null) return
     const sub = activeSub.value
-    const cardIndex = activeCardIndex.value
+    const cardIndex = cardIndexOfSub(sub)
+    if (cardIndex === null) return
     const start = cardSubStarts.value[cardIndex]
     const count = cardSubStarts.value[cardIndex + 1] - start
     const localIdx = sub - start
@@ -310,6 +341,8 @@ export const useChatStore = defineStore('chat', () => {
       cards.value[cardIndex].conversations.splice(localIdx, 1)
       const newCount = count - 1
       activeSub.value = localIdx < newCount ? start + localIdx : start + newCount - 1
+      // 选中主卡不变(仍是同一张父卡)
+      activeCardIndex.value = cardIndex
       return
     }
 
@@ -328,12 +361,15 @@ export const useChatStore = defineStore('chat', () => {
     collapsed.value.splice(cardIndex, 1)
     if (cards.value.length === 0) {
       activeSub.value = null
+      activeCardIndex.value = null
     } else if (cardIndex < cards.value.length) {
       // 下一张主卡的首段
       activeSub.value = cardSubStarts.value[cardIndex]
+      syncActiveCardFromSub()
     } else {
       // 删除的是最后一张主卡:取新末张主卡的末段
       activeSub.value = cardSubStarts.value[cards.value.length] - 1
+      syncActiveCardFromSub()
     }
   }
 
@@ -495,10 +531,23 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 选中指定子卡(切换当前对话)
    *
+   * 同时同步选中其所属主卡(activeCardIndex)。
+   *
    * @param index 子卡全局索引(在扁平 conversations 中的下标)
    */
   function selectSub(index: number) {
     activeSub.value = index
+    activeCardIndex.value = cardIndexOfSub(index)
+  }
+
+  /**
+   * 清除全部选中(返回列表等场景)
+   *
+   * activeSub 与 activeCardIndex 一并置 null:回到"未选中任何对话/角色"的初始状态。
+   */
+  function clearSelection() {
+    activeSub.value = null
+    activeCardIndex.value = null
   }
 
   /**
@@ -528,7 +577,7 @@ export const useChatStore = defineStore('chat', () => {
    * (恢复)都需要"替换 cards + 重置运行时态字段"。收敛为统一 action,
    * 保证重置逻辑唯一来源,字段集合只在一处维护。
    *
-   * 重置字段:collapsed(全收起)/ activeSub(null)/ isLoading(false)
+   * 重置字段:collapsed(全收起)/ activeSub(null)/ activeCardIndex(null)/ isLoading(false)
    *
    * @param next 新的卡片树(调用方负责 sanitize)
    */
@@ -536,6 +585,7 @@ export const useChatStore = defineStore('chat', () => {
     cards.value = mergeBuiltinCards(next)
     collapsed.value = cards.value.map(() => true)
     activeSub.value = null
+    activeCardIndex.value = null
     isLoading.value = false
   }
 
@@ -780,6 +830,9 @@ export const useChatStore = defineStore('chat', () => {
     // 玩家选择
     toggleCollapse,
     selectSub,
+    selectCard,
+    clearSelection,
+    activeCardIndex,
     // 角色名称显示开关(localStorage 持久化)【已注释停用】
     // showCharacterNames,
     // toggleShowCharacterNames,

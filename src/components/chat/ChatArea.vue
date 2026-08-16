@@ -21,22 +21,17 @@
 // 关键交互:`:key="chatStore.activeSub"` 强制 chat-scroll 重新挂载,
 // 触发 chat-in 入场动画(必须保留)。重挂载时所有气泡首屏无 prevRect。
 // =============================================================================
-import { computed, inject, nextTick, onMounted, ref, watch, type Ref } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, toValue, watch, type Ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
 import { useBubbleMeasure } from '../../composables/useBubbleMeasure'
 import { useChatRows } from '../../composables/useChatRows'
+import { CHAT_FRAME } from '../../constants/design'
 import {
-  CHAT,
-  CHAT_BOTTOM_DECO,
-  CHAT_DOTS_SIZE,
-  CHAT_END_DECO,
-  CHAT_FRAME,
-  CHAT_SCROLL,
-  CHAT_SHOTS,
-  SCROLL_BOTTOM_PAD,
-} from '../../constants/design'
-import { CHARACTER_LIST_TOP, TOP_PAD } from '../../constants/characterCard'
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from '../../constants/chatGeometry'
 import { MATERIALS } from '../../constants/materials'
 import {
   pos,
@@ -50,6 +45,9 @@ import LoadingBubble from './LoadingBubble.vue'
 import ChatInput from './ChatInput.vue'
 
 const chatStore = useChatStore()
+
+/** 注入几何(默认全局:桌面 = 设计稿,移动端 = 视口;导出模式由 ChatExportStage 覆盖为桌面) */
+const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
 
 /**
  * 导出模式(离屏截图表现层)
@@ -66,9 +64,9 @@ const emit = defineEmits<{
   /** API 未配置时请求打开设置弹窗(上抛到 App) */
   (e: 'open-settings'): void
 }>()
-/** 导出模式下聊天框高度(px):由 ChatExportStage 测量注入,未注入时用设计稿固定高 */
+/** 导出模式下聊天框高度(px):由 ChatExportStage 测量注入,未注入时用几何层固定高 */
 const injectedFrameH = inject<Ref<number> | null>('exportFrameH', null)
-const exportFrameH = computed(() => injectedFrameH?.value ?? CHAT_SHOTS.detail.h)
+const exportFrameH = computed(() => injectedFrameH?.value ?? geom.value.detailH)
 
 /** 聊天框三色装饰条(品红 / 黄 / 青,样式见 .chat-frame__bar--*) */
 const CHAT_FRAME_BARS = ['magenta', 'yellow', 'cyan'] as const
@@ -87,6 +85,55 @@ function cycleStrip(): void {
   if (props.exportMode) return
   chatStore.cycleStrip()
 }
+
+/**
+ * 移动端头图分段素材表(变体 → 左/右段原尺寸,66px 高):
+ * 用户切图 chat_strip_v{1,2,3}_{l,r}.png + 公共中段 chat_strip_c.png。
+ * 布局:l 左端贴屏左缘、r 右端贴屏右缘、中间空隙用 c 图自适应裁剪(cover)填充,
+ * 三张图均不拉伸不变形。
+ */
+const STRIP_SEGS = [
+  { lW: 25, rW: 440, l: MATERIALS.chatStripV1L, r: MATERIALS.chatStripV1R },
+  { lW: 19, rW: 458, l: MATERIALS.chatStripV2L, r: MATERIALS.chatStripV2R },
+  { lW: 21, rW: 451, l: MATERIALS.chatStripV3L, r: MATERIALS.chatStripV3R },
+] as const
+
+/** 当前变体的分段素材(随 stripVariantIndex 切换) */
+const stripSeg = computed(
+  () => STRIP_SEGS[chatStore.stripVariantIndex % STRIP_SEGS.length],
+)
+
+/** 左右段缩放系数:高度统一为几何 stripH(66k),宽度按原宽等比,无拉伸变形 */
+const segK = computed(() =>
+  geom.value.stripSegmented ? geom.value.stripH / geom.value.stripImgH : 1,
+)
+
+/** 左段样式:左端贴屏幕左缘 */
+const segLStyle = computed(() => ({
+  left: '0px',
+  top: '0px',
+  width: `${stripSeg.value.lW * segK.value}px`,
+  height: `${geom.value.stripH}px`,
+}))
+
+/** 右段样式:右端贴屏幕右缘 */
+const segRStyle = computed(() => ({
+  right: '0px',
+  top: '0px',
+  width: `${stripSeg.value.rW * segK.value}px`,
+  height: `${geom.value.stripH}px`,
+}))
+
+/**
+ * 中段样式:l/r 之间的空隙,用 chat_strip_c.png 自适应裁剪填充。
+ * object-fit: cover —— 保持原比例不变形,超出部分水平裁切(纯色条裁剪无感)。
+ */
+const segCStyle = computed(() => ({
+  left: `${stripSeg.value.lW * segK.value}px`,
+  right: `${stripSeg.value.rW * segK.value}px`,
+  top: '0px',
+  height: `${geom.value.stripH}px`,
+}))
 
 const {
   playedMessages,
@@ -142,8 +189,8 @@ onMounted(() => {
 
 /** 聊天条名字的绝对定位样式 */
 const stripNameStyle = computed(() => ({
-  left: CHAT_SHOTS.strip.x + 48 + 'px',
-  top: CHAT_SHOTS.strip.y + (CHAT_SHOTS.strip.h - 24.12) / 2 + 'px',
+  left: geom.value.stripX + 48 + 'px',
+  top: geom.value.stripY + (geom.value.stripH - 24.12) / 2 + 'px',
 }))
 
 // ---- 尺寸过渡链状态 -------------------------------------------------------
@@ -178,22 +225,22 @@ watch(
 /**
  * 起始页面(未选中对话)遮罩 + 占位图的几何
  *
- * 顶端对齐第一张一级卡片顶端(CHARACTER_LIST_TOP + TOP_PAD = 127.57),
- * 底边保持与正常对话页面 chat_strip_detail 底边相同(1019.84)。
- * 宽度 / 左侧沿用 chat_strip_detail,与正常对话页面保持一致。
+ * 顶端对齐第一张一级卡片顶端,底边保持与正常对话页面 chat_strip_detail
+ * 底边相同;宽度 / 左侧沿用 chat_strip_detail,与正常对话页面保持一致。
+ * (移动端未选中时走列表视图,不渲染聊天区;数值沿用桌面几何兜底)
  */
-const emptyTop = CHARACTER_LIST_TOP + TOP_PAD
-const emptyBottom = CHAT_SHOTS.detail.y + CHAT_SHOTS.detail.h
-const emptyHeight = emptyBottom - emptyTop
+const emptyTop = computed(() => geom.value.emptyTop)
+const emptyBottom = computed(() => geom.value.emptyBottom)
+const emptyHeight = computed(() => emptyBottom.value - emptyTop.value)
 
 /**
  * 聊天区域半透明白色遮罩几何:只覆盖 chat_strip_detail.png 区域
  * (与 detail 矩形完全重合,不含顶部聊天条);高度随 frameHeight
  * (导出模式随内容生长,普通模式固定设计稿高)。
  */
-const overlayLeft = CHAT_SHOTS.detail.x
-const overlayTop = CHAT_SHOTS.detail.y
-const overlayWidth = CHAT_SHOTS.detail.w
+const overlayLeft = computed(() => geom.value.detailX)
+const overlayTop = computed(() => geom.value.detailY)
+const overlayWidth = computed(() => geom.value.detailW)
 
 // ---- 导出模式表现(exportMode) ---------------------------------------------
 // 只改表现不动数据:滚动区溢出可见 + 高度自适应、聊天框随内容生长、
@@ -202,47 +249,63 @@ const overlayWidth = CHAT_SHOTS.detail.w
 /** 末尾装饰可见性:仅导出模式显示(正常聊天窗口不显示) */
 const endDecoVisible = computed(() => props.exportMode)
 
-/** 滚动容器样式:导出模式高度自适应内容(auto,内联不写死 831) */
+/** 末尾装饰左缘(相对滚动容器水平居中) */
+const endDecoLeft = computed(() => (geom.value.scrollW - geom.value.endDecoW) / 2)
+
+/** 滚动容器样式:导出模式高度自适应内容(auto,内联不写死高度) */
 const scrollStyle = computed<BoxStyle>(() => {
+  const g = geom.value
   if (props.exportMode) {
     return {
-      left: `${CHAT_SCROLL.x}px`,
-      top: `${CHAT_SCROLL.y}px`,
-      width: `${CHAT_SCROLL.w}px`,
+      left: `${g.scrollX}px`,
+      top: `${g.scrollY}px`,
+      width: `${g.scrollW}px`,
       height: 'auto',
     }
   }
-  return pos(CHAT_SCROLL.x, CHAT_SCROLL.y, CHAT_SCROLL.w, chatScrollHeight.value)
+  return pos(g.scrollX, g.scrollY, g.scrollW, chatScrollHeight.value)
 })
 
-/** 聊天框高度:导出模式随内容生长,否则设计稿固定高 */
+/** 聊天框高度:导出模式随内容生长,否则几何层固定高 */
 const frameHeight = computed(() =>
-  props.exportMode ? exportFrameH.value : CHAT_SHOTS.detail.h,
+  props.exportMode ? exportFrameH.value : geom.value.detailH,
 )
 
 /**
  * 底部装饰 top:导出模式跟随新帧底定位
  *
- * 装饰底边恒距帧底 13px(与固定态 CHAT_BOTTOM_DECO.y 相对 detail 底边一致),
+ * 装饰底边恒距帧底 13px(与固定态 bottomDecoY 相对 detail 底边一致),
  * 故帧底移动量 = 装饰移动量,换算为 top = 帧底 + 固定偏移 − 装饰高。
  */
 const decoTop = computed(() => {
-  if (!props.exportMode) return CHAT_BOTTOM_DECO.y
-  const frameBottom = CHAT_SHOTS.detail.y + exportFrameH.value
+  if (!props.exportMode) return geom.value.bottomDecoY
+  const g = geom.value
+  const frameBottom = g.detailY + exportFrameH.value
   // 固定态:装饰底边相对帧底的偏移(负值 = 在帧底上方)
-  const decoBottomOffset =
-    CHAT_BOTTOM_DECO.y + CHAT_BOTTOM_DECO.h - (CHAT_SHOTS.detail.y + CHAT_SHOTS.detail.h)
-  return frameBottom + decoBottomOffset - CHAT_BOTTOM_DECO.h
+  const decoBottomOffset = g.bottomDecoY + g.bottomDecoH - (g.detailY + g.detailH)
+  return frameBottom + decoBottomOffset - g.bottomDecoH
 })
 </script>
 
 <template>
   <section class="chat-area" :class="{ 'chat-area--export': exportMode }">
-    <!-- 顶部聊天条:chat_strip / chat_strip_detail 仅在选中对话时显示,遮罩始终渲染 -->
+    <!-- 顶部聊天条:chat_strip / chat_strip_detail 仅在选中对话时显示,遮罩始终渲染。
+         移动端(几何层 stripSegmented):l 贴屏左缘 + c 中段自适应裁剪 + r 贴屏右缘,
+         三图均不拉伸不变形;桌面端:单图原样显示 -->
+    <div
+      v-if="chatStore.activeSub !== null && geom.stripSegmented"
+      class="chat-shot chat-shot--strip chat-shot--segmented"
+      :style="pos(geom.stripX, geom.stripY, geom.stripW, geom.stripH)"
+      @click="cycleStrip"
+    >
+      <img class="chat-shot__seg chat-shot__seg--l" :style="segLStyle" :src="stripSeg.l" alt="" />
+      <img class="chat-shot__seg chat-shot__seg--c" :style="segCStyle" :src="MATERIALS.chatStripC" alt="" />
+      <img class="chat-shot__seg chat-shot__seg--r" :style="segRStyle" :src="stripSeg.r" alt="" />
+    </div>
     <img
-      v-if="chatStore.activeSub !== null"
+      v-else-if="chatStore.activeSub !== null"
       class="chat-shot chat-shot--strip"
-      :style="pos(CHAT_SHOTS.strip.x, CHAT_SHOTS.strip.y, CHAT_SHOTS.strip.w, CHAT_SHOTS.strip.h)"
+      :style="pos(geom.stripX, geom.stripY, geom.stripW, geom.stripH)"
       :src="stripSource"
       alt=""
       @click="cycleStrip"
@@ -252,7 +315,7 @@ const decoTop = computed(() => {
     <div
       v-if="chatStore.activeSub !== null"
       class="chat-frame"
-      :style="pos(CHAT_SHOTS.detail.x, CHAT_SHOTS.detail.y, CHAT_SHOTS.detail.w, frameHeight)"
+      :style="pos(geom.detailX, geom.detailY, geom.detailW, frameHeight)"
     >
       <!-- 底部 / 左 / 右 1.5px 边框线 -->
       <div
@@ -321,20 +384,20 @@ const decoTop = computed(() => {
     <div
       v-else
       class="chat-overlay chat-overlay--empty"
-      :style="pos(CHAT_SHOTS.detail.x, emptyTop, CHAT_SHOTS.detail.w, emptyHeight)"
+      :style="pos(geom.detailX, emptyTop, geom.detailW, emptyHeight)"
     />
     <div
       class="chat-tint"
       :class="{ 'chat-tint--gradient': chatStore.activeSub === null }"
       :style="chatStore.activeSub === null
-        ? pos(CHAT_SHOTS.detail.x, emptyTop, CHAT_SHOTS.detail.w, emptyHeight)
-        : pos(CHAT_SHOTS.detail.x, CHAT_SHOTS.detail.y, CHAT_SHOTS.detail.w, frameHeight)"
+        ? pos(geom.detailX, emptyTop, geom.detailW, emptyHeight)
+        : pos(geom.detailX, geom.detailY, geom.detailW, frameHeight)"
     />
     <!-- 起始页占位图:未选中对话时显示,顶端对齐第一张一级卡片,底边贴 chat_strip_detail 底边 -->
     <img
       v-if="chatStore.activeSub === null"
       class="chat-empty-placeholder"
-      :style="pos(CHAT_SHOTS.detail.x, emptyTop, CHAT_SHOTS.detail.w, emptyHeight)"
+      :style="pos(geom.detailX, emptyTop, geom.detailW, emptyHeight)"
       :src="MATERIALS.chatEmptyPlaceholder"
       alt=""
     />
@@ -342,9 +405,9 @@ const decoTop = computed(() => {
     <div
       v-if="chatStore.activeSub === null"
       class="chat-empty-dots"
-      :style="pos(CHAT_SHOTS.detail.x, emptyTop, CHAT_SHOTS.detail.w, emptyHeight)"
+      :style="pos(geom.detailX, emptyTop, geom.detailW, emptyHeight)"
     >
-      <svg :width="CHAT_DOTS_SIZE" :height="CHAT_DOTS_SIZE" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg">
+      <svg :width="geom.dotsSize" :height="geom.dotsSize" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg">
         <circle
           v-for="(_, i) in 100"
           :key="i"
@@ -359,7 +422,7 @@ const decoTop = computed(() => {
     <p
       v-if="chatStore.activeSub === null"
       class="chat-empty-hint"
-      :style="pos(CHAT_SHOTS.detail.x, emptyTop, CHAT_SHOTS.detail.w, emptyHeight)"
+      :style="pos(geom.detailX, emptyTop, geom.detailW, emptyHeight)"
     >
       <span class="chat-empty-hint__dash">-</span><span class="chat-empty-hint__text">请选择会话</span><span class="chat-empty-hint__dash">-</span>
     </p>
@@ -371,6 +434,10 @@ const decoTop = computed(() => {
     <img
       v-if="chatStore.activeSub !== null"
       class="chat-corner-deco"
+      :style="{
+        left: geom.cornerDecoX + 'px',
+        top: geom.cornerDecoY + 'px',
+      }"
       :src="MATERIALS.chatCornerDeco45"
       alt=""
     />
@@ -400,35 +467,35 @@ const decoTop = computed(() => {
           :base-x="loadingLayout.avatarX"
           :base-y="loadingLayout.avatarTop"
           :portrait-url="loadingLayout.portraitUrl"
-          :style="pos(loadingLayout.avatarX - CHAT_SCROLL.x, loadingLayout.avatarTop - CHAT_SCROLL.y, CHAT.avatarBox, CHAT.avatarBox)"
+          :style="pos(loadingLayout.avatarX, loadingLayout.avatarTop, geom.avatarBox, geom.avatarBox)"
         />
         <!-- 角色名称悬浮:加载气泡上方也显示下一条消息的说话人名(与真实气泡位置一致)【已注释停用】 -->
         <!-- <span
           v-if="showLoadingAvatar && showCharacterNames"
           class="chat-speaker-name"
-          :style="speakerNameStyle(loadingLayout.side, loadingLayout.left - CHAT_SCROLL.x, loadingLayout.left - CHAT_SCROLL.x + loadingLayout.loadW, loadingLayout.top - CHAT_SCROLL.y)"
+          :style="speakerNameStyle(loadingLayout.side, loadingLayout.left, loadingLayout.left + loadingLayout.loadW, loadingLayout.top)"
         >{{ loadingLayout.speakerName }}</span> -->
         <LoadingBubble
           :side="loadingLayout.side"
-          :left="loadingLayout.left - CHAT_SCROLL.x"
-          :top="loadingLayout.top - CHAT_SCROLL.y"
+          :left="loadingLayout.left"
+          :top="loadingLayout.top"
         />
       </template>
 
       <img
         v-if="endDecoVisible"
         class="chat-end-deco"
-        :style="pos(CHAT_END_DECO.left, endDecoTop, CHAT_END_DECO.w, CHAT_END_DECO.h)"
+        :style="pos(endDecoLeft, endDecoTop, geom.endDecoW, geom.endDecoH)"
         :src="MATERIALS.chatEndDeco"
         alt=""
       />
-      <div class="chat-pad chat-pad--bottom" :style="pos(0, padTop, 1, SCROLL_BOTTOM_PAD)" />
+      <div class="chat-pad chat-pad--bottom" :style="pos(0, padTop, 1, geom.scrollBottomPad)" />
     </div>
 
     <!-- 固定底部装饰(在 .chat-area 内,非 .chat-scroll);导出模式跟随新帧底 -->
     <img
       class="chat-bottom-deco"
-      :style="pos(CHAT_BOTTOM_DECO.x, decoTop, CHAT_BOTTOM_DECO.w, CHAT_BOTTOM_DECO.h)"
+      :style="pos(geom.bottomDecoX, decoTop, geom.bottomDecoW, geom.bottomDecoH)"
       :src="MATERIALS.chatBottomDeco"
       alt=""
     />
@@ -571,6 +638,23 @@ const decoTop = computed(() => {
     cursor: pointer;
     user-select: none;
   }
+
+  // 移动端 l/c/r 分段头图:l 贴左、r 贴右、c 中段 cover 自适应裁剪,均不变形。
+  // 三段都 pointer-events: none,点击落在容器上触发切换。
+  &--segmented {
+    overflow: hidden;
+  }
+
+  &__seg {
+    position: absolute;
+    display: block;
+    pointer-events: none;
+  }
+
+  // 中段:保持原比例、超出部分水平裁切(纯色条裁剪无感)
+  &__seg--c {
+    object-fit: cover;
+  }
 }
 
 // 聊天框(CSS 绘制边框,替代 chat_strip_detail.png):
@@ -653,11 +737,8 @@ const decoTop = computed(() => {
 // 聊天窗口右上角装饰图(左右镜像)
 .chat-corner-deco {
   position: absolute;
-  // 定位到聊天条右上角(strip 右端 = 546.02 + 1323 = 1869.02,strip 顶 = 114.44)
-  // 用 right 定位,让 scaleX(-1) 以右边为轴翻转保持位置不变
-  right: calc(100% - 1769.02px);
-  top: 139.44px;
-  // 水平方向镜像翻转(左右镜像),transform-origin 锁右边
+  // 定位(left/top)由几何层内联注入(cornerDecoX/cornerDecoY);
+  // scaleX(-1) 以右边为轴翻转保持位置不变
   transform-origin: right center;
   transform: scaleX(-1);
   // 位于 chat_strip / chat_strip_detail 之下,chat-tint 之上

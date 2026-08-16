@@ -16,8 +16,12 @@
 //     全程无直角
 //   - other 侧尾巴在左,从左往右展开(裁右侧);mine 侧尾巴在右,从右往左展开(裁左侧)
 // =============================================================================
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { LOADING_RECT } from '../../utils/measure'
+import { computed, inject, onMounted, onUnmounted, ref, toValue } from 'vue'
+import {
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from '../../constants/chatGeometry'
 import { LOADING_DOT_COLOR_OTHER, LOADING_DOT_COLOR_MINE } from '../../constants/colors'
 import { useBubbleSvgGeometry } from '../../composables/useBubbleSvgGeometry'
 import type { MessageSide } from '../../types/chat'
@@ -31,9 +35,12 @@ const props = defineProps<{
   top: number
 }>()
 
-/** rect 目标宽高(px):加载气泡 100×单行高,与 useChatRows 的 LOADING_RECT 同源 */
-const RECT_W = LOADING_RECT.w
-const RECT_H = LOADING_RECT.h
+/** 注入几何(加载气泡尺寸/圆角;默认全局,导出模式由 ChatExportStage 覆盖) */
+const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+
+/** rect 目标宽高(px):几何层提供(桌面 100×单行高,移动端更小) */
+const RECT_W = computed(() => geom.value.loadingRectW)
+const RECT_H = computed(() => geom.value.bubbleSingleLineH)
 
 /** 尺寸过渡时长(ms),与 ChatBubble 一致 */
 const TRANSITION_MS = 100
@@ -63,7 +70,7 @@ function triggerExpand() {
   if (raf2) cancelAnimationFrame(raf2)
   raf1 = requestAnimationFrame(() => {
     raf2 = requestAnimationFrame(() => {
-      curW.value = RECT_W
+      curW.value = RECT_W.value
     })
   })
 }
@@ -87,7 +94,7 @@ onUnmounted(() => {
  * rect 几何宽度恒为 RECT_W,圆角不被 SVG 钳制,全程完整圆角
  */
 const clipInset = computed(() => {
-  const hidden = RECT_W - curW.value
+  const hidden = RECT_W.value - curW.value
   return props.side === 'other'
     ? `inset(0 ${hidden}px 0 0)`
     : `inset(0 0 0 ${hidden}px)`
@@ -95,14 +102,14 @@ const clipInset = computed(() => {
 
 /**
  * SVG 几何(与 ChatBubble 共用 useBubbleSvgGeometry):
- * 当前 svg 总宽(rect 恒 100,故 svgW 恒定)、固定高、rect 固定 x、尾巴镜像、填充色。
- * 展开由 clip-path 驱动,几何尺寸不动。
+ * 当前 svg 总宽(rect 恒为几何加载宽,故 svgW 恒定)、固定高、rect 固定 x、
+ * 尾巴镜像、填充色。展开由 clip-path 驱动,几何尺寸不动。
  */
 const { svgW, svgH, rectX, rectTransform, tailTransform, fillColor } =
   useBubbleSvgGeometry(
     computed(() => props.side),
     RECT_H,
-    ref(RECT_W),
+    RECT_W,
   )
 
 /** svg 尺寸固定真实值,不随过渡变化 */
@@ -141,15 +148,15 @@ const tailStyle = computed(() => ({
     :style="svgStyle"
     xmlns="http://www.w3.org/2000/svg"
   >
-    <!-- rect:几何尺寸固定(100×单行高),圆角恒 13.65;
+    <!-- rect:几何尺寸固定(几何层加载宽×单行高),圆角恒为几何圆角;
          展开由 clip-path 揭示,任何时刻无直角 -->
     <rect
       :x="rectX"
       y="0"
       :width="RECT_W"
       :height="RECT_H"
-      rx="13.65"
-      ry="13.65"
+      :rx="geom.bubbleRadius"
+      :ry="geom.bubbleRadius"
       :fill="fillColor"
       :style="rectStyle"
     />

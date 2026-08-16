@@ -11,56 +11,63 @@
 //   - 纯计算 + store 驱动,无 DOM 操作,可独立测试
 //   - freshContext 以可变对象注入(非响应式),由 ChatArea 的 watcher 翻转,
 //     避免将布局上下文做成响应式导致 rows 额外重算
+//   - 几何(chatGeometryKey)由注入提供:桌面 = 设计稿常量,移动端 = 视口推导;
+//     导出模式(ChatExportStage)注入桌面几何,行坐标始终为"滚动容器相对坐标",
+//     模板直接用,不再各自减 scrollX/scrollY
 // =============================================================================
 
-import { computed, watch, type Ref } from 'vue'
+import { computed, inject, toValue, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../stores/chat'
 import {
-  AVATAR_TOP_TO_BUBBLE,
-  CHAT,
-  CHAT_END_DECO,
-  CHAT_GAP,
   CHAT_IMAGE,
-  CHAT_SCROLL,
   avatarBubbleTop,
   avatarStack,
+  avatarTopToBubble,
 } from '../constants/design'
-import { BUBBLE_SINGLE_LINE_H, LOADING_RECT, bubbleSvgWidth, type BubbleBox } from '../utils/measure'
+import {
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from '../constants/chatGeometry'
+import { bubbleSvgWidth, type BubbleBox } from '../utils/measure'
 import type { ChatRow, MessageSpeaker, RectSize } from '../types/chat'
 
 /** useChatRows 输入参数 */
 export interface ChatRowsOptions {
   /** 气泡文本测量函数(useBubbleMeasure.measure) */
-  measure: (text: string) => BubbleBox
+  measure: (text: string, innerMax?: number, metrics?: import('../utils/measure').BubbleMetrics) => BubbleBox
 }
 
 /**
  * 计算消息行间距
  *
- * 间距规则:
+ * 间距规则(数值来自几何层,桌面 = 设计稿值):
  *   1. 同方向:再细分——
- *      a. 同方向换说话人:CHAT_GAP.speaker(给新头像留位)
- *      b. 同人连发:CHAT_GAP.same
- *   2. 跨方向:CHAT_GAP.cross
+ *      a. 同方向换说话人:gapSpeaker(给新头像留位)
+ *      b. 同人连发:gapSame
+ *   2. 跨方向:gapCross
  */
-function computeGap(ctx: {
-  side: 'other' | 'mine'
-  prevSide: 'other' | 'mine' | null
-  prevSpeakerKey: string | null
-  speakerKey: string
-}): number {
+function computeGap(
+  geom: ChatGeometry,
+  ctx: {
+    side: 'other' | 'mine'
+    prevSide: 'other' | 'mine' | null
+    prevSpeakerKey: string | null
+    speakerKey: string
+  },
+): number {
   // 1. 同方向
   if (ctx.side === ctx.prevSide) {
     // 1a. 同方向换说话人:speaker 间距(给新头像留位)
     if (ctx.prevSpeakerKey !== null && ctx.prevSpeakerKey !== ctx.speakerKey) {
-      return CHAT_GAP.speaker
+      return geom.gapSpeaker
     }
     // 1b. 同人连发:same 间距
-    return CHAT_GAP.same
+    return geom.gapSame
   }
   // 2. 跨方向:cross 间距
-  return CHAT_GAP.cross
+  return geom.gapCross
 }
 
 /**
@@ -73,6 +80,9 @@ export function useChatRows(options: ChatRowsOptions) {
   const { measure } = options
   const chatStore = useChatStore()
   const { playedMessages, isLoading, loadingSide, pendingAiSpeaker } = storeToRefs(chatStore)
+
+  /** 注入几何(默认全局;导出模式由 ChatExportStage 覆盖为桌面几何) */
+  const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
 
   /** 当前对话的对话名(旧数据消息无 speakerName 时的身份回退,未选中时为空串) */
   const activeConvName = computed(() =>
@@ -165,17 +175,19 @@ export function useChatRows(options: ChatRowsOptions) {
   )
 
   /**
-   * chat-scroll 实际高度
+   * chat-scroll 实际高度(几何层:桌面 831,移动端视口推导)
    */
-  const chatScrollHeight = computed(() => CHAT_SCROLL.h)
+  const chatScrollHeight = computed(() => geom.value.scrollH)
 
   // ---- 消息行布局 ------------------------------------------------------------
   /**
-   * 计算所有消息的布局
+   * 计算所有消息的布局(输出为"滚动容器相对坐标")
    *
    * 算法要点:
-   * - 首条消息:avatarTop = CHAT.anchorAvatarTop,bubbleTop = avatarBubbleTop(avatarTop, side)
-   * - 后续消息:bubbleTop = cursor + (同方向 same / 跨方向 cross),avatarTop = bubbleTop - AVATAR_TOP_TO_BUBBLE
+   * - 首条消息:avatarTop = anchorAvatarTop - scrollY(滚动相对),
+   *   bubbleTop = avatarBubbleTop(avatarTop, side, avatarBox)
+   * - 后续消息:bubbleTop = cursor + (同方向 same / 跨方向 cross),
+   *   avatarTop = bubbleTop - avatarTopToBubble[side]
    * - showAvatar:与上一条消息方向不同时显示头像
    *
    * prevRect 规则:
@@ -183,17 +195,30 @@ export function useChatRows(options: ChatRowsOptions) {
    * - 非首屏:每条消息 prevRect=LOADING_RECT(从加载气泡尺寸过渡到真实尺寸)
    */
   const rows = computed<ChatRow[]>(() => {
+    const g = geom.value
     const list: ChatRow[] = []
     let prevSide: 'other' | 'mine' | null = null
     let prevSpeakerKey: string | null = null
     let cursor = 0
+    const avatarTopToBubbleOfSide = avatarTopToBubble(g.avatarBox)
+    // 气泡测量参数(移动端字号/边距更小)
+    const metrics = {
+      fontSize: g.bubbleFontSize,
+      lineHeight: g.bubbleLineHeight,
+      padX: g.bubblePadX,
+      padY: g.bubblePadY,
+      minW: g.bubbleMinW,
+      minH: g.bubbleMinH,
+    }
+    // 加载气泡尺寸(移动端更小)
+    const loadingRect = { w: g.loadingRectW, h: g.bubbleSingleLineH }
     for (const msg of playedMessages.value) {
       const displayText = msg.text
       // 图片消息:不测量文本,用发送时计算的真实显示尺寸(纯图片无气泡)
       const hasImage = !!msg.image
       const box = hasImage
         ? { rectW: msg.imageW ?? CHAT_IMAGE.w, rectH: msg.imageH ?? CHAT_IMAGE.h, innerW: msg.imageW ?? CHAT_IMAGE.w }
-        : measure(displayText)
+        : measure(displayText, g.bubbleInnerMaxW, metrics)
 
       const svgW = bubbleSvgWidth(box.rectW, msg.side)
       const speakerKey = speakerKeyOf(msg)
@@ -202,27 +227,27 @@ export function useChatRows(options: ChatRowsOptions) {
       let avatarTop: number
       let bubbleTop: number
       if (list.length === 0) {
-        avatarTop = CHAT.anchorAvatarTop
-        bubbleTop = avatarBubbleTop(avatarTop, msg.side)
+        avatarTop = g.anchorAvatarTop - g.scrollY
+        bubbleTop = avatarBubbleTop(avatarTop, msg.side, g.avatarBox)
       } else {
-        const gap = computeGap({
+        const gap = computeGap(g, {
           side: msg.side,
           prevSide,
           prevSpeakerKey,
           speakerKey,
         })
         bubbleTop = cursor + gap
-        avatarTop = bubbleTop - AVATAR_TOP_TO_BUBBLE[msg.side]
+        avatarTop = bubbleTop - avatarTopToBubbleOfSide[msg.side]
       }
-      const avatarX = msg.side === 'other' ? CHAT.otherAvatarX : CHAT.mineAvatarX
-      const left = msg.side === 'other' ? CHAT.otherBubbleX : CHAT.mineBubbleRight - svgW
+      const avatarX = (msg.side === 'other' ? g.otherAvatarX : g.mineAvatarX) - g.scrollX
+      const left = (msg.side === 'other' ? g.otherBubbleX : g.mineBubbleRight - svgW) - g.scrollX
 
       // prevRect:每消息首次布局时冻结快照,之后永不再变。
       let prevRect: RectSize | undefined
       if (frozenPrevRects.has(msg.id)) {
         prevRect = frozenPrevRects.get(msg.id)
       } else {
-        prevRect = layoutContext.fresh ? undefined : LOADING_RECT
+        prevRect = layoutContext.fresh ? undefined : loadingRect
         frozenPrevRects.set(msg.id, prevRect)
       }
 
@@ -235,7 +260,7 @@ export function useChatRows(options: ChatRowsOptions) {
         avatarTop,
         avatarX,
         showAvatar,
-        stack: avatarStack(avatarX, avatarTop),
+        stack: avatarStack(avatarX, avatarTop, g.avatarBox),
         prevRect,
         bottom: bubbleTop + box.rectH,
       })
@@ -250,7 +275,7 @@ export function useChatRows(options: ChatRowsOptions) {
   const lastRow = computed(() => rows.value[rows.value.length - 1])
 
   /**
-   * LoadingBubble 布局
+   * LoadingBubble 布局(滚动容器相对坐标)
    *
    * - top: 末行底部 + 跨方向间距(模拟下一条消息起点)
    * - 首条消息尚无末行时,锚定到首条消息气泡顶部
@@ -258,11 +283,13 @@ export function useChatRows(options: ChatRowsOptions) {
    * - 加载气泡自身从 width=0 展开到 100,无需 prevRect
    */
   const loadingLayout = computed(() => {
+    const g = geom.value
     const side = loadingSide.value
     if (!side || !isLoading.value) return null
 
-    const loadSvgW = bubbleSvgWidth(LOADING_RECT.w, side)
-    const left = side === 'other' ? CHAT.otherBubbleX : CHAT.mineBubbleRight - loadSvgW
+    const loadingRectW = g.loadingRectW
+    const loadSvgW = bubbleSvgWidth(loadingRectW, side)
+    const left = (side === 'other' ? g.otherBubbleX : g.mineBubbleRight - loadSvgW) - g.scrollX
     let bubbleTop: number
     if (lastRow.value) {
       // 用 lastRow.box(已缓存),避免重复 measure 触发重排
@@ -275,14 +302,14 @@ export function useChatRows(options: ChatRowsOptions) {
         ? pendingAiSpeaker.value.avatar
         : (side === 'other' ? otherAvatarUrl.value : mineAvatarUrl.value)
       const gap = lastRow.value.msg.side === side
-        ? (lastKey !== fallbackKey ? CHAT_GAP.speaker : CHAT_GAP.same)
-        : CHAT_GAP.cross
+        ? (lastKey !== fallbackKey ? g.gapSpeaker : g.gapSame)
+        : g.gapCross
       bubbleTop = lastRow.value.bottom + gap
     } else {
-      bubbleTop = avatarBubbleTop(CHAT.anchorAvatarTop, side)
+      bubbleTop = avatarBubbleTop(g.anchorAvatarTop - g.scrollY, side, g.avatarBox)
     }
-    const avatarTop = bubbleTop - AVATAR_TOP_TO_BUBBLE[side]
-    const avatarX = side === 'other' ? CHAT.otherAvatarX : CHAT.mineAvatarX
+    const avatarTop = bubbleTop - avatarTopToBubble(g.avatarBox)[side]
+    const avatarX = (side === 'other' ? g.otherAvatarX : g.mineAvatarX) - g.scrollX
     // 加载气泡头像:AI 流式回复时下一条消息尚未创建,用 pendingAiSpeaker 的头像
     const portraitUrl = pendingAiSpeaker.value.avatar
       ? pendingAiSpeaker.value.avatar
@@ -290,7 +317,7 @@ export function useChatRows(options: ChatRowsOptions) {
 
     // 加载气泡占用的布局高度:加载阶段下一条消息未创建,预留单行加载气泡高度,
     // AI 首条 chunk 创建消息后由 LoadingBubble → 文字气泡过渡接管尺寸。
-    const loadH = BUBBLE_SINGLE_LINE_H
+    const loadH = g.bubbleSingleLineH
 
     return {
       left,
@@ -299,7 +326,7 @@ export function useChatRows(options: ChatRowsOptions) {
       loadH,
       avatarTop,
       avatarX,
-      stack: avatarStack(avatarX, avatarTop),
+      stack: avatarStack(avatarX, avatarTop, g.avatarBox),
       side,
       portraitUrl,
       // 已注释停用:speakerName 仅用于加载气泡上方的角色名称悬浮,该功能整体停用。
@@ -319,23 +346,23 @@ export function useChatRows(options: ChatRowsOptions) {
   })
 
   /**
-   * 滚动内容底部 y(相对 chat-scroll):
+   * 滚动内容底部 y(滚动容器相对坐标):
    * LoadingBubble 存在时以其为末行(高度取下一条消息的真实测量高度,
    * 使滚动高度在"加载 → 真实气泡"之间保持不变),否则取已发消息末行
    */
   const contentBottom = computed(() => {
     if (loadingLayout.value) {
-      return loadingLayout.value.top + loadingLayout.value.loadH - CHAT_SCROLL.y
+      return loadingLayout.value.top + loadingLayout.value.loadH
     }
     if (!lastRow.value) return 0
-    return lastRow.value.bottom - CHAT_SCROLL.y
+    return lastRow.value.bottom
   })
 
-  /** 末尾装饰 top(相对 chat-scroll) */
-  const endDecoTop = computed(() => contentBottom.value + CHAT_END_DECO.gap)
+  /** 末尾装饰 top(滚动容器相对坐标) */
+  const endDecoTop = computed(() => contentBottom.value + geom.value.endDecoGap)
 
-  /** 尾部留白 top(相对 chat-scroll) */
-  const padTop = computed(() => endDecoTop.value + CHAT_END_DECO.h + CHAT_END_DECO.gap)
+  /** 尾部留白 top(滚动容器相对坐标) */
+  const padTop = computed(() => endDecoTop.value + geom.value.endDecoH + geom.value.endDecoGap)
 
   return {
     layoutContext,

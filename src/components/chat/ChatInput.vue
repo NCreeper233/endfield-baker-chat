@@ -10,13 +10,17 @@
 //   - 发送按钮(AI 响应中变为停止按钮)
 //   - API 未配置时上抛 open-settings 事件
 // =============================================================================
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, inject, onMounted, onBeforeUnmount, toValue } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
 import { useAiChat } from '../../composables/useAiChat'
 import { useSettingsStore } from '../../stores/settings'
 import { MATERIALS } from '../../constants/materials'
-import { PANEL, panelTop as calcPanelTop } from '../../constants/panel'
+import {
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from '../../constants/chatGeometry'
 import { CHAT_IMAGE } from '../../constants/design'
 import { EMOJIS, emojiImgHtml, htmlToEmojiText } from '../../constants/emoji'
 import type { Emoji } from '../../constants/emoji'
@@ -32,11 +36,14 @@ const emit = defineEmits<{
   (e: 'open-settings'): void
 }>()
 
-/** 面板高度(px) */
-const PANEL_H = 80
+/** 注入几何(面板位置/尺寸;默认全局,导出模式由 ChatExportStage 覆盖) */
+const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
 
-/** 面板顶 = detail 底边 - 面板高 - 3px(共享公式) */
-const panelTop = calcPanelTop(PANEL_H)
+/** 面板高度(px,几何层:桌面 80 / 移动端 56) */
+const PANEL_H = computed(() => geom.value.panelHeight)
+
+/** 面板顶 = 几何层面板顶(桌面 = detail 底边 - 面板高 - 3px) */
+const panelTop = computed(() => geom.value.panelTop)
 
 /** contenteditable 输入框 DOM ref */
 const inputEl = ref<HTMLDivElement | null>(null)
@@ -50,18 +57,41 @@ const isResponding = computed(() => isAiResponding.value)
 /** 表情弹窗是否展开 */
 const showEmojiPop = ref(false)
 
+// ---- 表情弹窗网格(桌面 16 列 60px 格;窄屏 8 列 40px 格) --------------------
+/** 是否窄屏弹窗(移动端聊天区面板宽 ≤ 600px) */
+const isNarrowPop = computed(() => geom.value.panelWidth <= 600)
+
+/** 每行表情数 */
+const POP_COLS = computed(() => (isNarrowPop.value ? 8 : 16))
+/** 单格边长(px) */
+const POP_CELL = computed(() => (isNarrowPop.value ? 40 : 60))
+/** 格间距(px) */
+const POP_GAP = computed(() => (isNarrowPop.value ? 12 : 16))
+/** 弹窗上下内边距(px) */
+const POP_PAD = 24
+/** 行数(38 个表情) */
+const POP_ROWS = computed(() => Math.ceil(EMOJIS.length / POP_COLS.value))
+
 /**
- * 表情弹窗高度(px):38 个表情每行 16 个 → 3 行
- * (24 上下边距 + 3×60 格 + 2×16 行距,不出现滚动条)
+ * 表情弹窗高度(px):上下边距 + 行×格高 + 行距(不出现滚动条)
  */
-const POP_H_EMOTICON = 24 * 2 + 3 * 60 + 2 * 16
+const POP_H_EMOTICON = computed(
+  () => POP_PAD * 2 + POP_ROWS.value * POP_CELL.value + (POP_ROWS.value - 1) * POP_GAP.value,
+)
 
 /** 表情弹窗样式:紧贴面板顶边向上延伸,与面板同宽 */
 const emojiPopStyle = computed(() => ({
   left: '0px',
-  top: `-${POP_H_EMOTICON}px`,
-  width: `${PANEL.width}px`,
-  height: `${POP_H_EMOTICON}px`,
+  top: `-${POP_H_EMOTICON.value}px`,
+  width: `${geom.value.panelWidth}px`,
+  height: `${POP_H_EMOTICON.value}px`,
+}))
+
+/** 表情网格样式(列数/格宽/间距随宽度变化,inline 覆盖 scoped CSS 默认值) */
+const emojiGridStyle = computed(() => ({
+  gridTemplateColumns: `repeat(${POP_COLS.value}, ${POP_CELL.value}px)`,
+  columnGap: `${POP_GAP.value}px`,
+  rowGap: `${POP_GAP.value}px`,
 }))
 
 /** 序列化输入框内容为纯文本(表情 <img> → [sns_emoji_xxx] token) */
@@ -245,8 +275,7 @@ function onPaste(event: ClipboardEvent) {
 
 <template>
   <PanelTopMask :top="panelTop" />
-  <PanelShell :height="PANEL_H" :top="panelTop" class="chat-input">
-    <!-- 隐藏的图片文件选择框 -->
+  <PanelShell :height="PANEL_H" :top="panelTop" class="chat-input">    <!-- 隐藏的图片文件选择框 -->
     <input
       ref="fileInput"
       class="chat-input__file"
@@ -317,8 +346,8 @@ function onPaste(event: ClipboardEvent) {
         <!-- 背景装饰:左上角 + 右下角 -->
         <img class="chat-input__pop-bg chat-input__pop-bg--tl" :src="MATERIALS.editPopDecoTl" alt="" />
         <img class="chat-input__pop-bg chat-input__pop-bg--br" :src="MATERIALS.editPopDecoBr" alt="" />
-        <!-- 表情选择网格:每行 16 个 60px 格,点击在输入框光标处插入 -->
-        <div class="chat-input__emoji-grid">
+        <!-- 表情选择网格:点击在输入框光标处插入(列数/格宽由 emojiGridStyle 响应式注入) -->
+        <div class="chat-input__emoji-grid" :style="emojiGridStyle">
           <button
             v-for="e in EMOJIS"
             :key="e.token"
@@ -344,6 +373,12 @@ function onPaste(event: ClipboardEvent) {
   padding: 0 24px;
   box-sizing: border-box;
   pointer-events: none;
+
+  // 移动端窄屏:左右 padding 与按钮间距收窄
+  @media (max-width: 768px) {
+    padding: 0 12px;
+    gap: 10px;
+  }
 
   // 隐藏的图片选择框
   &__file {

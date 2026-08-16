@@ -22,8 +22,13 @@
 //   - mine 侧右缘固定:left = props.left + (finalSvgW - svgW)(必为加号)
 //     当前宽 < 最终宽 时左缘位于最终位右侧,过渡中向左滑回
 // =============================================================================
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { type BubbleBox, bubbleSvgWidth, BUBBLE_FONT, BUBBLE_FONT_SIZE, BUBBLE_LINE_HEIGHT } from '../../utils/measure'
+import { computed, inject, onMounted, onUnmounted, ref, toValue, watch } from 'vue'
+import { type BubbleBox, bubbleSvgWidth, BUBBLE_FONT } from '../../utils/measure'
+import {
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from '../../constants/chatGeometry'
 import { BUBBLE_TEXT_MINE, BUBBLE_TEXT_OTHER } from '../../constants/colors'
 import { emojiToHtml } from '../../constants/emoji'
 import { useBubbleSvgGeometry } from '../../composables/useBubbleSvgGeometry'
@@ -52,6 +57,9 @@ const props = defineProps<{
    */
   prevRect?: { w: number; h: number }
 }>()
+
+/** 注入几何(气泡字号/边距/圆角;默认全局,导出模式由 ChatExportStage 覆盖) */
+const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
 
 /** 当前 rect 尺寸(响应式,过渡用)
  *
@@ -245,8 +253,8 @@ const textStyle = computed(() => ({
   display: 'flex',
   alignItems: 'center',
   fontFamily: BUBBLE_FONT,
-  fontSize: `${BUBBLE_FONT_SIZE}px`,
-  lineHeight: `${BUBBLE_LINE_HEIGHT}px`,
+  fontSize: `${geom.value.bubbleFontSize}px`,
+  lineHeight: `${geom.value.bubbleLineHeight}px`,
   whiteSpace: 'pre-line',
   wordBreak: 'break-word' as const,
   userSelect: 'text' as const,
@@ -274,8 +282,8 @@ const textStyle = computed(() => ({
     <rect
       :x="rectX"
       y="0"
-      rx="13.65"
-      ry="13.65"
+      :rx="geom.bubbleRadius"
+      :ry="geom.bubbleRadius"
       :fill="fillColor"
       :style="rectStyle"
     />
@@ -284,7 +292,7 @@ const textStyle = computed(() => ({
       :style="tailStyle"
       :fill="fillColor"
     />
-    <foreignObject :x="rectX + 13" y="0" :width="box.innerW" :height="box.rectH">
+    <foreignObject :x="rectX + geom.bubblePadX" y="0" :width="box.innerW" :height="box.rectH">
       <div
         xmlns="http://www.w3.org/1999/xhtml"
         class="chat-bubble__text"

@@ -7,8 +7,12 @@
 // 设计理由:从 ChatArea 消息循环中抽出,模板行数减负;
 //          头像点击以 emit 上报,父组件统一处理 store 写入。
 // =============================================================================
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { CHAT, CHAT_SCROLL } from '../../constants/design'
+import { computed, inject, onMounted, onUnmounted, ref, toValue } from 'vue'
+import {
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from '../../constants/chatGeometry'
 import {
   pos,
   // speakerNameStyle, // 【已注释停用】角色名称显示功能整体停用
@@ -25,7 +29,7 @@ type SpeakerAvatarResolver = (msg: MessageSpeaker) => string
 // type SpeakerNameResolver = (msg: MessageSpeaker) => string
 
 const props = defineProps<{
-  /** 消息行布局结果(rows[i]) */
+  /** 消息行布局结果(rows[i],坐标为滚动容器相对坐标) */
   row: ChatRow
   /** 说话人头像解析(useChatRows.resolveSpeakerAvatar) */
   resolveSpeakerAvatar: SpeakerAvatarResolver
@@ -39,6 +43,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   'avatar-click': [row: ChatRow]
 }>()
+
+/** 注入几何(头像盒尺寸等;默认全局,导出模式由 ChatExportStage 覆盖) */
+const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
 
 /**
  * 图片消息展开动画
@@ -98,7 +105,7 @@ const imageAnimStyle = computed(() => {
     :base-y="row.avatarTop"
     :portrait-url="resolveSpeakerAvatar(row.msg)"
     :class="{ 'chat-avatar--pickable': row.msg.side === 'mine' }"
-    :style="pos(row.avatarX - CHAT_SCROLL.x, row.avatarTop - CHAT_SCROLL.y, CHAT.avatarBox, CHAT.avatarBox)"
+    :style="pos(row.avatarX, row.avatarTop, geom.avatarBox, geom.avatarBox)"
     @click="emit('avatar-click', row)"
   />
   <!-- 角色名称悬浮(已注释停用):贴在带头像消息的气泡上缘上方,悬浮于消息间空隙(不占布局);
@@ -106,15 +113,15 @@ const imageAnimStyle = computed(() => {
   <!-- <span
     v-if="row.showAvatar && showCharacterNames"
     class="chat-speaker-name"
-    :style="speakerNameStyle(row.msg.side, row.left - CHAT_SCROLL.x, row.left - CHAT_SCROLL.x + row.box.rectW, row.bubbleTop - CHAT_SCROLL.y)"
+    :style="speakerNameStyle(row.msg.side, row.left, row.left + row.box.rectW, row.bubbleTop)"
   >{{ resolveSpeakerName(row.msg) }}</span> -->
   <ChatBubble
     v-if="!row.msg.image"
     :text="row.displayText"
     :box="row.box"
     :side="row.msg.side"
-    :left="row.left - CHAT_SCROLL.x"
-    :top="row.bubbleTop - CHAT_SCROLL.y"
+    :left="row.left"
+    :top="row.bubbleTop"
     :prev-rect="row.prevRect"
   />
   <!-- 图片消息:纯图片无气泡(固定显示区域,contain 等比完整显示);
@@ -124,7 +131,7 @@ const imageAnimStyle = computed(() => {
     class="chat-image"
     :class="{ 'chat-image--anim': imageAnimating }"
     :src="row.msg.image"
-    :style="[pos(row.left - CHAT_SCROLL.x, row.bubbleTop - CHAT_SCROLL.y, row.box.rectW, row.box.rectH), imageAnimStyle]"
+    :style="[pos(row.left, row.bubbleTop, row.box.rectW, row.box.rectH), imageAnimStyle]"
     alt=""
   />
 </template>

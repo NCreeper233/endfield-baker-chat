@@ -142,6 +142,8 @@ export const CHAT_IMAGE = {
 
 // ---- 头像几何 -------------------------------------------------------------
 // 头像由 bg/portrait/ring 三层组成,需精确计算各层位置以贴合 ring 圆环。
+// 桌面端 avatarBox = 98(设计稿值);移动端传入更小的 avatarBox,
+// ring/portrait 按比例推导,保持同构视觉。
 
 const RING_W = 76
 const RING_H = 75.24
@@ -152,28 +154,50 @@ const RING_CY = 0.458 // ring 内圆心 y(略偏上,让头像稍微靠上一点)
 // 头像肖像相对 ring 的缩放比:比圆环内孔小一圈(留出约一个环宽的空隙)
 const PORTRAIT_SCALE = 0.8
 
-// 头像可见顶部(肖像在 avatarBox 内的可见顶部 y)
-const PORTRAIT_VISIBLE_TOP =
-  (CHAT.avatarBox - RING_H) / 2 + RING_H * RING_CY - (RING_H * PORTRAIT_SCALE) / 2
+/** ring 尺寸(随 avatarBox 等比缩放;桌面 98px 时与设计稿一致) */
+function ringSize(avatarBox: number): { w: number; h: number } {
+  return {
+    w: (RING_W * avatarBox) / CHAT.avatarBox,
+    h: (RING_H * avatarBox) / CHAT.avatarBox,
+  }
+}
+
+/** 头像可见顶部(肖像在 avatarBox 内的可见顶部 y) */
+function portraitVisibleTop(avatarBox: number): number {
+  const ring = ringSize(avatarBox)
+  return (
+    (avatarBox - ring.h) / 2 +
+    ring.h * RING_CY -
+    (ring.h * PORTRAIT_SCALE) / 2
+  )
+}
 
 /**
- * 头像顶部到气泡顶部的偏移
+ * 头像顶部到气泡顶部的偏移(随 avatarBox 等比推导)
  *
- * other/mine 当前共用同一公式,拆成 Record 是为后续差异化铺路。
+ * other/mine 当前共用同一公式,返回 Record 是为后续差异化铺路。
  */
-export const AVATAR_TOP_TO_BUBBLE: Record<'other' | 'mine', number> = {
-  other: PORTRAIT_VISIBLE_TOP + CHAT.bubbleOffset,
-  mine: PORTRAIT_VISIBLE_TOP + CHAT.bubbleOffset,
+export function avatarTopToBubble(avatarBox: number): Record<'other' | 'mine', number> {
+  const offset = portraitVisibleTop(avatarBox) + CHAT.bubbleOffset
+  return { other: offset, mine: offset }
 }
+
+/** 桌面端头像→气泡偏移(98px 头像盒,与历史行为一致) */
+export const AVATAR_TOP_TO_BUBBLE = avatarTopToBubble(CHAT.avatarBox)
 
 /**
  * 由头像顶部 y 推算气泡顶部 y
  *
  * @param avatarTop  头像容器顶部 y
  * @param side       消息方向
+ * @param avatarBox  头像盒尺寸(默认桌面 98)
  */
-export function avatarBubbleTop(avatarTop: number, side: 'other' | 'mine'): number {
-  return avatarTop + AVATAR_TOP_TO_BUBBLE[side]
+export function avatarBubbleTop(
+  avatarTop: number,
+  side: 'other' | 'mine',
+  avatarBox: number = CHAT.avatarBox,
+): number {
+  return avatarTop + avatarTopToBubble(avatarBox)[side]
 }
 
 /** 矩形槽位(坐标 + 尺寸) */
@@ -192,28 +216,34 @@ export interface AvatarStack {
 }
 
 /**
- * 计算头像三层槽位
+ * 计算头像三层槽位(avatarBox 可参数化:桌面 98 / 移动端更小)
  *
- * @param baseX  头像容器左上 x
- * @param baseY  头像容器左上 y
- * @returns      bg / portrait /ring 三个矩形的绝对坐标
+ * @param baseX     头像容器左上 x
+ * @param baseY     头像容器左上 y
+ * @param avatarBox 头像容器边长(默认桌面 98)
+ * @returns         bg / portrait / ring 三个矩形的绝对坐标
  */
-export function avatarStack(baseX: number, baseY: number): AvatarStack {
-  const bg: RectSlot = { x: baseX, y: baseY, w: CHAT.avatarBox, h: CHAT.avatarBox }
-  const ring: RectSlot = {
-    x: baseX + (CHAT.avatarBox - RING_W) / 2,
-    y: baseY + (CHAT.avatarBox - RING_H) / 2,
-    w: RING_W,
-    h: RING_H,
+export function avatarStack(
+  baseX: number,
+  baseY: number,
+  avatarBox: number = CHAT.avatarBox,
+): AvatarStack {
+  const ring = ringSize(avatarBox)
+  const bg: RectSlot = { x: baseX, y: baseY, w: avatarBox, h: avatarBox }
+  const ringSlot: RectSlot = {
+    x: baseX + (avatarBox - ring.w) / 2,
+    y: baseY + (avatarBox - ring.h) / 2,
+    w: ring.w,
+    h: ring.h,
   }
-  const pw = RING_W * PORTRAIT_SCALE
-  const ph = RING_H * PORTRAIT_SCALE
+  const pw = ring.w * PORTRAIT_SCALE
+  const ph = ring.h * PORTRAIT_SCALE
   return {
     bg,
-    ring,
+    ring: ringSlot,
     portrait: {
-      x: ring.x + RING_W * RING_CX - pw / 2,
-      y: ring.y + RING_H * RING_CY - ph / 2,
+      x: ringSlot.x + ring.w * RING_CX - pw / 2,
+      y: ringSlot.y + ring.h * RING_CY - ph / 2,
       w: pw,
       h: ph,
     },

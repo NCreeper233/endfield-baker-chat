@@ -17,40 +17,41 @@
 // 布局规则(两者的 flex / transform-origin 过渡)由消费者通过 class 透传
 // (单根组件支持属性透传,class 合并到面板元素)。
 // =============================================================================
-import { computed } from 'vue'
+import { computed, inject, toValue } from 'vue'
 import {
-  PANEL,
-  PANEL_TOP_DECO_W,
-  PANEL_TOP_DECO_H,
-  PANEL_TOP_DECO_REL,
-  panelTop as calcPanelTop,
-} from '../../constants/panel'
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from '../../constants/chatGeometry'
 import { MATERIALS } from '../../constants/materials'
 
 const props = defineProps<{
   /** 面板高度(px) */
   height: number
-  /** 面板顶(px,相对 .chat-area;默认按共享贴底公式由 height 计算) */
+  /** 面板顶(px,相对 .chat-area;默认取几何层面板顶) */
   top?: number
 }>()
 
-/** 面板顶(共享贴底公式:detail 底边 - 面板高 - 3px) */
-const panelTop = computed(() => props.top ?? calcPanelTop(props.height))
+/** 注入几何(面板位置/尺寸;默认全局,导出模式由 ChatExportStage 覆盖) */
+const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+
+/** 面板顶(几何层:桌面 = detail 底边 - 面板高 - 3px) */
+const panelTop = computed(() => props.top ?? geom.value.panelTop)
 
 /** 面板坐标(贴 chat_strip_detail 底边) */
 const panelStyle = computed(() => ({
-  left: `${PANEL.left}px`,
-  width: `${PANEL.width}px`,
+  left: `${geom.value.panelLeft}px`,
+  width: `${geom.value.panelWidth}px`,
   top: `${panelTop.value}px`,
   height: `${props.height}px`,
 }))
 
 /** 装饰图相对面板:距上端 5px,水平居中(悬浮于面板上边缘上方) */
 const decoStyle = computed(() => ({
-  left: `${PANEL_TOP_DECO_REL.left}px`,
-  top: `${PANEL_TOP_DECO_REL.top}px`,
-  width: `${PANEL_TOP_DECO_W}px`,
-  height: `${PANEL_TOP_DECO_H}px`,
+  left: `${(geom.value.panelWidth - geom.value.panelTopDecoW) / 2}px`,
+  top: `${-geom.value.panelTopDecoH - 5}px`,
+  width: `${geom.value.panelTopDecoW}px`,
+  height: `${geom.value.panelTopDecoH}px`,
 }))
 </script>
 

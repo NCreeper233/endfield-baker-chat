@@ -29,6 +29,11 @@ import type { Card } from '../../types/chat'
 const props = defineProps<{
   /** 是否展开(由 App 的清除数据按钮控制) */
   open: boolean
+  /**
+   * 内嵌模式(设置弹窗内嵌时置 true):
+   * 不渲染遮罩/关闭按钮/标题,面板铺满所在容器宽度,仅保留功能内容。
+   */
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -176,6 +181,9 @@ function onConfirm() {
     flushPendingWrites()
     emit('close')
   }
+  // 复位确认态(内嵌模式无 open 翻转驱动 watch,必须主动复位)
+  confirmKind.value = null
+  pendingImport.value = null
 }
 
 function onCancelConfirm() {
@@ -186,11 +194,16 @@ function onCancelConfirm() {
 
 <template>
   <Transition name="dm">
-    <div v-if="open" class="dm" @click.self="emit('close')">
+    <div
+      v-if="open"
+      class="dm"
+      :class="{ 'dm--embedded': embedded }"
+      @click.self="emit('close')"
+    >
       <div class="dm__panel" :class="{ 'dm__panel--narrow': !!confirmKind }">
-        <!-- 右上角 × 关闭按钮 -->
-        <button class="dm__close" type="button" aria-label="关闭" @click="emit('close')">×</button>
-        <h2 class="dm__title">数据管理</h2>
+        <!-- 右上角 × 关闭按钮(内嵌模式不显示) -->
+        <button v-if="!embedded" class="dm__close" type="button" aria-label="关闭" @click="emit('close')">×</button>
+        <h2 v-if="!embedded" class="dm__title">数据管理</h2>
         <p class="dm__stats">
           干员 {{ stats.cardCount }} · 对话 {{ stats.convCount }} · 消息 {{ stats.msgCount }} · 数据
           {{ stats.sizeKB }} KB
@@ -238,7 +251,25 @@ function onCancelConfirm() {
 // 数据管理弹窗:半透明遮罩 + 居中深色面板(CSS 绘制,不新增素材图)
 @include dialog-shell(dm, 500px, 14px, 'stats', true);
 
+// 内嵌模式(设置弹窗内):去掉遮罩/居中定位,面板铺满容器宽度
 .dm {
+  &--embedded {
+    position: static;
+    inset: auto;
+    display: block;
+    background: transparent;
+    z-index: auto;
+
+    .dm__panel {
+      width: 100%;
+      max-width: none;
+      padding: 0;
+      border: none;
+      box-shadow: none;
+      background: transparent;
+    }
+  }
+
   &__panel--narrow {
     width: 348px;
   }

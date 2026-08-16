@@ -85,6 +85,7 @@
     &__panel {
       position: relative;
       width: #{$panel-w};
+      max-width: calc(100vw - 24px); // 移动端窄屏:面板不超视口宽
       padding: 28px 32px 20px;
       border-radius: 14px;
       background: $color-card-bg;

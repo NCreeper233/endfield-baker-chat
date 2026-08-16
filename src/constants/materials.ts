@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // 素材集中导入
 // -----------------------------------------------------------------------------
 // 所有素材在此处一次性导入,组件统一通过 MATERIALS 表引用,避免跨组件重复 import。
@@ -28,6 +28,14 @@ import avatarBase from '../assets/materials/icon_virtualmouse_bg.webp'
 import chatStripV1 from '../assets/materials/chat_strip_v1.webp'
 import chatStripV2 from '../assets/materials/chat_strip_v2.webp'
 import chatStripV3 from '../assets/materials/chat_strip_v3.webp'
+// 移动端头图分段素材(ffmpeg 已由 png 转 webp:l = 左纹理段,r = 右图案段,c = 中间纯色条,均 66px 高)
+import chatStripV1L from '../assets/materials/chat_strip_v1_l.webp'
+import chatStripV1R from '../assets/materials/chat_strip_v1_r.webp'
+import chatStripV2L from '../assets/materials/chat_strip_v2_l.webp'
+import chatStripV2R from '../assets/materials/chat_strip_v2_r.webp'
+import chatStripV3L from '../assets/materials/chat_strip_v3_l.webp'
+import chatStripV3R from '../assets/materials/chat_strip_v3_r.webp'
+import chatStripC from '../assets/materials/chat_strip_c.webp'
 import chatBottomDeco from '../assets/materials/chat_bottom_deco.webp'
 import chatEndDeco from '../assets/materials/chat_end_deco.webp'
 import choiceTopDeco from '../assets/materials/choice_top_deco.webp'
@@ -84,6 +92,14 @@ export const MATERIALS = {
   chatStripV1,
   chatStripV2,
   chatStripV3,
+  // 移动端头图分段素材(l/r/c)
+  chatStripV1L,
+  chatStripV1R,
+  chatStripV2L,
+  chatStripV2R,
+  chatStripV3L,
+  chatStripV3R,
+  chatStripC,
   chatBottomDeco,
   chatEndDeco,
   // 面板顶部装饰

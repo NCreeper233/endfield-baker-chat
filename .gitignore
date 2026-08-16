@@ -4,3 +4,9 @@ dist/
 
 #备份
 backup/
+
+# 本地模拟后端 LLM 
+mock/
+
+#dsh-vision-router
+.dsh-vision-router/

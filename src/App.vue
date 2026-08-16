@@ -6,17 +6,22 @@
 // 删除确认弹窗为独立组件(DeleteConfirmDialog),打开状态与删除动作在此持有。
 // 调试模式:URL 包含 #debug 时,useDebugMode 会在左下角渲染气泡尺寸信息。
 // =============================================================================
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, inject, provide, toValue, watch, onMounted, onBeforeUnmount } from 'vue'
 import AppBackground from './components/layout/AppBackground.vue'
 import DesignCanvas from './components/layout/DesignCanvas.vue'
 import HeaderTop from './components/header/HeaderTop.vue'
 import CharacterCardList from './components/character/CharacterCardList.vue'
 import ChatArea from './components/chat/ChatArea.vue'
 import DeleteConfirmDialog from './components/layout/DeleteConfirmDialog.vue'
-import DataManagerDialog from './components/layout/DataManagerDialog.vue'
 import ChatExportDialog from './components/layout/ChatExportDialog.vue'
 import SettingsDialog from './components/layout/SettingsDialog.vue'
 import { useChatStore } from './stores/chat'
+import { useMobile } from './composables/useMobile'
+import {
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from './constants/chatGeometry'
 import { MATERIALS } from './constants/materials'
 import { useDebugMode } from './composables/useDebugMode'
 import { useCustomBackground } from './composables/useCustomBackground'
@@ -29,6 +34,71 @@ useDebugMode()
 // 自定义页面背景(带 localStorage 持久化:刷新保留、不随 .baker 导出、
 // 不受清空对话影响;上传成功赋值后自动落库)
 const { customBg } = useCustomBackground()
+
+// ---- 移动端视图 -----------------------------------------------------------
+// ≤768px 视口进入移动端模式:
+//   list 视图 = 对话列表全屏;选中对话后切 chat 视图 = 全屏聊天窗口。
+// 移动端聊天窗口是独立自适应组件(MobileChat),不复用 1920 设计稿画布。
+const { isMobile, width, height } = useMobile()
+
+/** 移动端视图:list=对话列表 / chat=聊天窗口 */
+const mobileView = ref<'list' | 'chat'>('list')
+
+/** 移动端列表画布设计尺寸(与 CharacterCardList 一致) */
+const MOBILE_LIST_W = 526
+const MOBILE_LIST_H = 897.27
+/** 移动端列表页顶部预留(px,视口坐标):避开 fixed 工具栏,容纳 HeaderTop 标题 */
+const MOBILE_LIST_TOP_PAD = 40
+/**
+ * 卡片居中修正(设计值,zoom 自动缩放):
+ * 卡片在设计稿 526 坐标系内从 x=47.42 起(左侧空 47.42,右侧空 20.3),
+ * 移动端单独展示列表时内容整体右偏 47.42-(526-458.28)/2 = 13.56,
+ * 给 zoom 容器负 margin 抵消,使卡片视觉居中。
+ */
+const MOBILE_LIST_MARGIN_X = -(47.42 - (526 - 458.28) / 2)
+
+/** 移动端列表缩放系数:列表设计尺寸等比铺满视口(顶部预留工具栏空间) */
+const mobileListZoom = computed(() =>
+  Math.max(
+    0.01,
+    Math.min(
+      width.value / MOBILE_LIST_W,
+      (height.value - MOBILE_LIST_TOP_PAD) / MOBILE_LIST_H,
+    ),
+  ),
+)
+
+// 移动端视图联动:
+// - 移动端单击选中子对话只高亮(不自动进入聊天,进入由双击触发)
+// - 选中清空(activeSub 为 null,删除/清空等场景) → 回列表视图
+watch(
+  [isMobile, () => chatStore.activeSub],
+  ([m, sub]) => {
+    if (!m) return
+    if (sub === null) mobileView.value = 'list'
+  },
+)
+
+// 移动端双击子对话进入聊天视图(由 SubCard 双击触发;桌面端不生效)
+provide('enterMobileChat', () => {
+  if (isMobile.value) mobileView.value = 'chat'
+})
+
+/** 返回列表:切回列表视图并清除选中(回到未选中任何对话/角色的初始状态) */
+function onMobileBack() {
+  mobileView.value = 'list'
+  chatStore.clearSelection()
+}
+
+/** 移动端聊天区几何(返回按钮垂直对齐头部用;桌面/导出模式由 ChatExportStage 覆盖) */
+const mobileGeom = computed<ChatGeometry>(() =>
+  toValue(inject(chatGeometryKey, globalChatGeometry)),
+)
+
+/** 返回按钮(51px 圆形)在头部内的垂直居中偏移(+1px 视觉微调) */
+const mBackTop = computed(() =>
+  mobileGeom.value.stripSegmented ? (mobileGeom.value.stripH - 51) / 2 + 1 : 6,
+)
 
 /**
  * 右上角工具栏是否可见(E 键切换)
@@ -58,44 +128,23 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onToolbarToggleKey
 /** 删除确认弹窗是否展开(删除按钮 toggle) */
 const confirmOpen = ref(false)
 
-/** 数据管理弹窗是否展开(清除数据按钮 toggle) */
-const dataManagerOpen = ref(false)
-
 /** 导出聊天截图弹窗是否展开(分享按钮 toggle) */
 const shareOpen = ref(false)
 
-/** 设置弹窗是否展开(API 配置 + 提示词编辑) */
+/** 设置弹窗是否展开(API 配置 + 提示词编辑 + 数据管理 + 背景) */
 const settingsOpen = ref(false)
 
-/** "请先选中会话"提示弹窗(新建对话时未选中任何对话触发) */
+/** "请先选中角色卡片"提示弹窗(新建对话时未选中任何角色触发) */
 const needSelectOpen = ref(false)
-
-/** 背景上传按钮对应的隐藏 file input */
-const bgInput = ref<HTMLInputElement | null>(null)
-
-/** 上传图片作为自定义页面背景(读为 data URL 交给 AppBackground 渲染) */
-function onBgUpload(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]
-  if (!file) return
-  const reader = new FileReader()
-  reader.onload = () => {
-    customBg.value = typeof reader.result === 'string' ? reader.result : null
-  }
-  // FileReader 可能因文件损坏 / 权限问题失败,失败时打印警告,input 一并清空可重试。
-  reader.onerror = () => {
-    console.warn('[App] 背景图片读取失败,可能是损坏或不受支持的格式')
-  }
-  reader.readAsDataURL(file)
-  ;(event.target as HTMLInputElement).value = ''
-}
 
 /**
  * 聊天按钮(chat09)行为:
- * - 已选中子对话 → 在选中父级卡片下追加子会话(无论是否展开)
- * - 未选中任何对话 → 弹出"请先选中会话"提示
+ * - 已选中主卡(点击父级角色卡片或子对话,activeCardIndex 非 null)
+ *   → 在选中主卡下追加子会话(无需进入子对话)
+ * - 未选中任何角色 → 弹出"请先选中角色"提示
  */
 function onChatNew() {
-  if (chatStore.activeSub === null) {
+  if (chatStore.activeCardIndex === null) {
     needSelectOpen.value = true
     return
   }
@@ -105,13 +154,80 @@ function onChatNew() {
 
 <template>
   <AppBackground :custom-url="customBg" />
-  <DesignCanvas>
-    <HeaderTop />
-    <CharacterCardList />
-    <ChatArea @open-settings="settingsOpen = true" />
-  </DesignCanvas>
-  <!-- 右上角工具栏(E 键整体隐藏/显示,刷新恢复可见) -->
-  <div v-show="showToolbar">
+
+  <!-- ==================== 桌面端(>768px):1920 设计稿等比画布 ==================== -->
+  <template v-if="!isMobile">
+    <DesignCanvas>
+      <HeaderTop />
+      <CharacterCardList />
+      <ChatArea @open-settings="settingsOpen = true" />
+    </DesignCanvas>
+  </template>
+
+  <!-- ==================== 移动端(≤768px):列表 ↔ 聊天 双视图 ==================== -->
+  <template v-else>
+    <!-- 列表视图:对话列表等比缩放铺满视口(选中对话后自动切到聊天视图)。
+         含 HeaderTop(//BAKER/会话消息 标题 + 装饰图)与卡片列表,
+         负 margin 抵消卡片设计坐标右偏,使内容视觉居中 -->
+    <div v-if="mobileView === 'list'" class="m-list">
+      <div class="m-list__stage">
+        <div
+          class="m-list__zoom"
+          :style="{
+            width: MOBILE_LIST_W + 'px',
+            height: MOBILE_LIST_H + 'px',
+            zoom: String(mobileListZoom),
+            marginLeft: MOBILE_LIST_MARGIN_X + 'px',
+          }"
+        >
+          <HeaderTop />
+          <CharacterCardList />
+        </div>
+      </div>
+    </div>
+    <!-- 聊天视图:直接复用桌面端 ChatArea 组件与样式。
+         布局由几何层(chatGeometry)按视口驱动:字号不变、气泡流式换行、
+         输入面板贴底。头图(strip 位图)按容器裁切,后续由用户自行处理 -->
+    <div v-else class="m-chat">
+      <!-- 返回列表按钮:白色圆形 SVG(源自 baker-maker 任务面板装饰按钮样式),
+           位于头部右侧垂直居中 -->
+      <button
+        class="m-chat__back"
+        type="button"
+        aria-label="返回"
+        :style="{ top: mBackTop + 'px' }"
+        @click="onMobileBack"
+      >
+        <svg viewBox="0 0 50 50" aria-hidden="true">
+          <defs>
+            <filter id="mBackShadow" x="-50%" y="-50%" width="200%" height="200%">
+              <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.35" />
+            </filter>
+          </defs>
+          <!-- 中心实心圆(r≤20,直径 40px;圆环已按要求去掉) -->
+          <path
+            d="M25,25 m-20,0 a20,20 0 1,0 40,0 a20,20 0 1,0 -40,0"
+            fill="#454545"
+            filter="url(#mBackShadow)"
+          />
+          <!-- 中心 "<" 形状(返回语义,相对原版 ">" 镜像):顶点在圆心,两条线段向左开口 -->
+          <path
+            d="M29,17 L19,25 L29,33"
+            fill="none"
+            stroke="#fff"
+            stroke-width="4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+      <ChatArea @open-settings="settingsOpen = true" />
+    </div>
+  </template>
+
+  <!-- 右上角工具栏(E 键整体隐藏/显示,刷新恢复可见)。
+       移动端:仅列表视图显示(聊天视图由 MobileChat 顶栏提供设置入口) -->
+  <div v-show="showToolbar && (!isMobile || mobileView === 'list')">
   <!-- 新建对话按钮:右上角起始位;选中子对话时在选中父级卡片下追加子会话(无论是否展开);
        未选中任何对话时弹出"请先选中会话"提示 -->
   <button
@@ -133,23 +249,7 @@ function onChatNew() {
   >
     <img :src="MATERIALS.editBtnCharacter" alt="角色名" />
   </button> -->
-  <!-- 背景自定义按钮:位于 chat09 按钮右侧(建会话与删除界面之间),始终可见;
-       点击弹出本地图片选择,上传图片作为自定义页面背景(原游戏背景被覆盖) -->
-  <button
-    class="edit-toggle edit-toggle--bg"
-    type="button"
-    @click="bgInput?.click()"
-  >
-    <img :src="MATERIALS.editBtnUpgrade" alt="自定义背景" />
-  </button>
-  <!-- 隐藏的文件选择框(由上面按钮触发) -->
-  <input
-    ref="bgInput"
-    type="file"
-    accept="image/*"
-    class="bg-file-input"
-    @change="onBgUpload"
-  />
+  <!-- 背景自定义按钮与数据管理按钮已移除:功能并入设置弹窗("背景"/"数据管理"标签页) -->
   <!-- 删除对话按钮:与 chat09 按钮同列(正下方),始终可见;点击弹出确认弹窗 -->
   <button
     class="edit-toggle edit-toggle--delete"
@@ -160,16 +260,12 @@ function onChatNew() {
   </button>
 
   <!-- 右侧操作按钮:横向等距排列,始终可见。
-       导出 → 打开数据管理弹窗(统计/导出/导入/清空/重置;原独立"清除数据"按钮
-       已并入此按钮) -->
-  <button class="edit-toggle edit-toggle--export" type="button" @click="dataManagerOpen = true">
-    <img :src="MATERIALS.editBtnExport" alt="导出" />
-  </button>
+       分享 → 打开导出聊天截图弹窗 -->
   <button class="edit-toggle edit-toggle--share" type="button" @click="shareOpen = true">
     <img :src="MATERIALS.editBtnShare" alt="分享" />
   </button>
   <!-- 设置按钮:位于按钮列最左侧(share 左侧),login_btn_setting 图标;
-       点击打开 API 配置 + 提示词编辑 + 免责声明 + 关于 弹窗 -->
+       点击打开 API 配置 + 提示词编辑 + 数据管理 + 背景 + 免责声明 + 关于 弹窗 -->
   <button
     class="edit-toggle edit-toggle--settings"
     type="button"
@@ -181,8 +277,6 @@ function onChatNew() {
 
   <!-- 删除对话确认弹窗:fixed 视口定位,1920 原始尺寸不缩放 -->
   <DeleteConfirmDialog :open="confirmOpen" @close="confirmOpen = false" />
-  <!-- 数据管理弹窗:清除数据按钮触发 -->
-  <DataManagerDialog :open="dataManagerOpen" @close="dataManagerOpen = false" />
   <!-- 导出聊天截图弹窗:分享按钮触发(右侧工具栏显示) -->
   <ChatExportDialog
     :open="shareOpen"
@@ -194,13 +288,18 @@ function onChatNew() {
   <Transition name="ns">
     <div v-if="needSelectOpen" class="ns" @click.self="needSelectOpen = false">
       <div class="ns__panel">
-        <p class="ns__text">请先选中会话</p>
+        <p class="ns__text">请先选中角色卡片</p>
         <button class="ns__btn" type="button" @click="needSelectOpen = false">确定</button>
       </div>
     </div>
   </Transition>
-  <!-- 设置弹窗:API 配置 + 系统提示词 + 角色提示词编辑 -->
-  <SettingsDialog :open="settingsOpen" @close="settingsOpen = false" />
+  <!-- 设置弹窗:API 配置 + 系统提示词 + 角色提示词编辑 + 数据管理 + 背景 -->
+  <SettingsDialog
+    :open="settingsOpen"
+    :custom-bg="customBg"
+    :on-bg-change="(v) => (customBg = v)"
+    @close="settingsOpen = false"
+  />
 </template>
 
 <style scoped lang="scss">
@@ -242,27 +341,19 @@ function onChatNew() {
   }
 
   // 背景自定义按钮:位于 chat09 按钮左侧(同排横向等距,75px)
-  &--bg {
+  // 删除对话按钮:与 chat09 同排横向等距(间距 75px)
+  &--delete {
     right: 135px;
   }
 
-  // 删除对话按钮:位于背景按钮左侧(同排横向等距)
-  &--delete {
-    right: 210px;
-  }
-
-  // 右侧操作按钮(导出/分享):横向等距排列(每个按钮间距 75px;原清除数据按钮已并入导出按钮)
-  &--export {
-    right: 285px;
-  }
-
+  // 分享按钮(导出聊天截图):横向等距排列
   &--share {
-    right: 360px;
+    right: 210px;
   }
 
   // 设置按钮:位于按钮列最左侧(share 左侧,同排横向等距)
   &--settings {
-    right: 435px;
+    right: 285px;
   }
 
   img {
@@ -278,50 +369,92 @@ function onChatNew() {
   }
 }
 
-// 背景上传用的隐藏 file input(由工具栏"自定义背景"按钮触发弹出)
-.bg-file-input {
+// ---- 移动端列表视图 --------------------------------------------------------
+// 对话列表(526×897 设计稿)等比缩放铺满手机视口;列表自身可滚动。
+// stage 顶部预留 MOBILE_LIST_TOP_PAD 空间(fixed 工具栏 + HeaderTop 标题区)。
+.m-list {
   position: fixed;
-  width: 0;
-  height: 0;
-  opacity: 0;
-  pointer-events: none;
+  inset: 0;
+  z-index: 1;
+  background: transparent;
+
+  &__stage {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 40px;
+  }
+
+  &__zoom {
+    position: relative;
+    flex: none;
+  }
+}
+
+// ---- 移动端聊天视图 --------------------------------------------------------
+// 直接渲染桌面端 ChatArea:几何层(chatGeometry)把聊天区坐标映射到视口
+// (scrollX/Y=0、strip 贴顶、输入面板贴底),此容器仅提供 fixed 全屏定位基准
+// 与悬浮返回按钮。
+.m-chat {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  background: transparent;
+
+  // 返回列表按钮:实心圆 SVG,位于头部右侧垂直居中,
+  // 层级高于头图(strip z1)与滚动区
+  &__back {
+    position: absolute;
+    right: 8px;
+    top: 0;
+    z-index: 130;
+    width: 51px;
+    height: 51px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    &:active {
+      transform: scale(0.94);
+    }
+  }
 }
 
 // ---- 移动端适配 -----------------------------------------------------------
-// 桌面端 6 个工具栏按钮横向铺开占 ~460px(间距 75px、图标 25px),窄屏会溢出左侧。
-// 移动端整体收紧:图标缩到 20px、间距收到 38px、起点贴近右边缘 12px,
-// 让全部按钮在 ≥320px 视口下完整可见。仅调整 right / 尺寸,不改结构与桌面端布局。
+// 移动端工具栏:图标放大到 28px(触控友好)、间距 38px、起点贴近右边缘 12px,
+// 四个按钮(chat09/delete/share/settings)在 ≥320px 视口下完整可见。
 @media (max-width: 600px) {
   .edit-toggle {
     right: 12px;
     top: 12px;
 
     img {
-      width: 20px;
+      width: 28px;
     }
 
     &--chat09 {
       right: 12px;
     }
 
-    &--bg {
-      right: 50px;
-    }
-
     &--delete {
-      right: 88px;
-    }
-
-    &--export {
-      right: 126px;
+      right: 78px;
     }
 
     &--share {
-      right: 164px;
+      right: 144px;
     }
 
     &--settings {
-      right: 202px;
+      right: 210px;
     }
   }
 }

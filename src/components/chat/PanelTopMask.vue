@@ -10,20 +10,27 @@
 // Vue 对多根组件不施加 Transition 类(实测确认,现状即无过渡动画),两者必须
 // 以"双根兄弟"结构呈现在消费者模板中才能与现状 DOM 一一对应。
 // =============================================================================
-import { computed } from 'vue'
-import { PANEL_EDGE_MASK, PANEL_EDGE_MASK_H } from '../../constants/panel'
+import { computed, inject, toValue } from 'vue'
+import {
+  chatGeometryKey,
+  globalChatGeometry,
+  type ChatGeometry,
+} from '../../constants/chatGeometry'
 
 const props = defineProps<{
-  /** 面板顶(px,相对 .chat-area);遮罩底边 = 面板顶,向上延展 EDGE_MASK_H */
+  /** 面板顶(px,相对 .chat-area);遮罩底边 = 面板顶,向上延展遮罩高 */
   top: number
 }>()
 
-/** 遮罩横条坐标:与面板同宽,底边对齐面板上边缘,向上延展 EDGE_MASK_H */
+/** 注入几何(面板位置/遮罩高;默认全局,导出模式由 ChatExportStage 覆盖) */
+const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
+
+/** 遮罩横条坐标:与面板同宽,底边对齐面板上边缘,向上延展遮罩高 */
 const maskStyle = computed(() => ({
-  left: `${PANEL_EDGE_MASK.left}px`,
-  width: `${PANEL_EDGE_MASK.width}px`,
-  top: `${props.top - PANEL_EDGE_MASK_H}px`,
-  height: `${PANEL_EDGE_MASK_H}px`,
+  left: `${geom.value.panelLeft}px`,
+  width: `${geom.value.panelWidth}px`,
+  top: `${props.top - geom.value.panelEdgeMaskH}px`,
+  height: `${geom.value.panelEdgeMaskH}px`,
 }))
 </script>
 

@@ -36,6 +36,9 @@ const { cardSubRanges } = storeToRefs(chatStore)
 /** 该卡片是否折叠 */
 const collapsed = computed(() => chatStore.collapsed[props.index])
 
+/** 该主卡是否被选中(点击父卡或选中子对话;选中视觉 = 白色遮罩常显) */
+const isCardSelected = computed(() => chatStore.activeCardIndex === props.index)
+
 /** 该主卡下的全局子卡索引区间 [start, start+count) */
 const range = computed(() => cardSubRanges.value[props.index] ?? { start: 0, count: 0 })
 
@@ -60,6 +63,15 @@ function enterCard() {
   hover.value = 'card'
 }
 
+/**
+ * 点击主卡:切换折叠 + 选中该主卡(白色遮罩常显)。
+ * 选中主卡后即使未进入子对话,也可在选中父卡下新建对话(createChildConversation)。
+ */
+function onCardClick() {
+  chatStore.toggleCollapse(props.index)
+  chatStore.selectCard(props.index)
+}
+
 function enterSub(k: number) {
   hover.value = k
 }
@@ -81,12 +93,17 @@ function leave(event: PointerEvent) {
 
 <template>
   <div ref="rootEl" class="card-unit" :style="{ top: top + 'px' }">
-    <!-- 主卡 -->
+    <!-- 主卡(点击卡片任意位置:切换折叠 + 选中该主卡;按钮为纯视觉) -->
     <div
       class="card"
-      :class="{ 'is-collapsed': collapsed, 'is-hover': hover === 'card' }"
+      :class="{
+        'is-collapsed': collapsed,
+        'is-hover': hover === 'card',
+        'is-selected': isCardSelected,
+      }"
       @pointerenter="enterCard"
       @pointerleave="leave($event)"
+      @click="onCardClick"
     >
       <div class="card__rect" />
       <img class="card__texture" :src="MATERIALS.cardTexture" alt="" />
@@ -112,7 +129,8 @@ function leave(event: PointerEvent) {
           alt=""
         />
       </div>
-      <button class="card__btn" type="button" @click="chatStore.toggleCollapse(index)">
+      <!-- 折叠按钮:纯视觉(点击已由整卡接管,此处穿透到 .card) -->
+      <button class="card__btn" type="button" tabindex="-1" aria-hidden="true">
         <img class="card__btn-circle" :src="MATERIALS.circleBorder" alt="" />
         <img class="card__btn-arrow" :src="MATERIALS.cardArrow" alt="" />
       </button>
@@ -157,6 +175,7 @@ function leave(event: PointerEvent) {
   top: 0;
   width: 0;
   height: 0;
+  cursor: pointer;
   // hover 白层(与子卡共用 hover-overlay mixin)
   @include hover-overlay(458.28px, 92.99px, 4.39px);
 
@@ -319,7 +338,8 @@ function leave(event: PointerEvent) {
     padding: 0;
     border: none;
     background: transparent;
-    cursor: pointer;
+    // 纯视觉:点击穿透到 .card(整卡可点)
+    pointer-events: none;
 
     &-circle,
     &-arrow {
@@ -346,6 +366,11 @@ function leave(event: PointerEvent) {
   // 折叠态:箭头回到 0deg
   &.is-collapsed .card__btn-arrow {
     transform: rotate(0deg);
+  }
+
+  // 选中态:白色遮罩常显(与 hover 遮罩同一视觉)
+  &.is-selected::before {
+    opacity: 1;
   }
 
   // 子卡容器(仅作为 v-for 的承载,本身无尺寸/定位)

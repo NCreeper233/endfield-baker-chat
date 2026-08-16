@@ -24,6 +24,10 @@ import {
   DESIGN_W,
   TAIL_SPACE,
 } from '../../constants/design'
+import {
+  chatGeometryKey,
+  DESKTOP_GEOM,
+} from '../../constants/chatGeometry'
 import { captureRegion, type CaptureRegion } from '../../utils/captureImage'
 import ChatArea from './ChatArea.vue'
 import AppBackground from '../layout/AppBackground.vue'
@@ -35,6 +39,10 @@ const props = defineProps<{
   customBgUrl?: string | null
 }>()
 
+// 导出画布强制桌面几何:即使当前视口是移动端,导出图仍按 1920 设计稿布局
+// (本组件子树内的 ChatArea / useChatRows / ChatInput 等 inject 到的都是桌面几何)
+provide(chatGeometryKey, DESKTOP_GEOM)
+
 const { measure } = useBubbleMeasure()
 
 /** rows 仅取 lastRow 用于推算 frameH / region(渲染由 ChatArea 自身完成) */
@@ -43,12 +51,14 @@ const { lastRow } = useChatRows({ measure })
 /**
  * 聊天框导出高度 = max(设计稿滚动高, 内容高 + 尾部空间)
  *
- * 内容底 = lastRow.bottom - CHAT_SCROLL.y,再 + TAIL_SPACE 盖住末尾装饰 + 留白。
+ * 内容底 = lastRow.bottom(useChatRows 输出已为滚动容器相对坐标,
+ * 桌面几何下相对 = 画布 - CHAT_SCROLL.y,与原公式等价),再 + TAIL_SPACE
+ * 盖住末尾装饰 + 留白。
  */
 const frameH = computed(() =>
   Math.max(
     CHAT_SCROLL.h,
-    (lastRow.value?.bottom ?? CHAT_SCROLL.y) - CHAT_SCROLL.y + TAIL_SPACE,
+    (lastRow.value?.bottom ?? 0) + TAIL_SPACE,
   ),
 )
 

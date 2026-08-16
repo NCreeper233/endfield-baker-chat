@@ -46,8 +46,8 @@ export const DEFAULT_WORLD_SETTING = `故事发生在塔卫二——气态巨行
 
 终末地工业是由罗德岛制药公司与其他合作方协同组建的独立企业机构，致力于前沿工业科研与新世界开拓建设，在管理员的带领下勘测开拓地区、应对来自天使与侵蚀的威胁。协议源石传送技术、集成工业系统、源石的可控分布技术以及轨道飞行器"帝江号"等成就，已成为塔卫二未来的一部分。如今威胁卷土重来，终末地工业将再次踏上开拓之旅。`
 
-/** API 模式:shared=共享密钥(通过 Vercel Serverless 代理) / custom=用户自填密钥 */
-export type ApiMode = 'shared' | 'custom'
+/** API 模式:shared=共享密钥(通过 Vercel Serverless 代理) / custom=用户自填密钥 / backend=Python 后端脚本服务 */
+export type ApiMode = 'shared' | 'custom' | 'backend'
 
 /** 共享模式使用的固定配置(密钥存于 Vercel 环境变量,前端不持有) */
 export const SHARED_API_BASE_URL = '/api/chat'
@@ -63,6 +63,8 @@ export interface ApiConfig {
   apiKey: string
   /** 模型名（如 gpt-4o、deepseek-chat） */
   model: string
+  /** 后端模式完整接口地址(含路径,如 http://localhost:8000/chat) */
+  backendUrl: string
   /** 温度（0-2，默认 0.8） */
   temperature: number
   /** 最大 token 数（默认 2048） */
@@ -75,6 +77,7 @@ const DEFAULT_API_CONFIG: ApiConfig = {
   baseUrl: '',
   apiKey: '',
   model: '',
+  backendUrl: '',
   temperature: 0.8,
   maxTokens: 2048,
 }
@@ -121,10 +124,12 @@ export const useSettingsStore = defineStore('settings', () => {
   // ---- API 配置 -----------------------------------------------------------
   const apiConfig = ref<ApiConfig>(readJSON(API_CONFIG_KEY, DEFAULT_API_CONFIG))
 
-  /** API 是否已配置(shared 模式直接可用 / custom 模式需 baseUrl+apiKey+model) */
+  /** API 是否已配置(shared 模式直接可用 / custom 模式需 baseUrl+apiKey+model / backend 模式需 backendUrl) */
   const isApiConfigured = ref(
     apiConfig.value.apiMode === 'shared' ||
-    (!!apiConfig.value.baseUrl && !!apiConfig.value.apiKey && !!apiConfig.value.model),
+    (apiConfig.value.apiMode === 'custom' &&
+      !!apiConfig.value.baseUrl && !!apiConfig.value.apiKey && !!apiConfig.value.model) ||
+    (apiConfig.value.apiMode === 'backend' && !!apiConfig.value.backendUrl),
   )
 
   watch(
@@ -133,7 +138,9 @@ export const useSettingsStore = defineStore('settings', () => {
       writeJSON(API_CONFIG_KEY, cfg)
       isApiConfigured.value =
         cfg.apiMode === 'shared' ||
-        (!!cfg.baseUrl && !!cfg.apiKey && !!cfg.model)
+        (cfg.apiMode === 'custom' &&
+          !!cfg.baseUrl && !!cfg.apiKey && !!cfg.model) ||
+        (cfg.apiMode === 'backend' && !!cfg.backendUrl)
     },
     { deep: true },
   )

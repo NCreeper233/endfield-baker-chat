@@ -8,12 +8,18 @@
 import { ref, computed, watch } from 'vue'
 import { useSettingsStore, DEFAULT_WORLD_SETTING } from '../../stores/settings'
 import { testApiConnection } from '../../utils/llm'
+import { testBackendConnection } from '../../utils/backend'
 import { useChatStore } from '../../stores/chat'
 import { CHARACTER_PROMPTS } from '../../constants/prompts'
+import DataManagerDialog from './DataManagerDialog.vue'
 
 const props = defineProps<{
   /** 是否展开 */
   open: boolean
+  /** 当前自定义背景(data URL,null = 默认背景;由 App 持有共享) */
+  customBg?: string | null
+  /** 背景变更回调(上传 → dataURL;恢复默认 → null) */
+  onBgChange?: (v: string | null) => void
 }>()
 
 const emit = defineEmits<{
@@ -23,21 +29,28 @@ const emit = defineEmits<{
 const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
 
-/** 当前标签页:api / system / character / disclaimer / about */
-const activeTab = ref<'api' | 'system' | 'character' | 'disclaimer' | 'about'>('api')
+/** 当前标签页:api / system / character / data / bg / disclaimer / about */
+const activeTab = ref<'api' | 'system' | 'character' | 'data' | 'bg' | 'disclaimer' | 'about'>('api')
 
 // ---- API 配置本地缓存(打开时同步,保存时写入 store) -------------------------
 const apiDraft = ref({
-  apiMode: 'shared' as 'shared' | 'custom',
+  apiMode: 'shared' as 'shared' | 'custom' | 'backend',
   baseUrl: '',
   apiKey: '',
   model: '',
+  backendUrl: '',
   temperature: 0.8,
   maxTokens: 2048,
 })
 
+/** 是否为 shared 模式 */
+const isSharedMode = computed(() => apiDraft.value.apiMode === 'shared')
+
 /** 是否为 custom 模式(需要显示 baseUrl/apiKey/model 输入框) */
 const isCustomMode = computed(() => apiDraft.value.apiMode === 'custom')
+
+/** 是否为后端模式(需要显示后端地址输入框) */
+const isBackendMode = computed(() => apiDraft.value.apiMode === 'backend')
 
 // ---- 世界观设定本地缓存 -----------------------------------------------------
 const worldSettingDraft = ref('')
@@ -114,7 +127,9 @@ async function onTestConnection() {
   testState.value = 'testing'
   testMessage.value = ''
   try {
-    const result = await testApiConnection({ ...apiDraft.value })
+    const result = isBackendMode.value
+      ? await testBackendConnection({ ...apiDraft.value })
+      : await testApiConnection({ ...apiDraft.value })
     testState.value = result.ok ? 'success' : 'fail'
     testMessage.value = result.message
   } catch {
@@ -156,6 +171,35 @@ function resetAll() {
     characterPromptDraft.value = settingsStore.getCharacterPrompt(selectedCharacter.value)
   }
 }
+
+// ---- 背景图(数据管理 tab 共用) ----------------------------------------------
+/** 隐藏的背景图文件选择框 */
+const bgFileInput = ref<HTMLInputElement | null>(null)
+
+/** 是否已设置自定义背景 */
+const hasCustomBg = computed(() => !!props.customBg)
+
+/** 选择背景图:读为 dataURL 交给 App 更新(自动落 localStorage) */
+function onBgFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    const v = reader.result
+    if (typeof v === 'string') props.onBgChange?.(v)
+  }
+  reader.onerror = () => {
+    console.warn('[Settings] 背景图片读取失败,可能是损坏或不受支持的格式')
+  }
+  reader.readAsDataURL(file)
+}
+
+/** 恢复默认背景:置 null(App 侧 watch 自动清除 localStorage) */
+function onBgReset() {
+  props.onBgChange?.(null)
+}
 </script>
 
 <template>
@@ -189,6 +233,18 @@ function resetAll() {
           >角色提示词</button>
           <button
             class="sd__tab"
+            :class="{ 'sd__tab--active': activeTab === 'data' }"
+            type="button"
+            @click="activeTab = 'data'"
+          >数据管理</button>
+          <button
+            class="sd__tab"
+            :class="{ 'sd__tab--active': activeTab === 'bg' }"
+            type="button"
+            @click="activeTab = 'bg'"
+          >背景</button>
+          <button
+            class="sd__tab"
             :class="{ 'sd__tab--active': activeTab === 'disclaimer' }"
             type="button"
             @click="activeTab = 'disclaimer'"
@@ -210,7 +266,7 @@ function resetAll() {
               <div class="sd__mode-toggle">
                 <button
                   class="sd__mode-btn"
-                  :class="{ 'sd__mode-btn--active': !isCustomMode }"
+                  :class="{ 'sd__mode-btn--active': isSharedMode }"
                   type="button"
                   @click="apiDraft.apiMode = 'shared'"
                 >共享 API</button>
@@ -220,11 +276,19 @@ function resetAll() {
                   type="button"
                   @click="apiDraft.apiMode = 'custom'"
                 >自定义 API</button>
+                <!-- 【已注释】后端模式按钮(后端模式 UI 暂时隐藏,逻辑保留):
+                <button
+                  class="sd__mode-btn"
+                  :class="{ 'sd__mode-btn--active': isBackendMode }"
+                  type="button"
+                  @click="apiDraft.apiMode = 'backend'"
+                >后端模式</button>
+                -->
               </div>
             </div>
 
             <!-- 共享模式说明 -->
-            <p v-if="!isCustomMode" class="sd__desc">
+            <p v-if="isSharedMode" class="sd__desc">
               使用内置共享 API（agnes-2.5-flash），可识别图像。
             </p>
 
@@ -259,28 +323,47 @@ function resetAll() {
               </label>
             </template>
 
-            <!-- 温度 + 最大 Token(两种模式共用) -->
-            <label class="sd__field">
-              <span class="sd__label">温度 ({{ apiDraft.temperature.toFixed(1) }})</span>
-              <input
-                v-model.number="apiDraft.temperature"
-                class="sd__slider"
-                type="range"
-                min="0"
-                max="2"
-                step="0.1"
-              />
-            </label>
-            <label class="sd__field">
-              <span class="sd__label">最大 Token 数</span>
-              <input
-                v-model.number="apiDraft.maxTokens"
-                class="sd__input"
-                type="number"
-                min="1"
-                max="32768"
-              />
-            </label>
+            <!-- 【已注释】后端模式 UI(后端地址输入等,逻辑保留):
+            <template v-if="isBackendMode">
+              <p class="sd__desc">
+                前端只传递当前输入 + 最近 10 轮问答历史 + 角色名，其余由你的 Python 脚本处理。
+              </p>
+              <label class="sd__field">
+                <span class="sd__label">后端地址（完整接口 URL，含路径）</span>
+                <input
+                  v-model="apiDraft.backendUrl"
+                  class="sd__input"
+                  type="text"
+                  placeholder="http://localhost:8000/chat"
+                />
+              </label>
+            </template>
+            -->
+
+            <!-- 温度 + 最大 Token(shared/custom 模式共用,后端模式由脚本决定,不显示) -->
+            <template v-if="!isBackendMode">
+              <label class="sd__field">
+                <span class="sd__label">温度 ({{ apiDraft.temperature.toFixed(1) }})</span>
+                <input
+                  v-model.number="apiDraft.temperature"
+                  class="sd__slider"
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.1"
+                />
+              </label>
+              <label class="sd__field">
+                <span class="sd__label">最大 Token 数</span>
+                <input
+                  v-model.number="apiDraft.maxTokens"
+                  class="sd__input"
+                  type="number"
+                  min="1"
+                  max="32768"
+                />
+              </label>
+            </template>
             <div class="sd__actions">
               <button class="sd__btn sd__btn--primary" type="button" @click="saveApiConfig">保存</button>
               <button
@@ -332,6 +415,34 @@ function resetAll() {
               <button class="sd__btn sd__btn--primary" type="button" :disabled="!selectedCharacter" @click="saveCharacterPrompt">保存</button>
               <button v-if="isBuiltinCharacter" class="sd__btn" type="button" @click="resetCharacterPrompt">恢复默认</button>
             </div>
+          </div>
+
+          <!-- 数据管理(内嵌 DataManagerDialog 功能:统计/导出/导入/清空) -->
+          <div v-if="activeTab === 'data'" class="sd__section">
+            <DataManagerDialog :open="open" embedded />
+          </div>
+
+          <!-- 背景:上传自定义背景 + 恢复默认 -->
+          <div v-if="activeTab === 'bg'" class="sd__section">
+            <p class="sd__desc">
+              上传图片作为页面背景(替换默认游戏背景),已设置时可用「恢复默认」还原。
+            </p>
+            <input
+              ref="bgFileInput"
+              class="sd__file"
+              type="file"
+              accept="image/*"
+              @change="onBgFileChange"
+            />
+            <div class="sd__actions">
+              <button class="sd__btn sd__btn--primary" type="button" @click="bgFileInput?.click()">上传背景</button>
+              <button class="sd__btn" type="button" :disabled="!hasCustomBg" @click="onBgReset">恢复默认</button>
+            </div>
+            <p
+              v-if="hasCustomBg"
+              class="sd__hint sd__hint--ok"
+            >已使用自定义背景</p>
+            <p v-else class="sd__hint sd__hint--warn">当前为默认背景</p>
           </div>
 
           <!-- 免责声明 -->
@@ -391,11 +502,13 @@ function resetAll() {
             <div class="sd__about-block">
               <h4 class="sd__about-heading">更新日志</h4>
               <div class="sd__about-log">
-                <p class="sd__about-log-date">2026-08-13</p>
-                <p class="sd__about-log-desc">预览版上线</p>
+                <p class="sd__about-log-date">2026-08-16</p>
+                <p class="sd__about-log-desc">优化移动端界面操作体验</p>
                 <p class="sd__about-log-date">2026-08-14</p>
                 <p class="sd__about-log-desc">修复了数据导入导致干员消失的问题</p>
                 <p class="sd__about-log-desc">预设模型换为agnes-2.5-flash</p>
+                <p class="sd__about-log-date">2026-08-13</p>
+                <p class="sd__about-log-desc">预览版上线</p>
               </div>
             </div>
 
@@ -437,6 +550,7 @@ function resetAll() {
   &__panel {
     position: relative;
     width: 560px;
+    max-width: calc(100vw - 24px); // 移动端窄屏适配
     max-height: 80vh;
     padding: 28px 32px 20px;
     border-radius: 14px;
@@ -477,6 +591,7 @@ function resetAll() {
 
   &__tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
     margin-bottom: 16px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
@@ -538,6 +653,11 @@ function resetAll() {
 
     &:focus { border-color: rgba(255, 255, 255, 0.3); }
     &::placeholder { color: rgba(255, 255, 255, 0.25); }
+  }
+
+  // 隐藏的背景图文件选择框(由"上传背景"按钮触发)
+  &__file {
+    display: none;
   }
 
   &__slider {

@@ -10,7 +10,7 @@
 //
 // 单文件渲染,由 CharacterCardItem 传入 subIndex/isSecond/isHover。
 // =============================================================================
-import { computed } from 'vue'
+import { computed, inject } from 'vue'
 import { useChatStore } from '../../stores/chat'
 import { MATERIALS } from '../../constants/materials'
 import { emojiToHtml } from '../../constants/emoji'
@@ -26,6 +26,12 @@ const props = defineProps<{
   /** 是否 hover(由父组件管理) */
   isHover: boolean
 }>()
+
+/**
+ * 移动端双击进入聊天视图(由 App provide;桌面端为 null/空操作)。
+ * 单击只高亮选中(selectSub),双击时两次 click 已先完成选中,进入即显示该对话。
+ */
+const enterMobileChat = inject<(() => void) | null>('enterMobileChat', null)
 
 const chatStore = useChatStore()
 
@@ -74,6 +80,7 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
     }"
     :style="rootStyle"
     @click="chatStore.selectSub(subIndex)"
+    @dblclick="enterMobileChat?.()"
   >
     <div class="subcard__rect" />
     <img class="subcard__texture" :src="MATERIALS.cardTexture" alt="" />
