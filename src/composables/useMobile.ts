@@ -29,16 +29,29 @@ let checkTimer: number | null = null
 /**
  * 视口尺寸有效下限(px)
  *
- * 移动端浏览器(尤其 Android 的 Edge/Chrome)在软键盘弹出/收起的过渡瞬间,
+ * 移动端浏览器(尤其 Android 的 Edge/夸克)在软键盘弹出/收起的过渡瞬间,
  * innerWidth/innerHeight 可能短暂变为 0 或极小值;若此时读取,几何层会按
  * 异常尺寸布局(缩放系数为 0、锚点为负 → 元素全部被排到视口外)。
  * 过滤掉该区间的尺寸,保留上一次有效值,等键盘动画结束后的恢复值再更新。
  */
 const MIN_VALID_SIZE = 100
 
+/**
+ * 读取布局基准高度
+ *
+ * 移动端软键盘两种模式:
+ *   - resizes-content(多数浏览器):innerHeight 随键盘压缩 → 与 visualViewport 一致
+ *   - overlays-content(夸克等):innerHeight 不变,visualViewport.height 才是可视高度
+ * 统一用 visualViewport.height(键盘场景两种模式都正确),无键盘时与 innerHeight 一致。
+ */
+function readHeight(): number {
+  const vv = typeof window.visualViewport !== 'undefined' ? window.visualViewport : null
+  return vv ? Math.round(vv.height) : window.innerHeight
+}
+
 function update() {
   const w = window.innerWidth
-  const h = window.innerHeight
+  const h = readHeight()
   // 键盘过渡瞬间的异常尺寸:不更新,保留上一次有效值
   if (w >= MIN_VALID_SIZE && h >= MIN_VALID_SIZE) {
     width.value = w
@@ -57,7 +70,7 @@ function startPolling() {
   if (checkTimer !== null) return
   checkTimer = window.setInterval(() => {
     const w = window.innerWidth
-    const h = window.innerHeight
+    const h = readHeight()
     if (
       w >= MIN_VALID_SIZE &&
       h >= MIN_VALID_SIZE &&
@@ -110,6 +123,8 @@ export function useMobile() {
     if (activeCount === 1) {
       update()
       window.addEventListener('resize', onResize)
+      // visualViewport 变化(overlays 键盘模式 innerHeight 不变,必须监听它)
+      window.visualViewport?.addEventListener('resize', onResize)
       // 兜底:轮询同步 + 失焦刷新(resize 事件丢失场景)
       startPolling()
       document.addEventListener('focusout', onFocusOut)
@@ -120,6 +135,7 @@ export function useMobile() {
     activeCount = Math.max(0, activeCount - 1)
     if (activeCount === 0) {
       window.removeEventListener('resize', onResize)
+      window.visualViewport?.removeEventListener('resize', onResize)
       document.removeEventListener('focusout', onFocusOut)
       stopPolling()
       if (focusTimer !== null) clearTimeout(focusTimer)

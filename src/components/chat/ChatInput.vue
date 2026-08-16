@@ -39,14 +39,25 @@ const emit = defineEmits<{
 /** 注入几何(面板位置/尺寸;默认全局,导出模式由 ChatExportStage 覆盖) */
 const geom = computed<ChatGeometry>(() => toValue(inject(chatGeometryKey, globalChatGeometry)))
 
+/** 是否移动端输入(几何层 stripSegmented 仅移动端为 true):移动端用原生 textarea
+ * 替代 contenteditable——夸克等魔改内核浏览器对 contenteditable 的焦点支持差,
+ * 会导致键盘弹出后闪退;textarea 为原生控件,焦点稳定。 */
+const isMobileInput = computed(() => geom.value.stripSegmented)
+
 /** 面板高度(px,几何层:桌面 80 / 移动端 56) */
 const PANEL_H = computed(() => geom.value.panelHeight)
 
 /** 面板顶 = 几何层面板顶(桌面 = detail 底边 - 面板高 - 3px) */
 const panelTop = computed(() => geom.value.panelTop)
 
-/** contenteditable 输入框 DOM ref */
+/** contenteditable 输入框 DOM ref(桌面端) */
 const inputEl = ref<HTMLDivElement | null>(null)
+
+/** textarea 输入框 DOM ref(移动端) */
+const mobileInputEl = ref<HTMLTextAreaElement | null>(null)
+
+/** 移动端输入文本(v-model) */
+const mobileText = ref('')
 
 /** 隐藏的图片文件选择框(上传图片按钮触发) */
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -94,20 +105,24 @@ const emojiGridStyle = computed(() => ({
   rowGap: `${POP_GAP.value}px`,
 }))
 
-/** 序列化输入框内容为纯文本(表情 <img> → [sns_emoji_xxx] token) */
+/** 序列化输入框内容为纯文本(表情 <img> → [sns_emoji_xxx] token;桌面 contenteditable) */
 function serializeInput(): string {
   if (!inputEl.value) return ''
   return htmlToEmojiText(inputEl.value.innerHTML)
 }
 
-/** 清空输入框 */
+/** 清空输入框(桌面清 innerHTML / 移动端清 v-model) */
 function clearInput() {
-  if (inputEl.value) inputEl.value.innerHTML = ''
+  if (isMobileInput.value) {
+    mobileText.value = ''
+  } else if (inputEl.value) {
+    inputEl.value.innerHTML = ''
+  }
 }
 
 /** 发送消息 */
 async function onSend() {
-  const text = serializeInput().trim()
+  const text = isMobileInput.value ? mobileText.value.trim() : serializeInput().trim()
   if (!text || isResponding.value) return
 
   // 检查 API 配置
@@ -190,16 +205,34 @@ function openFilePicker() {
 }
 
 /**
- * 点击表情:聚焦输入框并在光标处插入表情图(紧跟在文字后面)
+ * 点击表情:聚焦输入框并在光标处插入表情(紧跟在文字后面)
  *
  * 表情输出内联 em 尺寸(高度 1em、宽度按原图宽高比),随输入框字号
  * 自动缩放且保持真实比例。
  *
- * 用 Range API 插入表情:
- * - 有选区且在输入框内:删除选区内容 → 插入表情片段 → 光标移到表情后
- * - 无选区或选区不在输入框内:追加到输入框末尾
+ * 桌面(contenteditable):用 Range API 插入表情
+ *   - 有选区且在输入框内:删除选区内容 → 插入表情片段 → 光标移到表情后
+ *   - 无选区或选区不在输入框内:追加到输入框末尾
+ * 移动端(textarea):在光标处插入表情 token(表情在发送时显示为图片)
  */
 function insertEmoji(emoji: Emoji) {
+  if (isMobileInput.value) {
+    const el = mobileInputEl.value
+    if (!el) return
+    el.focus()
+    const token = emoji.token
+    const start = el.selectionStart ?? mobileText.value.length
+    const end = el.selectionEnd ?? start
+    mobileText.value =
+      mobileText.value.slice(0, start) + token + mobileText.value.slice(end)
+    // 光标移到插入内容之后
+    requestAnimationFrame(() => {
+      const pos = start + token.length
+      el.setSelectionRange(pos, pos)
+    })
+    return
+  }
+
   const el = inputEl.value
   if (!el) return
   el.focus()
@@ -253,20 +286,35 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocPointerDo
 /**
  * 键盘事件:
  * - Enter(无修饰键):发送
- * - Ctrl/Cmd/Shift + Enter:插入换行
+ * - Ctrl/Cmd/Shift + Enter:插入换行(移动端 textarea 原生支持 Shift+Enter)
  */
 function onKeydown(event: KeyboardEvent) {
   if (event.key !== 'Enter') return
   event.preventDefault()
   if (event.shiftKey || event.ctrlKey || event.metaKey) {
-    document.execCommand('insertText', false, '\n')
+    if (isMobileInput.value) {
+      // textarea:原生插入换行
+      const el = mobileInputEl.value
+      if (!el) return
+      const start = el.selectionStart ?? mobileText.value.length
+      const end = el.selectionEnd ?? start
+      mobileText.value =
+        mobileText.value.slice(0, start) + '\n' + mobileText.value.slice(end)
+      requestAnimationFrame(() => {
+        const pos = start + 1
+        el.setSelectionRange(pos, pos)
+      })
+    } else {
+      document.execCommand('insertText', false, '\n')
+    }
   } else {
     onSend()
   }
 }
 
-/** 粘贴:仅插入纯文本 */
+/** 粘贴:仅插入纯文本(移动端 textarea 原生纯文本粘贴,无需处理) */
 function onPaste(event: ClipboardEvent) {
+  if (isMobileInput.value) return
   event.preventDefault()
   const text = event.clipboardData?.getData('text/plain') ?? ''
   document.execCommand('insertText', false, text)
@@ -284,8 +332,21 @@ function onPaste(event: ClipboardEvent) {
       @change="onFileChange"
     />
 
-    <!-- 胶囊输入框(contenteditable) -->
+    <!-- 胶囊输入框:移动端原生 textarea(夸克等对 contenteditable 焦点支持差) /
+         桌面端 contenteditable(支持表情富文本) -->
+    <textarea
+      v-if="isMobileInput"
+      ref="mobileInputEl"
+      v-model="mobileText"
+      class="chat-input__field chat-input__field--mobile"
+      rows="1"
+      aria-label="发消息输入框"
+      placeholder="发消息"
+      :disabled="isResponding"
+      @keydown="onKeydown"
+    ></textarea>
     <div
+      v-else
       ref="inputEl"
       class="chat-input__field"
       :contenteditable="!isResponding"
@@ -418,6 +479,27 @@ function onPaste(event: ClipboardEvent) {
     &[contenteditable="false"] {
       opacity: 0.5;
       pointer-events: none;
+    }
+
+    // 移动端 textarea 形态:textarea 无 :empty 伪类,用原生 placeholder;
+    // 去掉默认外观/缩放,垂直居中微调,支持多行滚动
+    &--mobile {
+      display: block;
+      resize: none;
+      overflow-y: auto;
+      padding-top: 11px;
+      padding-bottom: 9px;
+      appearance: none;
+      -webkit-appearance: none;
+
+      &::placeholder {
+        color: rgba(42, 42, 42, 0.5);
+      }
+
+      &:disabled {
+        opacity: 0.5;
+        pointer-events: none;
+      }
     }
   }
 
