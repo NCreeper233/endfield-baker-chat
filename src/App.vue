@@ -6,7 +6,7 @@
 // 删除确认弹窗为独立组件(DeleteConfirmDialog),打开状态与删除动作在此持有。
 // 调试模式:URL 包含 #debug 时,useDebugMode 会在左下角渲染气泡尺寸信息。
 // =============================================================================
-import { ref, computed, inject, provide, toValue, watch, onMounted, onBeforeUnmount, onErrorCaptured } from 'vue'
+import { ref, computed, inject, provide, toValue, watch, onMounted, onBeforeUnmount } from 'vue'
 import AppBackground from './components/layout/AppBackground.vue'
 import DesignCanvas from './components/layout/DesignCanvas.vue'
 import HeaderTop from './components/header/HeaderTop.vue'
@@ -15,7 +15,6 @@ import ChatArea from './components/chat/ChatArea.vue'
 import DeleteConfirmDialog from './components/layout/DeleteConfirmDialog.vue'
 import ChatExportDialog from './components/layout/ChatExportDialog.vue'
 import SettingsDialog from './components/layout/SettingsDialog.vue'
-import DebugOverlay from './components/layout/DebugOverlay.vue'
 import { useChatStore } from './stores/chat'
 import { useMobile } from './composables/useMobile'
 import {
@@ -32,26 +31,6 @@ const chatStore = useChatStore()
 
 // 调试浮层(非调试模式下为空操作)
 useDebugMode()
-
-// ---- 渲染错误捕获(诊断用,配合 DebugOverlay 显示崩溃原因) -------------------
-// 移动端键盘场景偶发聊天区整块消失(只剩背景+按钮)。日志显示崩溃点是
-// ChatArea 子树 DOM 消失,疑似渲染期异常。此处捕获子组件渲染/生命周期
-// 错误写入 window.__dshVueErr,由 DebugOverlay 浮层实时显示,真机测试时
-// 直接看到崩溃原因,修复后删除。
-onErrorCaptured((err, instance, info) => {
-  const msg = err instanceof Error ? err.message : String(err)
-  const stack = err instanceof Error ? (err.stack ?? '').split('\n').slice(0, 3).join(' | ') : ''
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const comp = String((instance as any)?.type?.name ?? (instance as any)?.type ?? '?')
-  const detail = `${msg} | ${info} | ${comp} | ${stack}`.slice(0, 300)
-  console.error('[App] 渲染错误捕获:', detail)
-  try {
-    ;(window as unknown as { __dshVueErr?: string }).__dshVueErr = detail
-  } catch {
-    /* 忽略写入失败 */
-  }
-  return false
-})
 
 // 自定义页面背景(带 localStorage 持久化:刷新保留、不随 .baker 导出、
 // 不受清空对话影响;上传成功赋值后自动落库)
@@ -424,8 +403,6 @@ function onChatNew() {
     :on-bg-change="(v) => (customBg = v)"
     @close="settingsOpen = false"
   />
-  <!-- 移动端诊断浮层(临时,修复完成后删除) -->
-  <DebugOverlay />
 </template>
 
 <style scoped lang="scss">
