@@ -198,6 +198,9 @@ export const DESKTOP_GEOM: ChatGeometry = {
  * @param h 视口高
  */
 export function mobileGeometry(w: number, h: number): ChatGeometry {
+  // 视口高度兜底:键盘过渡等场景传入的 h 可能瞬时异常(0/极小),
+  // 用最小可用高度保证布局不塌缩(面板/滚动区始终在可视区域内)。
+  const safeH = Math.max(h, 300)
   const padX = 12 // 消息区左右边距
   const avatarBox = 72 // 移动端头像盒(80 偏大,72 居中;我方/对方一致)
   const stripImgH = 66 // 头图 l/r 素材高度(px,各变体一致)
@@ -211,7 +214,7 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
   // 头部与聊天框之间留 6px 缝隙:滚动区整体下移 6px,高度相应减 6px
   const scrollY = stripH + 6
   const scrollW = w
-  const scrollH = Math.max(120, h - stripH - 6 - panelH)
+  const scrollH = Math.max(120, safeH - stripH - 6 - panelH)
 
   const otherAvatarX = padX
   const mineAvatarX = w - padX - avatarBox
@@ -223,8 +226,8 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
 
   // 气泡最大宽:两侧(头像 + 边距 + 尾巴)余量,比桌面紧凑(桌面 660)
   const bubbleMaxW = Math.max(140, scrollW - 130)
-  // 面板贴底
-  const panelTop = h - panelH
+  // 面板贴底(基于 safeH,异常高度时也不会跑到屏幕外)
+  const panelTop = safeH - panelH
 
   return {
     stripX: 0,
