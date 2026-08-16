@@ -84,6 +84,47 @@ provide('enterMobileChat', () => {
   if (isMobile.value) mobileView.value = 'chat'
 })
 
+// ---- 聊天区可见性自愈 -------------------------------------------------------
+// Edge/夸克等 Chromium 内核在软键盘弹出/收起时,对 fixed 容器内绝对定位元素
+// 存在合成层残留 bug:元素布局值正常但渲染丢失(页面只剩背景+返回按钮)。
+// 方案:键盘/视口变化后自检 .chat-scroll 是否在可视区域内,异常则通过
+// chatEpoch 变更强制重挂载 ChatArea,触发浏览器重新合成,黑屏自愈。
+const chatEpoch = ref(0)
+let healTimer: number | null = null
+
+function scheduleChatHeal() {
+  if (!isMobile.value || mobileView.value !== 'chat') return
+  if (healTimer !== null) clearTimeout(healTimer)
+  healTimer = window.setTimeout(() => {
+    healTimer = null
+    const el = document.querySelector('.m-chat .chat-scroll') as HTMLElement | null
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const visible =
+      r.width > 50 &&
+      r.height > 50 &&
+      r.left >= -10 &&
+      r.right <= vw + 10 &&
+      r.top >= -10 &&
+      r.bottom <= vh + 10
+    if (!visible) {
+      console.warn('[App] 检测到聊天区不可见,强制重挂载自愈', {
+        rect: { l: r.left, t: r.top, w: r.width, h: r.height },
+        vw,
+        vh,
+      })
+      chatEpoch.value++
+    }
+  }, 600)
+}
+
+/** 键盘/视口变化监听(自愈触发源):输入聚焦/失焦 + visualViewport 变化 */
+function onHealSignal() {
+  scheduleChatHeal()
+}
+
 /** 返回列表:切回列表视图并清除选中(回到未选中任何对话/角色的初始状态) */
 function onMobileBack() {
   mobileView.value = 'list'
@@ -122,8 +163,22 @@ function onToolbarToggleKeydown(event: KeyboardEvent) {
   showToolbar.value = !showToolbar.value
 }
 
-onMounted(() => document.addEventListener('keydown', onToolbarToggleKeydown))
-onBeforeUnmount(() => document.removeEventListener('keydown', onToolbarToggleKeydown))
+onMounted(() => {
+  document.addEventListener('keydown', onToolbarToggleKeydown)
+  // 聊天区可见性自愈监听:输入聚焦/失焦(键盘弹出/收起) + visualViewport 变化
+  document.addEventListener('focusin', onHealSignal)
+  document.addEventListener('focusout', onHealSignal)
+  window.visualViewport?.addEventListener('resize', onHealSignal)
+  window.visualViewport?.addEventListener('scroll', onHealSignal)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onToolbarToggleKeydown)
+  document.removeEventListener('focusin', onHealSignal)
+  document.removeEventListener('focusout', onHealSignal)
+  window.visualViewport?.removeEventListener('resize', onHealSignal)
+  window.visualViewport?.removeEventListener('scroll', onHealSignal)
+  if (healTimer !== null) clearTimeout(healTimer)
+})
 
 /** 删除确认弹窗是否展开(删除按钮 toggle) */
 const confirmOpen = ref(false)
@@ -221,7 +276,8 @@ function onChatNew() {
           />
         </svg>
       </button>
-      <ChatArea @open-settings="settingsOpen = true" />
+      <!-- 自愈重挂载:chatEpoch 变化时强制重建 ChatArea(修复 Chromium 键盘合成残留) -->
+      <ChatArea :key="chatEpoch" @open-settings="settingsOpen = true" />
     </div>
   </template>
 
@@ -402,6 +458,10 @@ function onChatNew() {
   inset: 0;
   z-index: 110;
   background: transparent;
+  // 强制创建合成层:规避 Chromium 内核(Edge/夸克)在软键盘弹出/收起时
+  // 对 fixed 容器内绝对定位元素的合成残留 bug(黑屏只剩背景)
+  transform: translateZ(0);
+  will-change: transform;
 
   // 返回列表按钮:实心圆 SVG,位于头部右侧垂直居中,
   // 层级高于头图(strip z1)与滚动区
