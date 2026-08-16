@@ -6,7 +6,7 @@
 // 删除确认弹窗为独立组件(DeleteConfirmDialog),打开状态与删除动作在此持有。
 // 调试模式:URL 包含 #debug 时,useDebugMode 会在左下角渲染气泡尺寸信息。
 // =============================================================================
-import { ref, computed, inject, provide, toValue, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, inject, provide, toValue, watch, onMounted, onBeforeUnmount, onErrorCaptured } from 'vue'
 import AppBackground from './components/layout/AppBackground.vue'
 import DesignCanvas from './components/layout/DesignCanvas.vue'
 import HeaderTop from './components/header/HeaderTop.vue'
@@ -31,6 +31,22 @@ const chatStore = useChatStore()
 
 // 调试浮层(非调试模式下为空操作)
 useDebugMode()
+
+// ---- 渲染错误捕获(诊断用,配合 DebugOverlay 显示崩溃原因) -------------------
+// 移动端键盘场景偶发聊天区整块消失(只剩背景+按钮)。日志显示崩溃点是
+// ChatArea 子树 DOM 消失,疑似渲染期异常。此处捕获子组件渲染/生命周期
+// 错误写入 window.__dshVueErr,由 DebugOverlay 浮层实时显示,真机测试时
+// 直接看到崩溃原因,修复后删除。
+onErrorCaptured((err, _instance, info) => {
+  const msg = err instanceof Error ? err.message : String(err)
+  console.error('[App] 渲染错误捕获:', msg, info)
+  try {
+    ;(window as unknown as { __dshVueErr?: string }).__dshVueErr = `${msg} | ${info}`.slice(0, 240)
+  } catch {
+    /* 忽略写入失败 */
+  }
+  return false
+})
 
 // 自定义页面背景(带 localStorage 持久化:刷新保留、不随 .baker 导出、
 // 不受清空对话影响;上传成功赋值后自动落库)

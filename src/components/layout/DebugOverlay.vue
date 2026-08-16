@@ -12,6 +12,7 @@
 // 点击顶栏切换展开/收起。
 // =============================================================================
 import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { viewportHeight } from '../../composables/useMobile'
 
 /** 诊断版本标识(每次修改后递增,用户以此确认加载的是最新构建) */
 const DIAG_VERSION = 'DIAG-20260816-1'
@@ -43,7 +44,15 @@ function snap(): string {
     rect = `L${Math.round(r.left)} T${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`
   }
   const chat = document.querySelector('.m-chat')
-  return `iW${window.innerWidth} iH${window.innerHeight} vvH${vv ? Math.round(vv.height) : '-'} vvT${vv ? Math.round(vv.offsetTop) : '-'} scroll[${rect}] mchat:${chat ? 'Y' : 'N'}`
+  const area = document.querySelector('.m-chat .chat-area')
+  const input = document.querySelector('.m-chat textarea')
+  const vueErr = (window as unknown as { __dshVueErr?: string }).__dshVueErr
+  return (
+    `iW${window.innerWidth} iH${window.innerHeight} vvH${vv ? Math.round(vv.height) : '-'} ` +
+    `vvT${vv ? Math.round(vv.offsetTop) : '-'} hRef${Math.round(viewportHeight.value)} ` +
+    `scroll[${rect}] mchat:${chat ? 'Y' : 'N'} area:${area ? 'Y' : 'N'} input:${input ? 'Y' : 'N'} ` +
+    `vueErr:${vueErr ?? '-'}`
+  )
 }
 
 function describeTarget(e: Event): string {
@@ -71,6 +80,13 @@ function onVvScroll() {
 }
 function onVis() {
   log('vis', `${document.visibilityState} | ${snap()}`)
+}
+
+function onWinError(e: ErrorEvent) {
+  log('window.error', `${e.message} @${(e.filename ?? '').split('/').pop()}:${e.lineno} | ${snap()}`)
+}
+function onRejection(e: PromiseRejectionEvent) {
+  log('unhandledrejection', `${String(e.reason).slice(0, 120)} | ${snap()}`)
 }
 
 /** 复制兜底:clipboard API 在非 https/localhost 上下文不可用时的 textarea 方案 */
@@ -125,6 +141,8 @@ onMounted(() => {
   window.visualViewport?.addEventListener('resize', onVvResize)
   window.visualViewport?.addEventListener('scroll', onVvScroll)
   document.addEventListener('visibilitychange', onVis)
+  window.addEventListener('error', onWinError)
+  window.addEventListener('unhandledrejection', onRejection)
 })
 onBeforeUnmount(() => {
   document.removeEventListener('focusin', onFocusIn, true)
@@ -133,6 +151,8 @@ onBeforeUnmount(() => {
   window.visualViewport?.removeEventListener('resize', onVvResize)
   window.visualViewport?.removeEventListener('scroll', onVvScroll)
   document.removeEventListener('visibilitychange', onVis)
+  window.removeEventListener('error', onWinError)
+  window.removeEventListener('unhandledrejection', onRejection)
 })
 </script>
 
