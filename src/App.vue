@@ -15,6 +15,7 @@ import ChatArea from './components/chat/ChatArea.vue'
 import DeleteConfirmDialog from './components/layout/DeleteConfirmDialog.vue'
 import ChatExportDialog from './components/layout/ChatExportDialog.vue'
 import SettingsDialog from './components/layout/SettingsDialog.vue'
+import MigrationNoticeDialog from './components/layout/MigrationNoticeDialog.vue'
 import { useChatStore } from './stores/chat'
 import { useMobile } from './composables/useMobile'
 import {
@@ -403,6 +404,8 @@ function onChatNew() {
     :on-bg-change="(v) => (customBg = v)"
     @close="settingsOpen = false"
   />
+  <!-- 迁移公告弹窗:进入网站时弹出(自行管理显隐与"不再显示"持久化) -->
+  <MigrationNoticeDialog />
 </template>
 
 <style scoped lang="scss">
