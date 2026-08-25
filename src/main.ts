@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import { useChatStore } from './stores/chat'
+import { useSettingsStore } from './stores/settings'
 import { useChatPersistence } from './composables/useChatPersistence'
 import { BUBBLE_FONT_SIZE, BUBBLE_FONT } from './utils/measure'
 import './styles/main.scss'
@@ -23,7 +24,8 @@ async function bootstrap() {
 
   // 启动恢复:在挂载前还原已存数据,避免"初始数据 → 已存数据"首帧跳变
   const chatStore = useChatStore(pinia)
-  const { loadProject } = useChatPersistence(chatStore)
+  const settingsStore = useSettingsStore(pinia)
+  const { loadProject } = useChatPersistence(chatStore, settingsStore)
 
   await Promise.all([fontsReady, loadProject()])
   app.mount('#app')

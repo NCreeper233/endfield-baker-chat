@@ -7,7 +7,7 @@
 // 设计理由:从 ChatArea 消息循环中抽出,模板行数减负;
 //          头像点击以 emit 上报,父组件统一处理 store 写入。
 // =============================================================================
-import { computed, inject, onMounted, onUnmounted, ref, toValue } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref, toValue, type CSSProperties } from 'vue'
 import {
   chatGeometryKey,
   globalChatGeometry,
@@ -18,6 +18,7 @@ import {
   pos,
   // speakerNameStyle, // 【已注释停用】角色名称显示功能整体停用
 } from '../../utils/chatPosition'
+import { emojiByMood } from '../../constants/emoji'
 import type { ChatRow, MessageSpeaker } from '../../types/chat'
 import ChatAvatar from './ChatAvatar.vue'
 import ChatBubble from './ChatBubble.vue'
@@ -98,6 +99,37 @@ const imageAnimStyle = computed(() => {
     transition: 'transform 0.14s ease-out, opacity 0.14s ease-out',
   }
 })
+
+/**
+ * 心情表情(气泡角落图标)
+ *
+ * 后端可选返回 mood 字段(token 形式如 "sns_emoji_001"),
+ * 此处映射到表情包图片并贴在气泡角落;缺失/未知 token 时不渲染。
+ */
+const moodEmoji = computed(() => {
+  const mood = props.row.msg.mood
+  return mood ? emojiByMood(mood) : undefined
+})
+
+/** 心情表情图标尺寸(px,方形统一大小;异形表情按原宽高比缩放) */
+const MOOD_ICON_SIZE = 26
+
+/** 心情表情的定位:贴气泡角落(other 左上 / mine 右上),略微内收避免压到文字 */
+const moodStyle = computed<CSSProperties>(() => {
+  const left = props.row.left
+  const top = props.row.bubbleTop
+  const isMine = props.row.msg.side === 'mine'
+  const margin = 6
+  const x = isMine ? left + props.row.box.rectW - MOOD_ICON_SIZE - margin : left + margin
+  return {
+    position: 'absolute',
+    left: `${x}px`,
+    top: `${top + margin}px`,
+    width: `${MOOD_ICON_SIZE}px`,
+    height: `${MOOD_ICON_SIZE}px`,
+    zIndex: 2,
+  }
+})
 </script>
 
 <template>
@@ -127,6 +159,14 @@ const imageAnimStyle = computed(() => {
     :top="row.bubbleTop"
     :prev-rect="row.prevRect"
   />
+  <!-- 心情表情:后端 mood 字段映射的表情包图片,贴在气泡角落(无 mood 不渲染) -->
+  <img
+    v-if="!row.msg.image && moodEmoji"
+    class="chat-mood-emoji"
+    :src="moodEmoji.src"
+    :alt="moodEmoji.token"
+    :style="moodStyle"
+  />
   <!-- 图片消息:纯图片无气泡(固定显示区域,contain 等比完整显示);
         追加时带展开动画,首屏直接显示 -->
   <img
@@ -151,5 +191,15 @@ const imageAnimStyle = computed(() => {
 // 我方头像可点击(点击切换管理员性别)
 .chat-avatar--pickable {
   cursor: pointer;
+}
+
+// 心情表情图标(气泡角落):透明背景直接显示表情图,轻微描边阴影增强可读性
+.chat-mood-emoji {
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.12);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
 }
 </style>

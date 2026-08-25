@@ -160,6 +160,22 @@ function onFileChange(event: Event) {
   const file = input.files?.[0]
   if (!file) return
 
+  // v5: 图片大小与格式限制
+  // 大小: 超过 5MB 阻止发送
+  const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+  if (file.size > MAX_IMAGE_BYTES) {
+    alert('图片过大，请选择 5MB 以下的图片')
+    input.value = ''
+    return
+  }
+  // 格式: 仅允许 png / jpeg / webp
+  const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp']
+  if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+    alert('不支持的图片格式（仅支持 PNG / JPG / WebP）')
+    input.value = ''
+    return
+  }
+
   // AI 响应中不发送
   if (isResponding.value) {
     input.value = ''
@@ -407,9 +423,6 @@ function onPaste(event: ClipboardEvent) {
     <!-- 表情弹窗:紧贴面板顶边从下到上展开,与面板同宽 -->
     <Transition name="chat-input-pop">
       <div v-if="showEmojiPop" class="chat-input__pop" :style="emojiPopStyle">
-        <!-- 背景装饰:左上角 + 右下角 -->
-        <img class="chat-input__pop-bg chat-input__pop-bg--tl" :src="MATERIALS.editPopDecoTl" alt="" />
-        <img class="chat-input__pop-bg chat-input__pop-bg--br" :src="MATERIALS.editPopDecoBr" alt="" />
         <!-- 表情选择网格:点击在输入框光标处插入(列数/格宽由 emojiGridStyle 响应式注入) -->
         <div class="chat-input__emoji-grid" :style="emojiGridStyle">
           <button

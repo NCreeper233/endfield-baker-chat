@@ -36,7 +36,6 @@ const props = defineProps<{
   /** 截图倍率(1×/2×/3×/4×),变化即重新截图 */
   scale: number
   /** 自定义背景图(data URL,与应用背景一致) */
-  customBgUrl?: string | null
 }>()
 
 // 导出画布强制桌面几何:即使当前视口是移动端,导出图仍按 1920 设计稿布局
@@ -143,7 +142,7 @@ defineExpose({ imageSrc, capturing, error, ready })
       :style="{ width: stageSize.w + 'px', height: stageSize.h + 'px' }"
     >
       <!-- 背景(模糊图 + 遮罩,absolute 铺满 stage) -->
-      <AppBackground :custom-url="customBgUrl" absolute />
+      <AppBackground absolute />
       <!-- 聊天区(export-mode:复用主界面同一套渲染,关闭动画/交互) -->
       <ChatArea export-mode />
     </div>

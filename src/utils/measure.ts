@@ -114,10 +114,18 @@ export const BUBBLE_FONT = `"HarmonyOS Sans SC Medium", "HarmonyOS Sans SC", "Mi
  * 截图与测量前都应先 await 本函数。
  */
 export async function ensureBubbleFont(): Promise<void> {
+  // 加超时：字体(4.3MB woff2)加载慢/挂起时不再阻塞截图，3s 后放行
   try {
-    await document.fonts.load(`${BUBBLE_FONT_SIZE}px ${BUBBLE_FONT}`)
-  } catch { /* 保留后备 */ }
-  await document.fonts.ready
+    await Promise.race([
+      (async () => {
+        try {
+          await document.fonts.load(`${BUBBLE_FONT_SIZE}px ${BUBBLE_FONT}`)
+        } catch { /* 保留后备 */ }
+        await document.fonts.ready
+      })(),
+      new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+    ])
+  } catch { /* 忽略 */ }
 }
 
 /** 气泡测量结果 */

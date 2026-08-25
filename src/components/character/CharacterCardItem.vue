@@ -18,11 +18,6 @@ import { MATERIALS } from '../../constants/materials'
 import { subTopInCard } from '../../constants/characterCard'
 import SubCard from './SubCard.vue'
 
-// NPC 头像判定按文件名关键字 includes,避免 Vite hash 后缀导致全等比较失败
-// icon_sns_npc_single_a 是 72×131 竖幅小图,用 contain 完整显示,不参与 scale 收紧裁剪
-const NPC_AVATAR_KEYS = ['icon_sns_npc_single_a']
-const isNpcAvatar = (url: string) => !!url && NPC_AVATAR_KEYS.some((k) => url.includes(k))
-
 const props = defineProps<{
   /** 主卡索引 */
   index: number
@@ -113,9 +108,6 @@ function leave(event: PointerEvent) {
       <img class="card__corner" :src="MATERIALS.cornerDeco" alt="" />
       <div
         class="card__avatar"
-        :class="{
-          'is-npc': isNpcAvatar(character.avatar),
-        }"
       >
         <!-- 裁剪夹层:overflow:hidden 限制 img scale 后的可见范围,
              外层 &__avatar 保持 overflow:visible 让 chat-indicator 能超出边框显示 -->
@@ -271,20 +263,6 @@ function leave(event: PointerEvent) {
       object-position: center top;
       transform: scale(1.1);
       transform-origin: center 45%;
-    }
-
-    // 默认 NPC 头像(新会话):头像框保持 76x76 不变,仅缩小内部图片,
-    // 原图完整显示不裁剪(72x131 竖图 contain 等比缩放居中)
-    &.is-npc &-img {
-      position: absolute;
-      top: 5%;
-      left: 5%;
-      width: 90%;
-      height: 90%;
-      object-fit: contain;
-      object-position: center center;
-      // NPC 用 contain 完整显示,不需要 scale 放大
-      transform: none;
     }
   }
 

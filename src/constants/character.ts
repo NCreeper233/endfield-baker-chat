@@ -150,9 +150,9 @@ export const MINE_AVATAR_URL: string = resolveLocalAvatar('管理员')!
 export const MINE_AVATAR_FEMALE_URL: string = resolveLocalAvatar('管理员_女')!
 
 /**
- * 默认头像 URL(角色未找到 / 空对话等默认场景,使用"未识别 NPC"素材)
+ * 默认头像 URL(角色未找到 / 空对话等默认场景,使用头像底图素材占位)
  *
- * 新建会话默认展示此头像;聊天区默认一律走此 NPC 头像。
+ * 新建会话默认展示此头像;聊天区默认一律走此头像。
  */
-import npcDefaultAvatar from '../assets/materials/icon_sns_npc_single_a.webp'
-export const DEFAULT_AVATAR_URL: string = npcDefaultAvatar
+import defaultAvatar from '../assets/materials/icon_virtualmouse_bg.webp'
+export const DEFAULT_AVATAR_URL: string = defaultAvatar

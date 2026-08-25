@@ -52,6 +52,12 @@ export interface ChatMessage {
    * - mine  侧:不传则取我方默认头像
    */
   speakerAvatar?: string
+  /**
+   * 心情表情 token(如 sns_emoji_001,不带方括号)
+   *
+   * 后端回复 JSON 可选字段 mood 的透传值;缺失时不在气泡上渲染任何表情。
+   */
+  mood?: string
 }
 
 /**

@@ -28,7 +28,9 @@ $color-subcard-text: #e3e1e1;
 $color-subcard-text-selected: #1c1c1c;
 
 $color-card-bg: #3e3f3d;
-$color-subcard-bg: #2b2927;
+$color-dialog-bg: #272626;               // 菜单/弹窗面板背景(设置、数据管理、删除确认等)
+$color-dialog-border: #868685;           // 菜单/弹窗面板边框
+$color-subcard-bg: #292827;
 $color-subcard-icon-box: #353534;
 $color-subcard-line: #1c1c1c;
 $color-subcard-selected: #ffef00; // 子卡选中黄层

@@ -7,8 +7,6 @@
 
 import bgApp from '../assets/materials/bg_app.webp'
 import headerDeco from '../assets/materials/achievement_main_deco05.webp'
-import editPopDecoTl from '../assets/materials/deco_sns_tweet_decorate_31.webp'
-import editPopDecoBr from '../assets/materials/deco_sns_tweet_decorate_32.webp'
 
 import cardTexture from '../assets/materials/deco_sns_hudentry_bg.webp'
 import cardFaint from '../assets/materials/deco_sns_tweet_decorate_02.webp'
@@ -47,12 +45,9 @@ import editBtnPotential from '../assets/materials/potential_picture.webp'
 import editBtnEmoticon from '../assets/materials/icon_sns_chat_emoticon.webp'
 import editBtnChat from '../assets/materials/icon_sns_chat_04.webp'
 import editBtnChat09 from '../assets/materials/icon_sns_chat_09.webp'
-import editBtnCharacter from '../assets/materials/btn_character.webp'
 import editBtnDeleteIndeed from '../assets/materials/icon_tips_delete_indeed.webp'
-import editBtnUpgrade from '../assets/materials/icon_suffix_upgrade.webp'
 
 // 右侧工具栏按钮图标
-import editBtnExport from '../assets/materials/icon_contingency_contract_apply_share.webp'
 import editBtnShare from '../assets/materials/icon_friend_share.webp'
 import loginBtnSetting from '../assets/materials/login_btn_setting.webp'
 
@@ -67,9 +62,6 @@ export const MATERIALS = {
   bgApp,
   // 顶部标题装饰
   headerDeco,
-  // 弹窗面板背景装饰:左上角 / 右下角
-  editPopDecoTl,
-  editPopDecoBr,
   // 主卡素材
   cardTexture,
   cardFaint,
@@ -114,14 +106,9 @@ export const MATERIALS = {
   editBtnChat,
   // 聊天(新建对话)按钮图标
   editBtnChat09,
-  // 角色名称显示开关按钮(btn_character.png)
-  editBtnCharacter,
   // 删除对话按钮图标
   editBtnDeleteIndeed,
-  // 自定义页面背景(上传图片)按钮图标
-  editBtnUpgrade,
   // 右侧工具栏按钮图标
-  editBtnExport,
   editBtnShare,
   // 设置按钮图标
   loginBtnSetting,

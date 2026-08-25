@@ -65,6 +65,20 @@ function emojiAspect(num: string): number {
 const emojiByToken = new Map(EMOJIS.map((e) => [e.token, e.src]))
 
 /**
+ * 按心情表情 token 查询表情(后端 mood 字段,形如 "sns_emoji_001",不带方括号)
+ *
+ * 找不到(未知序号 / 非法值)返回 undefined,调用方据此不渲染。
+ *
+ * @param mood 后端 mood 字段值(如 "sns_emoji_001")
+ * @returns    表情条目(token/src);无匹配时 undefined
+ */
+export function emojiByMood(mood: string): Emoji | undefined {
+  const token = `[${mood}]`
+  const src = emojiByToken.get(token)
+  return src ? { token, src } : undefined
+}
+
+/**
  * 用 canvas 测量含表情 token 的文本宽度
  *
  * 表情无法用字符测量,按"真实宽高比缩放后的渲染宽"(宽 = 字号 × 宽高比)

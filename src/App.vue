@@ -15,7 +15,7 @@ import ChatArea from './components/chat/ChatArea.vue'
 import DeleteConfirmDialog from './components/layout/DeleteConfirmDialog.vue'
 import ChatExportDialog from './components/layout/ChatExportDialog.vue'
 import SettingsDialog from './components/layout/SettingsDialog.vue'
-import MigrationNoticeDialog from './components/layout/MigrationNoticeDialog.vue'
+import NoticeDialog from './components/layout/NoticeDialog.vue'
 import { useChatStore } from './stores/chat'
 import { useMobile } from './composables/useMobile'
 import {
@@ -26,16 +26,101 @@ import {
 } from './constants/chatGeometry'
 import { MATERIALS } from './constants/materials'
 import { useDebugMode } from './composables/useDebugMode'
-import { useCustomBackground } from './composables/useCustomBackground'
+import { useSettingsStore } from './stores/settings'
+import {
+  NOTICE_CONTENT_URL,
+  NOTICE_CONTENT_HASH_KEY,
+} from './constants/notice'
 
 const chatStore = useChatStore()
+const settingsStore = useSettingsStore()
 
 // 调试浮层(非调试模式下为空操作)
 useDebugMode()
 
+// ---- 首次公告弹窗:每次打开弹出,直到点"不再提醒";正文来自网络公告源 ---------
+/** 公告弹窗标题(网络 JSON 的 title;缺省用内置常量) */
+const noticeTitle = ref('')
+
+/** 公告弹窗正文(App 启动时从网络公告源读取;失败回退内置常量) */
+const noticeContent = ref('')
+
+/** 公告弹窗是否显示(未选择"不再提醒"时每次启动显示) */
+const noticeOpen = ref(false)
+
+/** 简单内容哈希(判断公告内容是否变化,重置"不再提醒"用) */
+function hashNoticeText(text: string): string {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) + h + text.charCodeAt(i)) >>> 0
+  }
+  return h.toString(36)
+}
+
+/**
+ * 启动时从网络公告源拉取公告:
+ * - 内容支持 JSON({"title","content"})或纯文本;hash 取整段原文,
+ *   任何修改(标题/正文/结构)都视为内容变化 → 重置"不再提醒"并重新弹出,
+ *   同时记录新 hash 防止反复重置。
+ * - 拉取失败(离线等) → 回退内置常量正文,不重置标记。
+ * 最后按当前"不再提醒"状态决定本次是否弹出。
+ */
+async function loadNotice() {
+  try {
+    const res = await fetch(NOTICE_CONTENT_URL, { cache: 'no-store' })
+    if (res.ok) {
+      const text = (await res.text()).trim()
+      if (text) {
+        // JSON 形态:{"title":?, "content":?};非 JSON 视为纯文本正文
+        try {
+          const parsed = JSON.parse(text)
+          if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.content === 'string' && parsed.content.trim()) {
+              noticeContent.value = parsed.content.trim()
+              noticeTitle.value = typeof parsed.title === 'string' && parsed.title.trim()
+                ? parsed.title.trim()
+                : ''
+            } else {
+              noticeContent.value = text
+            }
+          } else {
+            noticeContent.value = text
+          }
+        } catch {
+          noticeContent.value = text
+        }
+        const hash = hashNoticeText(text)
+        const lastHash = localStorage.getItem(NOTICE_CONTENT_HASH_KEY)
+        if (lastHash !== hash) {
+          // 公告内容已更新:重置"不再提醒",让用户看到新公告
+          settingsStore.noticeDismissed = false
+          try {
+            localStorage.setItem(NOTICE_CONTENT_HASH_KEY, hash)
+          } catch {
+            // 存储不可用:静默,下次启动会再次检测
+          }
+        }
+      }
+    }
+  } catch {
+    // fetch 失败(本地文件变体等):正文回退内置常量,状态不重置
+  }
+  noticeOpen.value = !settingsStore.noticeDismissed
+}
+
+/** 确认:仅关闭本次,下次仍弹 */
+function onNoticeConfirm() {
+  noticeOpen.value = false
+}
+
+/** 不再提醒:写入持久化(data.json + localStorage),此后不再弹出 */
+function onNoticeDismiss() {
+  settingsStore.noticeDismissed = true
+  noticeOpen.value = false
+}
+
 // 自定义页面背景(带 localStorage 持久化:刷新保留、不随 .baker 导出、
 // 不受清空对话影响;上传成功赋值后自动落库)
-const { customBg } = useCustomBackground()
 
 // ---- 移动端视图 -----------------------------------------------------------
 // ≤768px 视口进入移动端模式:
@@ -218,6 +303,8 @@ onMounted(() => {
   document.addEventListener('focusout', onHealSignal)
   window.visualViewport?.addEventListener('resize', onHealSignal)
   window.visualViewport?.addEventListener('scroll', onHealSignal)
+  // 公告弹窗:启动时拉取外部 TXT 正文并检测内容变化(重置"不再提醒")
+  void loadNotice()
 })
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onToolbarToggleKeydown)
@@ -256,7 +343,7 @@ function onChatNew() {
 </script>
 
 <template>
-  <AppBackground :custom-url="customBg" />
+  <AppBackground />
 
   <!-- ==================== 桌面端(>768px):1920 设计稿等比画布 ==================== -->
   <template v-if="!isMobile">
@@ -292,8 +379,7 @@ function onChatNew() {
          布局由几何层(chatGeometry)按视口驱动;输入面板贴底。
          fixed + 合成层 + 自愈,移动端输入框为原生 textarea -->
     <div v-else class="m-chat">
-      <!-- 返回列表按钮:白色圆形 SVG(源自 baker-maker 任务面板装饰按钮样式),
-           位于头部右侧垂直居中 -->
+      <!-- 返回列表按钮:白色圆形 SVG,位于头部右侧垂直居中 -->
       <button
         class="m-chat__back"
         type="button"
@@ -351,7 +437,6 @@ function onChatNew() {
     :aria-pressed="chatStore.showCharacterNames"
     @click="chatStore.toggleShowCharacterNames()"
   >
-    <img :src="MATERIALS.editBtnCharacter" alt="角色名" />
   </button> -->
   <!-- 背景自定义按钮与数据管理按钮已移除:功能并入设置弹窗("背景"/"数据管理"标签页) -->
   <!-- 删除对话按钮:与 chat09 按钮同列(正下方),始终可见;点击弹出确认弹窗 -->
@@ -369,7 +454,7 @@ function onChatNew() {
     <img :src="MATERIALS.editBtnShare" alt="分享" />
   </button>
   <!-- 设置按钮:位于按钮列最左侧(share 左侧),login_btn_setting 图标;
-       点击打开 API 配置 + 提示词编辑 + 数据管理 + 背景 + 免责声明 + 关于 弹窗 -->
+       点击打开 API 配置 + 提示词编辑 + 数据管理 + 背景 + 关于 弹窗 -->
   <button
     class="edit-toggle edit-toggle--settings"
     type="button"
@@ -385,7 +470,6 @@ function onChatNew() {
   <ChatExportDialog
     :open="shareOpen"
     :conversation-title="chatStore.counterpartName"
-    :custom-bg-url="customBg"
     @close="shareOpen = false"
   />
   <!-- "请先选中会话"提示弹窗:新建对话时未选中任何对话触发 -->
@@ -400,12 +484,16 @@ function onChatNew() {
   <!-- 设置弹窗:API 配置 + 系统提示词 + 角色提示词编辑 + 数据管理 + 背景 -->
   <SettingsDialog
     :open="settingsOpen"
-    :custom-bg="customBg"
-    :on-bg-change="(v) => (customBg = v)"
     @close="settingsOpen = false"
   />
-  <!-- 迁移公告弹窗:进入网站时弹出(自行管理显隐与"不再显示"持久化) -->
-  <MigrationNoticeDialog />
+  <!-- 首次公告弹窗(每次打开弹出,直到点"不再提醒";正文来自网络公告源 notice.peilika.beer) -->
+  <NoticeDialog
+    :open="noticeOpen"
+    :content="noticeContent"
+    :title="noticeTitle"
+    @confirm="onNoticeConfirm"
+    @dismiss="onNoticeDismiss"
+  />
 </template>
 
 <style scoped lang="scss">

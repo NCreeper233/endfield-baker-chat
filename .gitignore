@@ -10,3 +10,6 @@ mock/
 
 #dsh-vision-router
 .dsh-vision-router/
+
+#bak
+.bak/

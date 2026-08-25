@@ -4,25 +4,34 @@
 // -----------------------------------------------------------------------------
 // 提供全局操作(控制全部对话):
 //   - 数据统计(卡片 / 对话 / 消息 / 序列化大小)
-//   - 导出工程(.baker 压缩单文件,直接下载)
-//   - 导入工程(选文件 → 解压校验 → 二次确认 → 整体替换)
+//   - 导出工程(两种格式,直接下载):
+//       · 导出数据 = .zip 压缩包(文本 JSON + 独立图片文件)
+//       · 导出 JSON = 单文件 JSON(旧版兼容格式,图片 dataURL 内联)
+//   - 导入工程(选文件 → 解析校验 → 二次确认 → 整体替换):
+//       · .zip 走压缩包解压(见 zipExport)
+//       · .json 走旧版兼容层(见 jsonCompat:自动识别旧格式并补全缺失字段)
 //   - 清空全部对话(删除所有子对话,每个角色保留一个空子对话,清除消息与上下文)
 //   - 清空全部消息(仅清空可见消息,AI 上下文记忆保留)
 //   - 清空全部上下文(仅清空 AI 记忆,可见消息保留)
+//   - 一键清空历史与上下文(同时清空全部消息 + 全部上下文)
 //
 // 破坏性操作均为两段式确认(弹窗内切换确认态),不动用现有素材图。
 // =============================================================================
 import { computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
-import { useSettingsStore, DEFAULT_WORLD_SETTING } from '../../stores/settings'
+import { useSettingsStore } from '../../stores/settings'
 import { MATERIALS } from '../../constants/materials'
 import {
   downloadProject,
   importFromZip,
-  EXPORT_FILE_EXT,
   type ProjectPayload,
 } from '../../utils/zipExport'
+import {
+  downloadProjectJson,
+  importFromJson,
+  IMPORT_FILE_ACCEPT,
+} from '../../utils/jsonCompat'
 import { flushPendingWrites } from '../../composables/useChatPersistence'
 import type { Card } from '../../types/chat'
 
@@ -64,7 +73,7 @@ const stats = computed(() => {
 })
 
 // ---- 两段式确认状态 ---------------------------------------------------------
-type ConfirmKind = 'clear' | 'clearMessages' | 'clearContext' | 'import' | null
+type ConfirmKind = 'clear' | 'clearMessages' | 'clearContext' | 'clearEverything' | 'import' | null
 const confirmKind = ref<ConfirmKind>(null)
 const importError = ref('')
 const pendingImport = ref<ProjectPayload | null>(null)
@@ -73,6 +82,7 @@ const confirmTexts: Record<Exclude<ConfirmKind, null>, string> = {
   clear: '将删除全部对话，确定吗？',
   clearMessages: '将清空全部对话的消息（上下文记忆保留），确定吗？',
   clearContext: '将清空全部对话的上下文（消息记录保留），确定吗？',
+  clearEverything: '将同时清空全部消息与全部上下文（AI 将不再记得之前的对话），确定吗？',
   import: '导入将覆盖当前全部数据，确定吗？',
 }
 
@@ -94,6 +104,8 @@ watch(
 
 /** 导出中状态(ZIP 生成是异步操作) */
 const isExporting = ref(false)
+/** JSON 导出中状态(与 ZIP 导出共用错误提示位) */
+const isExportingJson = ref(false)
 
 async function onExport() {
   if (isExporting.value) return
@@ -104,13 +116,32 @@ async function onExport() {
       chatStore.myGender,
       chatStore.stripVariantIndex,
       settingsStore.promptOverrides,
-      settingsStore.worldSetting,
-      DEFAULT_WORLD_SETTING,
+      // v6: 导出完整设置快照(API 配置/提示词覆盖/开关/公告标记)
+      settingsStore.getSettingsSnapshot(),
     )
   } catch (err) {
     importError.value = err instanceof Error ? err.message : '导出失败'
   } finally {
     isExporting.value = false
+  }
+}
+
+/** 导出为单文件 JSON(旧版兼容格式;图片 dataURL 内联) */
+async function onExportJson() {
+  if (isExportingJson.value) return
+  isExportingJson.value = true
+  try {
+    await downloadProjectJson(
+      cards.value,
+      chatStore.myGender,
+      chatStore.stripVariantIndex,
+      settingsStore.promptOverrides,
+      settingsStore.getSettingsSnapshot(),
+    )
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : '导出失败'
+  } finally {
+    isExportingJson.value = false
   }
 }
 
@@ -126,6 +157,11 @@ function onRequestClearContext() {
   confirmKind.value = 'clearContext'
 }
 
+/** 一键清空:同时清空全部消息 + 全部上下文(AI 不再记得之前的对话) */
+function onRequestClearEverything() {
+  confirmKind.value = 'clearEverything'
+}
+
 function onPickFile() {
   importError.value = ''
   fileInput.value?.click()
@@ -137,7 +173,12 @@ async function onFileChange(event: Event) {
   input.value = ''
   if (!file) return
   try {
-    pendingImport.value = await importFromZip(file)
+    // 按扩展名/MIME 分流:JSON 走旧版兼容层,ZIP 走原压缩包逻辑
+    const name = file.name.toLowerCase()
+    const isJson = name.endsWith('.json') || file.type.includes('json')
+    pendingImport.value = isJson
+      ? importFromJson(await file.text())
+      : await importFromZip(file)
     importError.value = ''
     confirmKind.value = 'import'
   } catch (err) {
@@ -165,18 +206,24 @@ function onConfirm() {
     chatStore.clearAllContext()
     flushPendingWrites()
     emit('close')
+  } else if (confirmKind.value === 'clearEverything') {
+    // 一键清空:先清消息(同步进 contextHistory),再清上下文记忆
+    chatStore.clearAllMessages()
+    chatStore.clearAllContext()
+    flushPendingWrites()
+    emit('close')
   } else if (confirmKind.value === 'import' && pendingImport.value) {
     const payload = pendingImport.value
     applyCards(payload.cards)
     chatStore.setMyGender(payload.myGender ?? 'male')
     chatStore.setStripVariant(payload.stripVariantIndex ?? 0)
-    // 应用自定义提示词覆盖(有则覆盖,无则不清除现有)
+    // v6: 优先应用完整设置快照(API配置/提示词覆盖/think/force_search/智能总结/公告标记)
+    if (payload.settings && typeof payload.settings === 'object') {
+      settingsStore.applySettingsSnapshot(payload.settings)
+    }
+    // 兼容旧包:无 settings 快照时,单独恢复自定义提示词覆盖
     if (payload.promptOverrides) {
       settingsStore.promptOverrides = { ...payload.promptOverrides }
-    }
-    // 应用自定义世界观设定(有则覆盖,无则不清除现有)
-    if (payload.worldSetting) {
-      settingsStore.worldSetting = payload.worldSetting
     }
     flushPendingWrites()
     emit('close')
@@ -224,6 +271,10 @@ function onCancelConfirm() {
             <button class="dm__btn dm__btn--primary" type="button" :disabled="isExporting" @click="onExport">
               {{ isExporting ? '导出中…' : '导出数据' }}
             </button>
+            <!-- 旧版兼容:导出为单文件 JSON -->
+            <button class="dm__btn" type="button" :disabled="isExportingJson" @click="onExportJson">
+              {{ isExportingJson ? '导出中…' : '导出 JSON' }}
+            </button>
             <button class="dm__btn" type="button" @click="onPickFile">导入数据</button>
           </div>
 
@@ -233,12 +284,14 @@ function onCancelConfirm() {
             <button class="dm__btn dm__btn--danger" type="button" @click="onRequestClear">删除全部对话</button>
             <button class="dm__btn" type="button" @click="onRequestClearMessages">清空全部消息</button>
             <button class="dm__btn" type="button" @click="onRequestClearContext">清空全部上下文</button>
+            <!-- 一键清空:同时执行清空全部消息 + 清空全部上下文(AI 不再记得之前对话) -->
+            <button class="dm__btn dm__btn--danger" type="button" @click="onRequestClearEverything">一键清空历史与上下文</button>
           </div>
         </template>
 
         <p v-if="importError" class="dm__error">{{ importError }}</p>
 
-        <input ref="fileInput" type="file" :accept="EXPORT_FILE_EXT" hidden @change="onFileChange" />
+        <input ref="fileInput" type="file" :accept="IMPORT_FILE_ACCEPT" hidden @change="onFileChange" />
       </div>
     </div>
   </Transition>

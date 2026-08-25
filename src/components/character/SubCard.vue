@@ -230,7 +230,13 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
 
   // 选中态联动:黄层展开 + texture/icon-box 透明 + icon 暗化 +
   //           text 变色 + deco 显示 + arrow 显示
+  // 选中时同时压制 hover 白层:选中子卡后鼠标停在卡上也会保持 is-hover,
+  // 若不压制,白层会因"选中+悬停"而常显。
   &.is-selected {
+    &::before {
+      opacity: 0;
+    }
+
     .subcard__rect::after {
       transform: scaleX(1);
     }

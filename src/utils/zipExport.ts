@@ -10,7 +10,6 @@
 //   project.json                          元数据(version/myGender/stripVariantIndex/stats)
 //   cards/XX/conversations/YY-name.json   每段对话(messages + contextHistory)
 //   cards/XX/images/YY-ZZZ.ext            图片消息(从 dataURL 提取为独立二进制文件)
-//   prompts/world-setting.txt            世界设定(仅自定义时存在)
 //   prompts/characters/角色名.txt          角色提示词覆盖(仅自定义时存在)
 //
 // 设计原则:
@@ -41,8 +40,8 @@ export interface ProjectPayload {
   stripVariantIndex: number
   /** 用户自定义提示词覆盖(角色名 → 提示词);无覆盖时为 undefined */
   promptOverrides?: Record<string, string>
-  /** 自定义世界观设定;未自定义时为 undefined */
-  worldSetting?: string
+  /** v6: 完整设置快照(API 配置/think/force_search/智能总结/公告标记等) */
+  settings?: Record<string, unknown>
 }
 
 // ---- 类型守卫(手写校验) -----------------------------------------------------
@@ -223,8 +222,7 @@ export async function exportToZip(
   myGender: 'male' | 'female',
   stripVariantIndex: number,
   promptOverrides: Record<string, string>,
-  worldSetting: string,
-  defaultWorldSetting: string,
+  settingsSnapshot?: Record<string, unknown> | null,
 ): Promise<Blob> {
   const zip = new JSZip()
 
@@ -244,13 +242,15 @@ export async function exportToZip(
 
   const stats = countStats(exportableCards)
 
-  // 1. project.json — 元数据
+  // 1. project.json — 元数据(含 v6 设置快照: apiConfig/提示词覆盖/开关等)
   const projectMeta = {
     version: PROJECT_VERSION,
     myGender,
     stripVariantIndex,
     exportedAt: new Date().toISOString(),
     stats,
+    // v6: 完整设置快照(API 配置/自定义提示词/think/force_search/智能总结/公告标记)
+    settings: settingsSnapshot || undefined,
   }
   zip.file('project.json', JSON.stringify(projectMeta, null, 2))
 
@@ -296,7 +296,6 @@ export async function exportToZip(
 
   // 3. prompts/ — 自定义提示词(仅导出有内容的)
   const hasOverrides = Object.keys(promptOverrides).length > 0
-  const hasCustomWorldSetting = worldSetting && worldSetting !== defaultWorldSetting
 
   if (hasOverrides) {
     for (const [name, prompt] of Object.entries(promptOverrides)) {
@@ -307,32 +306,107 @@ export async function exportToZip(
     }
   }
 
-  if (hasCustomWorldSetting) {
-    zip.file('prompts/world-setting.txt', worldSetting)
-  }
-
   // 4. 生成 ZIP Blob
   return zip.generateAsync({ type: 'blob' })
 }
 
-/** 下载 ZIP 文件 */
+/**
+ * 打包环境(EXE/APK)的"另存为"能力探测。
+ *
+ * 返回可用的保存函数(用户选择位置后写入 base64),无则 null(浏览器环境):
+ *   - Electron(EXE):window.nativeStorage.saveFileDialog(系统另存为对话框)
+ *   - Capacitor(APK):SaveFile 原生插件(SAF ACTION_CREATE_DOCUMENT)
+ */
+type SaveFileFn = (options: { fileName: string; base64: string }) => Promise<{ canceled: boolean }>
+
+async function getNativeSaveFile(): Promise<SaveFileFn | null> {
+  const w = window as unknown as {
+    nativeStorage?: { saveFileDialog?: SaveFileFn }
+    Capacitor?: {
+      isNativePlatform?: () => boolean
+      Plugins?: Record<string, { saveFile?: SaveFileFn }>
+    }
+  }
+
+  // Electron
+  if (typeof w.nativeStorage?.saveFileDialog === 'function') {
+    return w.nativeStorage.saveFileDialog
+  }
+
+  // Capacitor(APK)
+  const cap = w.Capacitor
+  if (cap && typeof cap.isNativePlatform === 'function' && cap.isNativePlatform()) {
+    const saveFile = cap.Plugins?.SaveFile?.saveFile
+    if (typeof saveFile === 'function') {
+      return saveFile
+    }
+  }
+
+  return null
+}
+
+/** Blob → base64(打包环境 IPC/插件只传字符串,不传 Blob) */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      resolve(result.split(',')[1] ?? '')
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('读取导出数据失败'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+/**
+ * 按平台下载任意 Blob 文件(ZIP / JSON 共用):
+ *   - Electron(EXE):弹系统"另存为"对话框
+ *   - Capacitor(APK):SAF 原生保存插件
+ *   - 浏览器:<a download> 直接下载
+ */
+export async function downloadBlob(blob: Blob, fileName: string): Promise<void> {
+  // 打包环境:弹系统"另存为"对话框,用户选择导出位置
+  const saveFile = await getNativeSaveFile()
+  if (saveFile) {
+    const base64 = await blobToBase64(blob)
+    const result = await saveFile({ fileName, base64 })
+    if (result?.canceled) {
+      throw new Error('已取消导出')
+    }
+    return
+  }
+
+  // Capacitor 原生平台但未探测到 SaveFile 插件:明确报错,避免静默走
+  // 浏览器 <a download>(Android WebView 中无效,表现"点击无反应")
+  const w = window as unknown as {
+    Capacitor?: { isNativePlatform?: () => boolean }
+  }
+  if (w.Capacitor && typeof w.Capacitor.isNativePlatform === 'function' && w.Capacitor.isNativePlatform()) {
+    throw new Error('导出功能初始化失败:未找到系统保存组件,请更新应用到最新版本')
+  }
+
+  // 浏览器:沿用 <a download> 直接下载
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+/** 下载 ZIP 文件(按平台:安装版弹系统保存框 / 浏览器直接下载) */
 export async function downloadProject(
   cards: Card[],
   myGender: 'male' | 'female',
   stripVariantIndex: number,
   promptOverrides: Record<string, string>,
-  worldSetting: string,
-  defaultWorldSetting: string,
+  settingsSnapshot?: Record<string, unknown> | null,
 ): Promise<void> {
-  const blob = await exportToZip(cards, myGender, stripVariantIndex, promptOverrides, worldSetting, defaultWorldSetting)
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `BAKER-${timestamp()}${EXPORT_FILE_EXT}`
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  const blob = await exportToZip(cards, myGender, stripVariantIndex, promptOverrides, settingsSnapshot)
+  const fileName = `BAKER-${timestamp()}${EXPORT_FILE_EXT}`
+  await downloadBlob(blob, fileName)
 }
 
 // ---- ZIP 导入 ---------------------------------------------------------------
@@ -467,12 +541,10 @@ export async function importFromZip(blob: Blob): Promise<ProjectPayload> {
     }
   }
 
-  // 4. 读取自定义世界观设定(如果存在)
-  let worldSetting: string | undefined
-  const worldSettingFile = zip.file('prompts/world-setting.txt')
-  if (worldSettingFile) {
-    worldSetting = await worldSettingFile.async('string')
-    if (!worldSetting) worldSetting = undefined
+  // 4. 读取设置快照(project.json 中的 settings 字段;缺失时 undefined)
+  let settingsSnapshot: Record<string, unknown> | undefined
+  if (projectMeta.settings && typeof projectMeta.settings === 'object') {
+    settingsSnapshot = projectMeta.settings as Record<string, unknown>
   }
 
   // 5. 白名单净化后返回
@@ -482,6 +554,6 @@ export async function importFromZip(blob: Blob): Promise<ProjectPayload> {
     myGender,
     stripVariantIndex,
     promptOverrides,
-    worldSetting,
+    settings: settingsSnapshot,
   }
 }

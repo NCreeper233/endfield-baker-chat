@@ -66,22 +66,6 @@ const ringStyle = computed(() => ({
   transform: `rotate(180deg) scale(${RING_SCALE})`,
   transformOrigin: 'center',
 }))
-
-/**
- * 是否 NPC 占位头像(icon_sns_npc_single_a)
- *
- * 这张素材是 72×131 的竖幅小图(私聊默认),用 cover 裁切会被
- * 放大到只剩下中心一角;换成 contain 完整显示。干员(character)头像本来就是
- * 方形构图,保持 cover 不动。这张图也不参与 scale 收紧裁剪(保持原样显示)。
- *
- * 用 includes 匹配文件名关键字:Vite 构建可能给资源 URL 追加 hash 后缀(如
- * icon_sns_npc_single_a-[hash].webp),若 portraitUrl 经由其他路径(如导入数据)
- * 传入同一资源的不同 URL 形式,全等比较会失败。按文件名关键字匹配更健壮。
- */
-const NPC_AVATAR_KEYS = ['icon_sns_npc_single_a']
-const isNpcPortrait = computed(() =>
-  !!props.portraitUrl && NPC_AVATAR_KEYS.some((k) => props.portraitUrl.includes(k)),
-)
 </script>
 
 <template>
@@ -92,9 +76,6 @@ const isNpcPortrait = computed(() =>
     <div class="chat-avatar__portrait-wrap" :style="portraitStyle">
       <img
         class="chat-avatar__portrait"
-        :class="{
-          'chat-avatar__portrait--npc': isNpcPortrait,
-        }"
         :src="portraitUrl"
         alt=""
       />
@@ -112,9 +93,11 @@ const isNpcPortrait = computed(() =>
     z-index: 0;
   }
 
+  // bg 层(头像底图):半透明,透出下层背景
   &__bg {
     position: absolute;
     z-index: 0;
+    opacity: 0.5;
   }
 
   // portrait 头像 wrapper:绝对定位(由 portraitStyle 设置 left/top/width/height),
@@ -136,15 +119,6 @@ const isNpcPortrait = computed(() =>
     object-position: center top;
     transform: scale(1.4);
     transform-origin: center 50%;
-  }
-
-  // NPC 占位头像(icon_sns_npc_single_a,72×131 竖幅):
-  // cover 裁切会放大到只剩中心一角,改用 contain 完整显示(居中,不裁切)
-  &__portrait--npc {
-    object-fit: contain;
-    object-position: center center;
-    // NPC 用 contain 完整显示,不需要 scale 放大
-    transform: none;
   }
 
   &__ring {

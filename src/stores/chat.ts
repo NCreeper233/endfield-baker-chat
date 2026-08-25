@@ -356,7 +356,7 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
-    // 自定义角色(非内置):仍可连带删除整张父卡
+    // 非内置:仍可连带删除整张父卡
     cards.value.splice(cardIndex, 1)
     collapsed.value.splice(cardIndex, 1)
     if (cards.value.length === 0) {
@@ -555,7 +555,6 @@ export const useChatStore = defineStore('chat', () => {
    *
    * 导入 / 恢复 / 清空后保证每个内置角色都至少存在一张卡片,
    * 防止"导出只含部分角色"导致空角色在界面消失。
-   * 自定义角色(不在 CHARACTERS 内)原样保留。
    */
   function mergeBuiltinCards(next: Card[]): Card[] {
     const result = next.map((c) => ({ conversations: c.conversations }))
@@ -650,6 +649,23 @@ export const useChatStore = defineStore('chat', () => {
   const pendingAiSpeaker = ref<{ name: string; avatar: string }>({ name: '', avatar: '' })
 
   /**
+   * 待写入下一条 AI 消息的心情表情 token(如 sns_emoji_001)
+   *
+   * 由 useAiChat 在拿到后端 { reply, mood } 后、分段显示前设置;
+   * 首条 chunk 创建消息时消费并清空(仅第一条气泡展示心情表情)。
+   */
+  const pendingAiMood = ref<string | undefined>(undefined)
+
+  /**
+   * 设置下一条 AI 消息的心情表情 token
+   *
+   * @param mood 后端 mood 字段(token 形式,如 sns_emoji_001);undefined 表示无
+   */
+  function setPendingAiMood(mood?: string): void {
+    pendingAiMood.value = mood
+  }
+
+  /**
    * 开始 AI 响应:设置 loading 状态(显示 LoadingBubble),不提前创建空消息
    *
    * 消息在首条 chunk 到达时由 appendAiChunk 创建,避免空气泡与 LoadingBubble 同时出现。
@@ -692,7 +708,10 @@ export const useChatStore = defineStore('chat', () => {
         text: chunk,
         speakerName: pendingAiSpeaker.value.name,
         speakerAvatar: pendingAiSpeaker.value.avatar,
+        // 心情表情 token:仅首条气泡消费并清空
+        mood: pendingAiMood.value,
       })
+      pendingAiMood.value = undefined
       aiMessageId.value = nextId
       isLoading.value = false
       return
@@ -721,6 +740,7 @@ export const useChatStore = defineStore('chat', () => {
     aiMessageId.value = null
     aiAbortController = null
     pendingAiSpeaker.value = { name: '', avatar: '' }
+    pendingAiMood.value = undefined
     aiTargetSub.value = null
   }
 
@@ -853,5 +873,6 @@ export const useChatStore = defineStore('chat', () => {
     abortAiResponse,
     getAiSignal,
     getChatHistory,
+    setPendingAiMood,
   }
 })

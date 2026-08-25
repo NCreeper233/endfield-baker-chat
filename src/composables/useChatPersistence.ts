@@ -9,16 +9,19 @@
 // =============================================================================
 import { watch } from 'vue'
 import { useChatStore } from '../stores/chat'
+import { useSettingsStore } from '../stores/settings'
 import {
   isCards,
   sanitizeCards,
   PROJECT_VERSION,
 } from '../utils/zipExport'
+import { getNativeFileBridge, createNativeStore } from '../utils/nativeStorage'
 import type { Card } from '../types/chat'
 
 const DB_NAME = 'endfield-baker'
 const STORE_NAME = 'data'
 const KEY_CARDS = 'cards'
+const KEY_SETTINGS = 'settings'
 const KEY_MY_GENDER = 'myGender'
 const KEY_STRIP_VARIANT = 'stripVariant'
 const KEY_VERSION = 'version'
@@ -129,13 +132,51 @@ function getRecord(db: IDBDatabase, key: string): Promise<unknown> {
   })
 }
 
+// ---- 统一存储后端(网页 IndexedDB / 打包 JSON 文件) -------------------------
+// 打包环境(EXE/APK)下 IndexedDB 不可靠(WebView 可能清空),改走本地 JSON 文件:
+// 优先探测原生文件桥,存在则用 JSON 文件,否则回退 IndexedDB。
+let nativeStorePromise: Promise<ReturnType<typeof createNativeStore> | null> | null = null
+
+function getNativeStore(): Promise<ReturnType<typeof createNativeStore> | null> {
+  if (!nativeStorePromise) {
+    nativeStorePromise = getNativeFileBridge().then((bridge) =>
+      bridge ? createNativeStore(bridge) : null,
+    )
+  }
+  return nativeStorePromise
+}
+
+/** 统一写入:打包环境写 JSON 文件,网页写 IndexedDB */
+async function putRecordUnified(key: string, value: unknown): Promise<void> {
+  const native = await getNativeStore()
+  if (native) {
+    await native.put(key, value)
+    return
+  }
+  const db = await getDb()
+  await putRecord(db, key, value)
+}
+
+/** 统一读取:打包环境读 JSON 文件,网页读 IndexedDB */
+async function getRecordUnified(key: string): Promise<unknown> {
+  const native = await getNativeStore()
+  if (native) {
+    return native.get(key)
+  }
+  const db = await getDb()
+  return getRecord(db, key)
+}
+
 // ---- 持久化生命周期 ---------------------------------------------------------
 
 /**
  * 注册自动保存并返回启动恢复函数。
  * 需在应用挂载前调用,保证恢复数据先于首帧渲染。
  */
-export function useChatPersistence(store: ReturnType<typeof useChatStore>) {
+export function useChatPersistence(
+  store: ReturnType<typeof useChatStore>,
+  settingsStore: ReturnType<typeof useSettingsStore>,
+) {
   /**
    * 防抖写库器:schedule(延迟写) + flush(立即写)
    * 写入统一 doWrite:深拷贝后落库,并同步库内结构版本。
@@ -145,9 +186,8 @@ export function useChatPersistence(store: ReturnType<typeof useChatStore>) {
 
     const doWrite = async () => {
       try {
-        const db = await getDb()
-        await putRecord(db, key, JSON.parse(JSON.stringify(get())))
-        if (KEY_VERSION !== key) await putRecord(db, KEY_VERSION, PROJECT_VERSION)
+        await putRecordUnified(key, JSON.parse(JSON.stringify(get())))
+        if (KEY_VERSION !== key) await putRecordUnified(KEY_VERSION, PROJECT_VERSION)
       } catch (err) {
         console.warn(`[persist] 写入 ${key} 失败`, err)
       }
@@ -178,23 +218,34 @@ export function useChatPersistence(store: ReturnType<typeof useChatStore>) {
   const scheduleCards = debounceWrite(KEY_CARDS, () => store.cards)
   const scheduleMyGender = debounceWrite(KEY_MY_GENDER, () => store.myGender)
   const scheduleStripVariant = debounceWrite(KEY_STRIP_VARIANT, () => store.stripVariantIndex)
+  // v6: 设置快照(apiConfig/promptOverrides/think/forceSearch/summary/noticeDismissed)
+  const scheduleSettings = debounceWrite(KEY_SETTINGS, () => settingsStore.getSettingsSnapshot())
   const { schedule: cardSchedule, flush: cardFlush } = scheduleCards
   const { schedule: myGenderSchedule, flush: myGenderFlush } = scheduleMyGender
   const { schedule: stripVariantSchedule, flush: stripVariantFlush } = scheduleStripVariant
+  const { schedule: settingsSchedule, flush: settingsFlush } = scheduleSettings
 
   installUnloadFlush()
 
   const unwatchCards = watch(() => store.cards, cardSchedule, { deep: true })
   const unwatchMyGender = watch(() => store.myGender, myGenderSchedule)
   const unwatchStripVariant = watch(() => store.stripVariantIndex, stripVariantSchedule)
+  // 深度监听 settings store 全部相关状态,变化即落盘
+  const unwatchSettings = watch(
+    () => settingsStore.getSettingsSnapshot(),
+    settingsSchedule,
+    { deep: true },
+  )
 
   function disposeWatchers() {
     unwatchCards()
     unwatchMyGender()
     unwatchStripVariant()
+    unwatchSettings()
     flushReady.delete(cardFlush)
     flushReady.delete(myGenderFlush)
     flushReady.delete(stripVariantFlush)
+    flushReady.delete(settingsFlush)
   }
 
   /**
@@ -203,13 +254,17 @@ export function useChatPersistence(store: ReturnType<typeof useChatStore>) {
    */
   async function loadProject(): Promise<void> {
     try {
-      const db = await getDb()
-      const [cardsRaw, versionRaw, myGenderRaw, stripVariantRaw] = await Promise.all([
-        getRecord(db, KEY_CARDS),
-        getRecord(db, KEY_VERSION),
-        getRecord(db, KEY_MY_GENDER),
-        getRecord(db, KEY_STRIP_VARIANT),
+      const [cardsRaw, versionRaw, myGenderRaw, stripVariantRaw, settingsRaw] = await Promise.all([
+        getRecordUnified(KEY_CARDS),
+        getRecordUnified(KEY_VERSION),
+        getRecordUnified(KEY_MY_GENDER),
+        getRecordUnified(KEY_STRIP_VARIANT),
+        getRecordUnified(KEY_SETTINGS),
       ])
+      // v6: 恢复设置快照(api配置/提示词覆盖/开关等),缺失时跳过
+      if (settingsRaw && typeof settingsRaw === 'object') {
+        settingsStore.applySettingsSnapshot(settingsRaw as Record<string, unknown>)
+      }
       const fromVersion = typeof versionRaw === 'number' ? versionRaw : 0
       if (fromVersion !== PROJECT_VERSION) {
         if (fromVersion > PROJECT_VERSION) {

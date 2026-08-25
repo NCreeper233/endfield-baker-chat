@@ -5,8 +5,8 @@
 // AI API 配置 + 提示词编辑,全部持久化到 localStorage(settings store)
 // 打开/关闭状态由父组件 App 持有
 // =============================================================================
-import { ref, computed, watch } from 'vue'
-import { useSettingsStore, DEFAULT_WORLD_SETTING } from '../../stores/settings'
+import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { useSettingsStore } from '../../stores/settings'
 import { testApiConnection } from '../../utils/llm'
 import { testBackendConnection } from '../../utils/backend'
 import { useChatStore } from '../../stores/chat'
@@ -16,10 +16,6 @@ import DataManagerDialog from './DataManagerDialog.vue'
 const props = defineProps<{
   /** 是否展开 */
   open: boolean
-  /** 当前自定义背景(data URL,null = 默认背景;由 App 持有共享) */
-  customBg?: string | null
-  /** 背景变更回调(上传 → dataURL;恢复默认 → null) */
-  onBgChange?: (v: string | null) => void
 }>()
 
 const emit = defineEmits<{
@@ -29,49 +25,103 @@ const emit = defineEmits<{
 const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
 
-/** 当前标签页:api / system / character / data / bg / disclaimer / about */
-const activeTab = ref<'api' | 'system' | 'character' | 'data' | 'bg' | 'disclaimer' | 'about'>('api')
+/** 当前标签页:api / data / about（提示词与背景已并入 api 页的"自定义 API"分支） */
+const activeTab = ref<'api' | 'experimental' | 'data' | 'about'>('api')
+
+/** 标签页配置(用于 v-for 渲染 + 滑动指示条) */
+const tabs = [
+  { key: 'api', label: 'API 配置' },
+  { key: 'experimental', label: '实验性功能' },
+  { key: 'data', label: '数据管理' },
+  { key: 'about', label: '关于' },
+] as const
+
+// ---- 标签页滑动指示条 -------------------------------------------------------
+/** 标签栏容器(ref) */
+const tabsEl = ref<HTMLElement | null>(null)
+/** 各标签按钮 DOM(按键名缓存,供指示条测量) */
+const tabEls = new Map<string, HTMLElement>()
+/** 就绪信号:递增即强制指示条重算(首次挂载时用于定位) */
+const tabsReady = ref(0)
+/** 指示条过渡开关:定位完成后的下一帧才启用动画 */
+const tabAnim = ref(false)
+
+/** 记录标签按钮 DOM(Vue ref 回调:卸载时传 null) */
+function setTabEl(key: string, el: unknown) {
+  if (el) tabEls.set(key, el as HTMLElement)
+}
+
+/**
+ * 指示条样式:宽度 = 激活标签宽度,位移 = 激活标签相对标签栏左边的距离。
+ * tabsReady 必须无条件读取(在提前返回之前),否则首次挂载时不会建立依赖,
+ * 标签 DOM 就绪后无法触发重算,横条会一直不可见。
+ */
+const tabIndicatorStyle = computed(() => {
+  void tabsReady.value // 无条件建立响应依赖
+  const container = tabsEl.value
+  const el = tabEls.get(activeTab.value)
+  if (!container || !el) return {}
+  const cr = container.getBoundingClientRect()
+  const er = el.getBoundingClientRect()
+  return {
+    width: `${er.width}px`,
+    transform: `translateX(${er.left - cr.left}px)`,
+  }
+})
+
+// 挂载完成:先让指示条直接定位到当前标签(此时 transition 未开,无动画),
+// 下一帧再开启过渡,之后手动切换标签才有滑动动画。
+onMounted(async () => {
+  await nextTick() // 等首帧渲染、标签 ref 全部填充
+  tabsReady.value++ // 强制重算 → 横条出现在当前标签下方
+  await nextTick() // 等定位渲染完成
+  tabAnim.value = true // 开启过渡动画
+})
 
 // ---- API 配置本地缓存(打开时同步,保存时写入 store) -------------------------
 const apiDraft = ref({
-  apiMode: 'shared' as 'shared' | 'custom' | 'backend',
+  apiMode: 'custom' as 'custom' | 'backend',
   baseUrl: '',
   apiKey: '',
   model: '',
   backendUrl: '',
-  temperature: 0.8,
+  temperature: 1.0,
   maxTokens: 2048,
 })
 
-/** 是否为 shared 模式 */
-const isSharedMode = computed(() => apiDraft.value.apiMode === 'shared')
-
-/** 是否为 custom 模式(需要显示 baseUrl/apiKey/model 输入框) */
+/** 是否为自定义 API 模式(需要显示 baseUrl/apiKey/model 输入框) */
 const isCustomMode = computed(() => apiDraft.value.apiMode === 'custom')
 
-/** 是否为后端模式(需要显示后端地址输入框) */
+/** 是否为后端模式(地址内置,无需填写) */
 const isBackendMode = computed(() => apiDraft.value.apiMode === 'backend')
 
-// ---- 世界观设定本地缓存 -----------------------------------------------------
-const worldSettingDraft = ref('')
+/** 当前对话的角色名(后端模式连接测试用它解析该角色的固定地址) */
+const currentCharName = computed(() =>
+  chatStore.activeSub !== null
+    ? chatStore.conversations[chatStore.activeSub]?.name ?? ''
+    : '',
+)
 
-// ---- 角色提示词编辑 ---------------------------------------------------------
-/** 当前选中的角色名 */
-const selectedCharacter = ref<string>('')
-/** 当前角色的提示词草稿 */
-const characterPromptDraft = ref('')
-
+// ---- 提示词编辑 ---------------------------------------------------------
 /** 所有可编辑提示词的角色名列表(内置角色) */
 const characterNames = computed(() => Object.keys(CHARACTER_PROMPTS))
+
+/**
+ * 当前提示词绑定的角色(跟随当前对话,不可手动切换)
+ *
+ * 无选中对话 / 角色不在内置表 → 空串(草稿为空,编辑区禁用)。
+ */
+const selectedCharacter = computed<string>(() =>
+  currentCharName.value && characterNames.value.includes(currentCharName.value)
+    ? currentCharName.value
+    : '',
+)
+/** 当前角色的提示词草稿 */
+const characterPromptDraft = ref('')
 
 /** 当前角色是否为内置角色(有默认提示词可恢复) */
 const isBuiltinCharacter = computed(() =>
   selectedCharacter.value ? selectedCharacter.value in CHARACTER_PROMPTS : false,
-)
-
-/** 当前角色是否已被用户覆盖 */
-const isCharacterOverridden = computed(() =>
-  selectedCharacter.value ? selectedCharacter.value in settingsStore.promptOverrides : false,
 )
 
 // 打开弹窗时同步本地缓存
@@ -80,31 +130,35 @@ watch(
   (open) => {
     if (open) {
       apiDraft.value = { ...settingsStore.apiConfig }
-      worldSettingDraft.value = settingsStore.worldSetting
-
-      // 同步当前聊天角色:打开设置时自动选中当前对话的角色
-  // 无选中对话 / 角色名不在列表 → 清空选择,提示词为空(不回退到伊冯)
-  const currentCharName =
-    chatStore.activeSub !== null
-      ? chatStore.conversations[chatStore.activeSub]?.name
-      : null
-
-  if (currentCharName && characterNames.value.includes(currentCharName)) {
-    selectedCharacter.value = currentCharName
-  } else {
-    selectedCharacter.value = ''
-  }
-
-  if (selectedCharacter.value) {
-    characterPromptDraft.value = settingsStore.getCharacterPrompt(selectedCharacter.value)
-  } else {
-    characterPromptDraft.value = ''
-  }
+      // 智能总结草稿(打开时从 store 同步)
+      summaryDraft.value = { ...settingsStore.summaryConfig }
+      // 提示词草稿跟随当前对话角色(角色由 currentCharName 派生,无需手动同步)
+      characterPromptDraft.value = settingsStore.getCharacterPrompt(selectedCharacter.value)
     }
   },
 )
 
-// 切换角色时同步提示词草稿(空选择 → 空提示词)
+// ---- 实验性功能:智能总结配置草稿 -----------------------------------------
+/** 智能总结配置草稿(打开时从 store 同步,保存时写回) */
+const summaryDraft = ref({ ...settingsStore.summaryConfig })
+
+/** 智能总结是否为默认模式(内置 Agnes API) */
+const isSummaryDefaultMode = computed(() => summaryDraft.value.apiMode === 'default')
+
+/** 智能总结是否为自定义模式(用户自填 Base URL/Key/模型) */
+const isSummaryCustomMode = computed(() => summaryDraft.value.apiMode === 'custom')
+
+/** 切换智能总结 API 模式(默认/自定义),同步草稿 */
+function switchSummaryApiMode(mode: 'default' | 'custom') {
+  summaryDraft.value.apiMode = mode
+}
+
+/** 保存智能总结配置到 store(持久化) */
+function saveSummaryConfig() {
+  settingsStore.updateSummaryConfig({ ...summaryDraft.value })
+}
+
+// 当前对话角色变化时同步提示词草稿(空角色 → 空提示词)
 watch(selectedCharacter, (name) => {
   if (name) {
     characterPromptDraft.value = settingsStore.getCharacterPrompt(name)
@@ -118,6 +172,15 @@ function saveApiConfig() {
   settingsStore.updateApiConfig(apiDraft.value)
 }
 
+/**
+ * 切换 API 模式(默认 API / 自定义 API):立即持久化,无需点保存。
+ * 切换时同步草稿与 store,关闭弹窗再打开仍是新模式。
+ */
+function switchApiMode(mode: 'custom' | 'backend') {
+  apiDraft.value.apiMode = mode
+  settingsStore.updateApiConfig({ apiMode: mode })
+}
+
 /** 连接测试状态 */
 const testState = ref<'idle' | 'testing' | 'success' | 'fail'>('idle')
 const testMessage = ref('')
@@ -128,7 +191,7 @@ async function onTestConnection() {
   testMessage.value = ''
   try {
     const result = isBackendMode.value
-      ? await testBackendConnection({ ...apiDraft.value })
+      ? await testBackendConnection({ ...apiDraft.value }, currentCharName.value)
       : await testApiConnection({ ...apiDraft.value })
     testState.value = result.ok ? 'success' : 'fail'
     testMessage.value = result.message
@@ -136,11 +199,6 @@ async function onTestConnection() {
     testState.value = 'fail'
     testMessage.value = '连接失败: 未知错误'
   }
-}
-
-/** 保存世界观设定 */
-function saveSystemPrompt() {
-  settingsStore.worldSetting = worldSettingDraft.value
 }
 
 /** 保存角色提示词 */
@@ -156,50 +214,15 @@ function resetCharacterPrompt() {
   characterPromptDraft.value = settingsStore.getCharacterPrompt(selectedCharacter.value)
 }
 
-/** 重置世界观设定为默认 */
-function resetSystemPrompt() {
-  worldSettingDraft.value = DEFAULT_WORLD_SETTING
-  settingsStore.worldSetting = worldSettingDraft.value
-}
-
 /** 重置全部设置 */
 function resetAll() {
   settingsStore.resetAll()
   apiDraft.value = { ...settingsStore.apiConfig }
-  worldSettingDraft.value = settingsStore.worldSetting
   if (selectedCharacter.value) {
     characterPromptDraft.value = settingsStore.getCharacterPrompt(selectedCharacter.value)
   }
 }
 
-// ---- 背景图(数据管理 tab 共用) ----------------------------------------------
-/** 隐藏的背景图文件选择框 */
-const bgFileInput = ref<HTMLInputElement | null>(null)
-
-/** 是否已设置自定义背景 */
-const hasCustomBg = computed(() => !!props.customBg)
-
-/** 选择背景图:读为 dataURL 交给 App 更新(自动落 localStorage) */
-function onBgFileChange(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
-  const reader = new FileReader()
-  reader.onload = () => {
-    const v = reader.result
-    if (typeof v === 'string') props.onBgChange?.(v)
-  }
-  reader.onerror = () => {
-    console.warn('[Settings] 背景图片读取失败,可能是损坏或不受支持的格式')
-  }
-  reader.readAsDataURL(file)
-}
-
-/** 恢复默认背景:置 null(App 侧 watch 自动清除 localStorage) */
-function onBgReset() {
-  props.onBgChange?.(null)
-}
 </script>
 
 <template>
@@ -212,49 +235,22 @@ function onBgReset() {
         <h2 class="sd__title">设置</h2>
 
         <!-- 标签页切换 -->
-        <div class="sd__tabs">
+        <div class="sd__tabs" ref="tabsEl">
           <button
+            v-for="t in tabs"
+            :key="t.key"
             class="sd__tab"
-            :class="{ 'sd__tab--active': activeTab === 'api' }"
+            :class="{ 'sd__tab--active': activeTab === t.key }"
+            :ref="(el) => setTabEl(t.key, el)"
             type="button"
-            @click="activeTab = 'api'"
-          >API 配置</button>
-          <button
-            class="sd__tab"
-            :class="{ 'sd__tab--active': activeTab === 'system' }"
-            type="button"
-            @click="activeTab = 'system'"
-          >世界观设定</button>
-          <button
-            class="sd__tab"
-            :class="{ 'sd__tab--active': activeTab === 'character' }"
-            type="button"
-            @click="activeTab = 'character'"
-          >角色提示词</button>
-          <button
-            class="sd__tab"
-            :class="{ 'sd__tab--active': activeTab === 'data' }"
-            type="button"
-            @click="activeTab = 'data'"
-          >数据管理</button>
-          <button
-            class="sd__tab"
-            :class="{ 'sd__tab--active': activeTab === 'bg' }"
-            type="button"
-            @click="activeTab = 'bg'"
-          >背景</button>
-          <button
-            class="sd__tab"
-            :class="{ 'sd__tab--active': activeTab === 'disclaimer' }"
-            type="button"
-            @click="activeTab = 'disclaimer'"
-          >免责声明</button>
-          <button
-            class="sd__tab"
-            :class="{ 'sd__tab--active': activeTab === 'about' }"
-            type="button"
-            @click="activeTab = 'about'"
-          >关于</button>
+            @click="activeTab = t.key"
+          >{{ t.label }}</button>
+          <!-- 黄色滑动指示条(跟随激活标签;就绪后才开动画) -->
+          <div
+            class="sd__tab-indicator"
+            :class="{ 'sd__tab-indicator--anim': tabAnim }"
+            :style="tabIndicatorStyle"
+          ></div>
         </div>
 
         <div class="sd__body">
@@ -264,33 +260,22 @@ function onBgReset() {
             <div class="sd__field">
               <span class="sd__label">API 模式</span>
               <div class="sd__mode-toggle">
-                <button
-                  class="sd__mode-btn"
-                  :class="{ 'sd__mode-btn--active': isSharedMode }"
-                  type="button"
-                  @click="apiDraft.apiMode = 'shared'"
-                >共享 API</button>
-                <button
-                  class="sd__mode-btn"
-                  :class="{ 'sd__mode-btn--active': isCustomMode }"
-                  type="button"
-                  @click="apiDraft.apiMode = 'custom'"
-                >自定义 API</button>
-                <!-- 【已注释】后端模式按钮(后端模式 UI 暂时隐藏,逻辑保留):
+                <!-- 黄色滑动指示条(跟随当前模式) -->
+                <div class="sd__mode-indicator" :class="{ 'sd__mode-indicator--right': isCustomMode }"></div>
                 <button
                   class="sd__mode-btn"
                   :class="{ 'sd__mode-btn--active': isBackendMode }"
                   type="button"
-                  @click="apiDraft.apiMode = 'backend'"
-                >后端模式</button>
-                -->
+                  @click="switchApiMode('backend')"
+                >默认 API</button>
+                <button
+                  class="sd__mode-btn"
+                  :class="{ 'sd__mode-btn--active': isCustomMode }"
+                  type="button"
+                  @click="switchApiMode('custom')"
+                >自定义 API</button>
               </div>
             </div>
-
-            <!-- 共享模式说明 -->
-            <p v-if="isSharedMode" class="sd__desc">
-              使用内置共享 API（agnes-2.5-flash），可识别图像。
-            </p>
 
             <!-- 自定义模式:baseUrl + apiKey + model -->
             <template v-if="isCustomMode">
@@ -323,24 +308,12 @@ function onBgReset() {
               </label>
             </template>
 
-            <!-- 【已注释】后端模式 UI(后端地址输入等,逻辑保留):
             <template v-if="isBackendMode">
-              <p class="sd__desc">
-                前端只传递当前输入 + 最近 10 轮问答历史 + 角色名，其余由你的 Python 脚本处理。
-              </p>
-              <label class="sd__field">
-                <span class="sd__label">后端地址（完整接口 URL，含路径）</span>
-                <input
-                  v-model="apiDraft.backendUrl"
-                  class="sd__input"
-                  type="text"
-                  placeholder="http://localhost:8000/chat"
-                />
-              </label>
+              <p class="sd__desc">当前干员：{{ currentCharName || '未选中' }}</p>
+              <p class="sd__desc">服务方免费 API 模式下无法自定义提示词与世界观背景，请切换到「自定义 API」以启用。</p>
             </template>
-            -->
 
-            <!-- 温度 + 最大 Token(shared/custom 模式共用,后端模式由脚本决定,不显示) -->
+            <!-- 温度 + 最大 Token(自定义 API 模式显示,默认 API 模式由脚本决定,不显示) -->
             <template v-if="!isBackendMode">
               <label class="sd__field">
                 <span class="sd__label">温度 ({{ apiDraft.temperature.toFixed(1) }})</span>
@@ -363,6 +336,33 @@ function onBgReset() {
                   max="32768"
                 />
               </label>
+
+              <!-- 自定义提示词(仅自定义 API 模式) -->
+              <div class="sd__divider"></div>
+              <p class="sd__desc">自定义提示词（当前干员：{{ selectedCharacter || '未选中' }}）</p>
+              <div class="sd__char-textarea-wrap">
+                <textarea
+                  v-model="characterPromptDraft"
+                  class="sd__textarea sd__textarea--tall"
+                  rows="10"
+                  :placeholder="selectedCharacter ? '输入提示词…' : '请先选择一个对话'"
+                  :disabled="!selectedCharacter"
+                ></textarea>
+              </div>
+              <div class="sd__actions">
+                <button class="sd__btn sd__btn--primary" type="button" :disabled="!selectedCharacter" @click="saveCharacterPrompt">保存</button>
+                <button v-if="isBuiltinCharacter" class="sd__btn" type="button" @click="resetCharacterPrompt">恢复默认</button>
+              </div>
+
+              <!-- 全局世界观背景(文本,仅自定义 API 模式) -->
+              <div class="sd__divider"></div>
+              <p class="sd__desc">世界观背景（全局世界观设定，将注入角色对话上下文）</p>
+              <textarea
+                v-model="settingsStore.worldView"
+                class="sd__textarea sd__textarea--tall"
+                rows="6"
+                placeholder="输入全局世界观，例如：这是终末地工业时代，源石技艺与科技并存…"
+              ></textarea>
             </template>
             <div class="sd__actions">
               <button class="sd__btn sd__btn--primary" type="button" @click="saveApiConfig">保存</button>
@@ -380,119 +380,137 @@ function onBgReset() {
             <p v-else class="sd__hint sd__hint--warn">API 未配置,请填写以上信息后保存</p>
           </div>
 
-          <!-- 系统提示词 -->
-          <div v-if="activeTab === 'system'" class="sd__section">
-            <p class="sd__desc">世界观设定，所有角色对话共享。</p>
-            <textarea
-              v-model="worldSettingDraft"
-              class="sd__textarea"
-              rows="6"
-              placeholder="输入世界观设定..."
-            ></textarea>
-            <div class="sd__actions">
-              <button class="sd__btn sd__btn--primary" type="button" @click="saveSystemPrompt">保存</button>
-              <button class="sd__btn" type="button" @click="resetSystemPrompt">恢复默认</button>
+          <!-- 实验性功能 -->
+          <div v-if="activeTab === 'experimental'" class="sd__section">
+            <!-- 思考模式开关(原 API 页移入;全局,实时持久化,随请求体传给后端) -->
+            <div class="sd__field">
+              <span class="sd__label">思考模式</span>
+              <button
+                type="button"
+                class="sd__btn"
+                :class="{ 'sd__btn--primary': settingsStore.thinkEnabled }"
+                @click="settingsStore.thinkEnabled = !settingsStore.thinkEnabled"
+              >{{ settingsStore.thinkEnabled ? '开启 ✓' : '关闭' }}</button>
+              <p class="sd__hint" :class="settingsStore.thinkEnabled ? 'sd__hint--ok' : 'sd__hint--warn'">
+                {{ settingsStore.thinkEnabled ? '已开启：角色会先深度思考再回答' : '已关闭：角色直接回答' }}
+              </p>
             </div>
-          </div>
 
-          <!-- 角色提示词 -->
-          <div v-if="activeTab === 'character'" class="sd__section">
-            <div class="sd__char-header">
-              <select v-model="selectedCharacter" class="sd__select">
-                <option value="" disabled>选择角色…</option>
-                <option v-for="name in characterNames" :key="name" :value="name">{{ name }}</option>
-              </select>
-              <span v-if="isCharacterOverridden" class="sd__badge">已自定义</span>
+            <div class="sd__divider"></div>
+
+            <!-- 强制每条搜索开关(全局,实时持久化,随请求体传 force_search) -->
+            <div class="sd__field">
+              <span class="sd__label">强制每条搜索</span>
+              <button
+                type="button"
+                class="sd__btn"
+                :class="{ 'sd__btn--primary': settingsStore.forceSearch }"
+                @click="settingsStore.forceSearch = !settingsStore.forceSearch"
+              >{{ settingsStore.forceSearch ? '开启 ✓' : '关闭' }}</button>
+              <p class="sd__hint" :class="settingsStore.forceSearch ? 'sd__hint--ok' : 'sd__hint--warn'">
+                {{ settingsStore.forceSearch ? '已开启：每条消息都强制触发联网搜索' : '已关闭：仅按需触发搜索' }}
+              </p>
             </div>
-            <textarea
-              v-model="characterPromptDraft"
-              class="sd__textarea sd__textarea--tall"
-              rows="16"
-              :placeholder="selectedCharacter ? '输入角色提示词…' : '请先在左侧选择一个角色'"
-              :disabled="!selectedCharacter"
-            ></textarea>
-            <div class="sd__actions">
-              <button class="sd__btn sd__btn--primary" type="button" :disabled="!selectedCharacter" @click="saveCharacterPrompt">保存</button>
-              <button v-if="isBuiltinCharacter" class="sd__btn" type="button" @click="resetCharacterPrompt">恢复默认</button>
+
+            <div class="sd__divider"></div>
+
+            <!-- 沉浸式对话模式开关(全局,实时持久化,随请求体传 immersive_mode) -->
+            <div class="sd__field">
+              <span class="sd__label">沉浸式对话模式</span>
+              <button
+                type="button"
+                class="sd__btn"
+                :class="{ 'sd__btn--primary': settingsStore.immersiveMode }"
+                @click="settingsStore.immersiveMode = !settingsStore.immersiveMode"
+              >{{ settingsStore.immersiveMode ? '开启 ✓' : '关闭' }}</button>
+              <p class="sd__hint" :class="settingsStore.immersiveMode ? 'sd__hint--ok' : 'sd__hint--warn'">
+                {{ settingsStore.immersiveMode ? '已开启：角色回复保留括号内动作/神态/情景描写' : '已关闭：角色只输出对话语句，禁止括号描写' }}
+              </p>
+            </div>
+
+            <div class="sd__divider"></div>
+
+            <!-- 智能总结 -->
+            <div class="sd__field">
+              <span class="sd__label">智能总结</span>
+              <button
+                type="button"
+                class="sd__btn"
+                :class="{ 'sd__btn--primary': summaryDraft.enabled }"
+                @click="summaryDraft.enabled = !summaryDraft.enabled"
+              >{{ summaryDraft.enabled ? '开启 ✓' : '关闭' }}</button>
+              <p class="sd__hint" :class="summaryDraft.enabled ? 'sd__hint--ok' : 'sd__hint--warn'">
+                {{ summaryDraft.enabled ? '已开启：历史超过 50 条时自动总结前段对话' : '已关闭：仅发送最近 50 条消息' }}
+              </p>
+            </div>
+
+            <!-- 智能总结 API 模式切换(默认 Agnes API / 自定义) -->
+            <div v-if="summaryDraft.enabled" class="sd__field">
+              <span class="sd__label">总结 API 模式</span>
+              <div class="sd__mode-toggle">
+                <div
+                  class="sd__mode-indicator"
+                  :class="{ 'sd__mode-indicator--right': isSummaryCustomMode }"
+                ></div>
+                <button
+                  class="sd__mode-btn"
+                  :class="{ 'sd__mode-btn--active': isSummaryDefaultMode }"
+                  type="button"
+                  @click="switchSummaryApiMode('default')"
+                >默认 Agnes API</button>
+                <button
+                  class="sd__mode-btn"
+                  :class="{ 'sd__mode-btn--active': isSummaryCustomMode }"
+                  type="button"
+                  @click="switchSummaryApiMode('custom')"
+                >自定义 API</button>
+              </div>
+              <p class="sd__hint" v-if="isSummaryDefaultMode">
+                使用项目内置 Agnes API(无需填写密钥),模型 agnes-2.5-flash。
+              </p>
+            </div>
+
+            <!-- 自定义总结 API 配置 -->
+            <template v-if="summaryDraft.enabled && isSummaryCustomMode">
+              <label class="sd__field">
+                <span class="sd__label">Base URL</span>
+                <input
+                  v-model="summaryDraft.baseUrl"
+                  class="sd__input"
+                  type="text"
+                  placeholder="https://api.agnes-ai.cn/v1"
+                />
+              </label>
+              <label class="sd__field">
+                <span class="sd__label">API Key</span>
+                <input
+                  v-model="summaryDraft.apiKey"
+                  class="sd__input"
+                  type="password"
+                  placeholder="sk-..."
+                  autocomplete="off"
+                />
+              </label>
+              <label class="sd__field">
+                <span class="sd__label">模型名</span>
+                <input
+                  v-model="summaryDraft.model"
+                  class="sd__input"
+                  type="text"
+                  placeholder="agnes-2.5-flash"
+                />
+              </label>
+            </template>
+
+            <!-- 智能总结保存按钮 -->
+            <div v-if="summaryDraft.enabled" class="sd__actions">
+              <button class="sd__btn sd__btn--primary" type="button" @click="saveSummaryConfig">保存总结设置</button>
             </div>
           </div>
 
           <!-- 数据管理(内嵌 DataManagerDialog 功能:统计/导出/导入/清空) -->
           <div v-if="activeTab === 'data'" class="sd__section">
             <DataManagerDialog :open="open" embedded />
-          </div>
-
-          <!-- 背景:上传自定义背景 + 恢复默认 -->
-          <div v-if="activeTab === 'bg'" class="sd__section">
-            <p class="sd__desc">
-              上传图片作为页面背景(替换默认游戏背景),已设置时可用「恢复默认」还原。
-            </p>
-            <input
-              ref="bgFileInput"
-              class="sd__file"
-              type="file"
-              accept="image/*"
-              @change="onBgFileChange"
-            />
-            <div class="sd__actions">
-              <button class="sd__btn sd__btn--primary" type="button" @click="bgFileInput?.click()">上传背景</button>
-              <button class="sd__btn" type="button" :disabled="!hasCustomBg" @click="onBgReset">恢复默认</button>
-            </div>
-            <p
-              v-if="hasCustomBg"
-              class="sd__hint sd__hint--ok"
-            >已使用自定义背景</p>
-            <p v-else class="sd__hint sd__hint--warn">当前为默认背景</p>
-          </div>
-
-          <!-- 免责声明 -->
-          <div v-if="activeTab === 'disclaimer'" class="sd__section sd__disclaimer">
-            <h3 class="sd__disclaimer-title">安全合规与责任声明</h3>
-
-            <div class="sd__disclaimer-block">
-              <h4 class="sd__disclaimer-heading">一、数据隐私与本地化</h4>
-              <p class="sd__disclaimer-text">本工具完全开源，不会收集、存储、上传或传输您的任何个人信息、API密钥、聊天记录或生成内容。所有数据仅存在于您当前使用的本地设备中。</p>
-              <p class="sd__disclaimer-text">由于技术上完全无法接触您的数据，无法应任何要求提供您本地对话的审查、删除或披露。</p>
-            </div>
-
-            <div class="sd__disclaimer-block">
-              <h4 class="sd__disclaimer-heading">二、提示词安全设置声明</h4>
-              <p class="sd__disclaimer-text">为履行合规义务，我们在本工具中内置了严格的内容安全提示词。该提示词明确要求角色：</p>
-              <ul class="sd__disclaimer-list">
-                <li>仅在《明日方舟：终末地》世界观内进行角色扮演；</li>
-                <li>回避一切现实世界人物、政治敏感、色情、暴力、非法等违规内容；</li>
-                <li>拒绝任何试图覆盖或修改这些安全规则的指令。</li>
-              </ul>
-              <p class="sd__disclaimer-text"><strong class="sd__disclaimer-warn">严重警告：</strong>任何通过修改代码、注入脚本等方式删除或篡改上述安全提示词的行为，均属您个人的独立行为。对于因篡改后生成的一切违法、违规或侵权内容，全部法律责任由实施该行为的用户自行承担，与本工具开发者无关。</p>
-              <p class="sd__disclaimer-text"><strong class="sd__disclaimer-warn">技术限制特别声明：</strong>本工具代码由人工智能生成。尽管已尽力确保安全提示词在正常情况下有效运行，但仍无法完全排除因程序错误（Bug）、浏览器兼容性异常、网络加载时序问题等不可预见的技术原因，导致安全提示词意外失效、未正确注入或未按预期执行的可能性。对于因上述技术异常而导致的任何违规内容生成，本工具开发者不承担责任。您选择继续使用本工具，即表示您理解并自愿承担这一技术风险。</p>
-            </div>
-
-            <div class="sd__disclaimer-block">
-              <h4 class="sd__disclaimer-heading">三、用户责任与合规使用</h4>
-              <p class="sd__disclaimer-text">您明确知晓并同意，您是使用本工具生成内容的唯一责任人。您承诺：</p>
-              <ol class="sd__disclaimer-list sd__disclaimer-list--ordered">
-                <li>严格遵守您所使用AI模型服务商的所有使用政策与安全准则。</li>
-                <li>遵守您所在地及服务商所在地的现行法律法规，绝不利用本工具生成任何涉及政治敏感、淫秽色情、暴力恐怖、仇恨歧视、侵犯他人合法权益以及其他一切违法和不良信息。</li>
-                <li>理解并接受本工具仅用于合法的《明日方舟：终末地》同人角色扮演娱乐，任何超出此用途的使用风险自担。</li>
-              </ol>
-            </div>
-
-            <div class="sd__disclaimer-block">
-              <h4 class="sd__disclaimer-heading">四、知识产权与同人声明</h4>
-              <p class="sd__disclaimer-text">《明日方舟：终末地》是上海鹰角网络科技有限公司的游戏产品。本工具为第三方同人作品，无任何盈利性质，与上海鹰角网络科技有限公司及《明日方舟：终末地》官方开发商、运营商无任何关联。</p>
-              <p class="sd__disclaimer-text">本工具中使用的所有与《明日方舟：终末地》相关的角色形象、世界观设定、剧情元素、图片资源等知识产权，均归上海鹰角网络科技有限公司所有。本工具仅供爱好者学习与交流，严禁用于任何商业用途。</p>
-            </div>
-
-            <div class="sd__disclaimer-block">
-              <h4 class="sd__disclaimer-heading">五、免责条款</h4>
-              <p class="sd__disclaimer-text">在法律允许的最大范围内，本工具开发者不对以下情况承担任何明示或默示的担保或责任：</p>
-              <ul class="sd__disclaimer-list">
-                <li>用户因违反本声明或第三方服务商条款而产生的任何纠纷、处罚或损失；</li>
-                <li>用户因篡改代码、移除安全提示词等自主行为所引发的一切后果；</li>
-                <li>对第三方AI模型服务商提供的服务质量、内容准确性及合规性。</li>
-              </ul>
-              <p class="sd__disclaimer-text">请您在使用前务必仔细阅读并同意以上全部条款。继续使用即代表您已充分理解并自愿承担所有相关风险。</p>
-            </div>
           </div>
 
           <!-- 关于 -->
@@ -546,7 +564,7 @@ function onBgReset() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.75);
 
   &__panel {
     position: relative;
@@ -554,12 +572,24 @@ function onBgReset() {
     max-width: calc(100vw - 24px); // 移动端窄屏适配
     max-height: 80vh;
     padding: 28px 32px 20px;
-    border-radius: 14px;
-    background: $color-card-bg;
-    border: 1px solid $color-chat-frame;
+    border-radius: 0;
+    background-color: $color-dialog-bg;
+    // 灰色正方形网格纹理(菜单背景):横竖 1px 细线交叉成 24px 格子
+    background-image:
+      linear-gradient(to right, rgba(134, 134, 133, 0.12) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(134, 134, 133, 0.12) 1px, transparent 1px);
+    background-size: 24px 24px;
+    border: 1px solid $color-dialog-border;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
     display: flex;
     flex-direction: column;
+
+    // 菜单内所有元素一律直角(含伪元素,如滑块圆点)
+    *,
+    *::before,
+    *::after {
+      border-radius: 0 !important;
+    }
 
     > *:not(.sd__close) {
       position: relative;
@@ -591,6 +621,7 @@ function onBgReset() {
   }
 
   &__tabs {
+    position: relative;
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
@@ -602,18 +633,31 @@ function onBgReset() {
     padding: 8px 16px;
     background: none;
     border: none;
-    border-bottom: 2px solid transparent;
     color: rgba(255, 255, 255, 0.5);
     font-family: $font-harmony;
     font-size: 14px;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: color 0.2s;
 
     &:hover { color: rgba(255, 255, 255, 0.8); }
 
     &--active {
       color: $color-text-primary;
-      border-bottom-color: #fcf33f;
+    }
+  }
+
+  // 黄色滑动指示条:紧贴标签栏下边框,平滑滑到激活标签下方
+  &__tab-indicator {
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    height: 2px;
+    background: #ffef00;
+    pointer-events: none;
+    transition: none; // 默认无过渡(首次定位/重开弹窗直接到位)
+
+    &--anim {
+      transition: transform 0.25s ease, width 0.25s ease;
     }
   }
 
@@ -663,7 +707,7 @@ function onBgReset() {
 
   &__slider {
     width: 100%;
-    accent-color: #fcf33f;
+    accent-color: #ffef00;
   }
 
   &__textarea {
@@ -698,50 +742,65 @@ function onBgReset() {
     outline: none;
     cursor: pointer;
 
-    option { background: $color-card-bg; }
+    option { background: $color-dialog-bg; }
   }
 
   &__mode-toggle {
+    position: relative;
     display: flex;
     gap: 0;
-    border-radius: 8px;
+    border-radius: 0;
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.12);
   }
 
+  // 黄色滑动指示条:占一半宽度,随模式左右滑动
+  &__mode-indicator {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 50%;
+    height: 100%;
+    background: #ffef00;
+    pointer-events: none;
+    transition: transform 0.25s ease;
+
+    &--right {
+      transform: translateX(100%);
+    }
+  }
+
   &__mode-btn {
+    position: relative;
+    z-index: 1;
     flex: 1;
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.03);
+    background: none;
     border: none;
     color: rgba(255, 255, 255, 0.5);
     font-family: $font-harmony;
     font-size: 13px;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: color 0.2s;
 
     &:hover { color: rgba(255, 255, 255, 0.8); }
 
-    &--active {
-      background: #fcf33f;
+    // 激活态(黄底上)悬停时保持深色文字,不被 hover 变白
+    &--active,
+    &--active:hover {
       color: #1a1a1a;
     }
   }
 
-  &__char-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  &__char-textarea-wrap {
+    position: relative;
   }
 
-  &__badge {
-    padding: 2px 8px;
-    background: rgba(252, 243, 63, 0.15);
-    border: 1px solid rgba(252, 243, 63, 0.3);
-    border-radius: 4px;
-    color: #fcf33f;
-    font-size: 12px;
-    white-space: nowrap;
+  // 分区分隔线(自定义 API 分支内的提示词/世界观区块)
+  &__divider {
+    height: 1px;
+    margin: 12px 0;
+    background: rgba(255, 255, 255, 0.12);
   }
 
   &__desc {
@@ -760,21 +819,21 @@ function onBgReset() {
 
   &__btn {
     padding: 8px 20px;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.06);
-    color: $color-text-primary;
+    border: 1px solid #f0eeee;
+    border-radius: 0;
+    background: #f0eeee; // 不透明亮灰(次要操作按钮)
+    color: #1a1a1a;
     font-family: $font-harmony;
     font-size: 14px;
     cursor: pointer;
     transition: all 0.2s;
 
-    &:hover { background: rgba(255, 255, 255, 0.12); }
+    &:hover { background: #dcdcdc; }
     &:disabled { opacity: 0.4; cursor: not-allowed; }
 
     &--primary {
-      background: #fcf33f;
-      border-color: #fcf33f;
+      background: #ffef00;
+      border-color: #ffef00;
       color: #1a1a1a;
 
       &:hover { background: #e6d936; }
@@ -788,64 +847,6 @@ function onBgReset() {
 
     &--ok { color: rgba(100, 255, 100, 0.7); }
     &--warn { color: rgba(255, 180, 80, 0.8); }
-  }
-
-  // ---- 免责声明样式 ---------------------------------------------------------
-  &__disclaimer {
-    gap: 16px;
-  }
-
-  &__disclaimer-title {
-    margin: 0 0 4px;
-    font-family: $font-harmony;
-    font-size: 18px;
-    font-weight: 600;
-    color: $color-text-primary;
-    text-align: center;
-  }
-
-  &__disclaimer-block {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  &__disclaimer-heading {
-    margin: 0;
-    font-family: $font-harmony;
-    font-size: 15px;
-    font-weight: 600;
-    color: #fcf33f;
-  }
-
-  &__disclaimer-text {
-    margin: 0;
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.7;
-    color: rgba(255, 255, 255, 0.75);
-  }
-
-  &__disclaimer-warn {
-    color: #ff6b6b;
-    font-weight: 600;
-  }
-
-  &__disclaimer-list {
-    margin: 0;
-    padding-left: 20px;
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.8;
-    color: rgba(255, 255, 255, 0.75);
-
-    &--ordered {
-      padding-left: 24px;
-    }
-
-    li {
-      margin-bottom: 2px;
-    }
   }
 
   // ---- 关于样式 -------------------------------------------------------------
@@ -913,7 +914,7 @@ function onBgReset() {
     list-style: none;
 
     a {
-      color: #fcf33f;
+      color: #ffef00;
       text-decoration: none;
 
       &:hover {

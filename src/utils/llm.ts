@@ -8,7 +8,6 @@
 // =============================================================================
 
 import type { ApiConfig } from '../stores/settings'
-import { SHARED_API_BASE_URL, SHARED_API_MODEL } from '../stores/settings'
 
 /** LLM 消息角色 */
 type LlmRole = 'system' | 'user' | 'assistant'
@@ -53,6 +52,30 @@ interface StreamChatParams {
 }
 
 /**
+ * 是否 OpenAI o 系列 reasoning 模型(o1 / o3 / o4 等)
+ *
+ * 该系列不支持 temperature 参数(只接受 1 或省略),发送其他值会 400。
+ * gpt-5 系列不在其中:它支持 temperature,照常发送。
+ */
+function isOReasoningModel(model: string): boolean {
+  const m = model.trim().toLowerCase()
+  return /^o[1-9](-|$)/.test(m)
+}
+
+/**
+ * 是否应使用 max_completion_tokens 参数(而非 max_tokens)
+ *
+ * OpenAI 的 reasoning 系列模型(gpt-5 / o1 / o3 / o4 等)已不再接受
+ * max_tokens,必须发送 max_completion_tokens;gpt-4 及更早模型仍使用
+ * max_tokens。本判断只按模型名前缀识别,不影响其他 OpenAI 兼容服务商
+ * (如 deepseek、glm 等,模型名不匹配即沿用 max_tokens)。
+ */
+function usesMaxCompletionTokens(model: string): boolean {
+  const m = model.trim().toLowerCase()
+  return /^gpt-5/i.test(m) || isOReasoningModel(m)
+}
+
+/**
  * 流式聊天请求(SSE)
  *
  * 使用 fetch + ReadableStream 读取 SSE 数据,
@@ -63,39 +86,43 @@ interface StreamChatParams {
 export async function streamChat(params: StreamChatParams): Promise<string> {
   const { config, messages, onChunk, onDone, onError, signal } = params
 
-  // ---- 根据模式确定 URL / 请求头 / 模型名 ---------------------------------
-  const isShared = config.apiMode === 'shared'
-
-  if (!isShared && (!config.baseUrl || !config.apiKey || !config.model)) {
+  // ---- 确定 URL / 请求头 / 模型名 -----------------------------------------
+  // 直接请求用户配置的 OpenAI 兼容接口(带 Authorization 头)
+  if (!config.baseUrl || !config.apiKey || !config.model) {
     throw new Error('API 未配置：请先在设置中填写 Base URL、API Key 和模型名')
   }
 
-  // shared 模式:请求 Vercel Serverless 代理(相对路径,无需密钥)
-  // custom 模式:直接请求用户配置的 API(带 Authorization 头)
-  const url = isShared
-    ? SHARED_API_BASE_URL
-    : `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`
+  const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-  }
-  if (!isShared) {
-    headers['Authorization'] = `Bearer ${config.apiKey}`
+    Authorization: `Bearer ${config.apiKey}`,
   }
 
-  const model = isShared ? SHARED_API_MODEL : config.model
+  const model = config.model
+
+  // OpenAI reasoning 模型(gpt-5 / o1 系列)必须用 max_completion_tokens 参数
+  const completionParam = usesMaxCompletionTokens(model)
+    ? 'max_completion_tokens'
+    : 'max_tokens'
+
+  // o 系列 reasoning 模型(o1/o3/o4)不支持 temperature,直接省略该参数;
+  // gpt-5 系列与 gpt-4 等老模型支持 temperature,照常发送
+  const requestBody: Record<string, unknown> = {
+    model,
+    messages,
+    [completionParam]: config.maxTokens,
+    stream: true,
+  }
+  if (!isOReasoningModel(model)) {
+    requestBody.temperature = config.temperature
+  }
 
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: config.temperature,
-        max_tokens: config.maxTokens,
-        stream: true,
-      }),
+      body: JSON.stringify(requestBody),
       signal,
     })
 
@@ -238,30 +265,40 @@ export function buildMessages(
  * 发送一条最小请求,仅检查 HTTP 状态码判断连接是否成功。
  * 使用 AbortController 在收到响应头后立即中止,不消耗额外 token。
  *
- * @param config API 配置(shared 或 custom 模式)
+ * @param config API 配置(custom 模式)
  * @returns { ok, message } 测试结果
  */
 export async function testApiConnection(
   config: ApiConfig,
 ): Promise<{ ok: boolean; message: string }> {
-  const isShared = config.apiMode === 'shared'
-
-  if (!isShared && (!config.baseUrl || !config.apiKey || !config.model)) {
+  if (!config.baseUrl || !config.apiKey || !config.model) {
     return { ok: false, message: '请先填写 Base URL、API Key 和模型名' }
   }
 
-  const url = isShared
-    ? SHARED_API_BASE_URL
-    : `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`
+  const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-  }
-  if (!isShared) {
-    headers['Authorization'] = `Bearer ${config.apiKey}`
+    Authorization: `Bearer ${config.apiKey}`,
   }
 
-  const model = isShared ? SHARED_API_MODEL : config.model
+  const model = config.model
+
+  // OpenAI reasoning 模型(gpt-5 / o1 系列)必须用 max_completion_tokens 参数
+  const completionParam = usesMaxCompletionTokens(model)
+    ? 'max_completion_tokens'
+    : 'max_tokens'
+
+  // o 系列 reasoning 模型不支持 temperature,省略该参数
+  const requestBody: Record<string, unknown> = {
+    model,
+    messages: [{ role: 'user', content: 'Hi' }],
+    [completionParam]: 5,
+    stream: true,
+  }
+  if (!isOReasoningModel(model)) {
+    requestBody.temperature = 0.8
+  }
 
   const controller = new AbortController()
 
@@ -269,13 +306,7 @@ export async function testApiConnection(
     const response = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: 'Hi' }],
-        max_tokens: 5,
-        temperature: 0.8,
-        stream: true,
-      }),
+      body: JSON.stringify(requestBody),
       signal: controller.signal,
     })
 

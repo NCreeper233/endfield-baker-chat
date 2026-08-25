@@ -79,7 +79,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.55);
+    background: rgba(0, 0, 0, 0.75);
 
     // 面板:圆角深色卡片,内容区统一内边距
     &__panel {
@@ -87,10 +87,22 @@
       width: #{$panel-w};
       max-width: calc(100vw - 24px); // 移动端窄屏:面板不超视口宽
       padding: 28px 32px 20px;
-      border-radius: 14px;
-      background: $color-card-bg;
-      border: 1px solid $color-chat-frame;
+      border-radius: 0;
+      background-color: $color-dialog-bg;
+      // 灰色正方形网格纹理(菜单背景):横竖 1px 细线交叉成 24px 格子
+      background-image:
+        linear-gradient(to right, rgba(134, 134, 133, 0.12) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(134, 134, 133, 0.12) 1px, transparent 1px);
+      background-size: 24px 24px;
+      border: 1px solid $color-dialog-border;
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+
+      // 菜单内所有元素一律直角(含伪元素,如滑块圆点)
+      *,
+      *::before,
+      *::after {
+        border-radius: 0 !important;
+      }
 
       // 除右上角关闭按钮外的所有内容压在装饰之上,
       // 保证按钮不透明且不被装饰遮挡

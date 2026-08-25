@@ -18,7 +18,6 @@ const props = defineProps<{
   /** 当前对话标题(下载文件名用) */
   conversationTitle: string
   /** 自定义背景图(data URL,与应用背景一致) */
-  customBgUrl?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -116,7 +115,6 @@ watch(
       v-if="open && hasSub"
       ref="stageRef"
       :scale="1"
-      :custom-bg-url="customBgUrl"
     />
   </Teleport>
 </template>

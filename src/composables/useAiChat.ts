@@ -15,7 +15,9 @@
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import { streamChat, buildMessages } from '../utils/llm'
-import { buildBackendRequest, fetchBackendReply } from '../utils/backend'
+import { buildBackendRequest, fetchBackendReply, BACKEND_HISTORY_LIMIT } from '../utils/backend'
+import { EMPHASIS_RULE } from '../constants/prompts'
+import { requestSummary } from '../utils/summary'
 
 /** 聊天历史条目(与 chat store 的 contextHistory 形状一致) */
 type ChatHistoryEntry = { side: 'other' | 'mine'; text: string; image?: string }
@@ -29,6 +31,50 @@ interface BackendInput {
 /** 延迟工具(ms):分段显示模拟"对方正在输入"的节奏 */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 智能总结处理:当历史超过 50 条时,将超出部分总结并插入 history 最前面
+ *
+ * 返回处理后待发送的 history(包含摘要 + 最近 50 条原始消息)。
+ * 失败时降级:返回最近 50 条原始消息(不插入摘要),并在控制台记录错误。
+ * 纯 emoji / 纯图片消息不触发本逻辑(由调用方在发送前判断跳过)。
+ */
+async function applySmartSummary(
+  history: ChatHistoryEntry[],
+  settingsStore: ReturnType<typeof useSettingsStore>,
+): Promise<ChatHistoryEntry[]> {
+  const cfg = settingsStore.summaryConfig
+  if (!cfg.enabled) return history.slice(-BACKEND_HISTORY_LIMIT)
+
+  // 总条数 > 50 才需要总结
+  if (history.length <= BACKEND_HISTORY_LIMIT) {
+    return history
+  }
+
+  const excessCount = history.length - BACKEND_HISTORY_LIMIT
+  const excess = history.slice(0, excessCount) // 前 N 条(超出部分)
+  const recent = history.slice(excessCount) // 最近 50 条
+
+  try {
+    const api = settingsStore.getSummaryApi()
+    const summary = await requestSummary(
+      api.baseUrl,
+      api.apiKey,
+      api.model,
+      excess,
+    )
+    // 摘要以 user 角色插入最前(避免后端无法处理多条 system)
+    const summaryEntry: ChatHistoryEntry = {
+      side: 'mine',
+      text: `【对话总结】\n${summary}`,
+    }
+    return [summaryEntry, ...recent]
+  } catch (err) {
+    // 总结失败:降级为最近 50 条原始消息,不阻断聊天
+    console.warn('[summary] 智能总结失败,降级为最近 50 条:', err)
+    return recent
+  }
 }
 
 export function useAiChat() {
@@ -62,27 +108,69 @@ export function useAiChat() {
 
     // ---- 请求并缓冲完整回复(loading 动画持续,不实时显示文字) -------------
     let fullText = ''
+    // 后端模式可选返回的心情表情 token(如 sns_emoji_001),缺失为 undefined
+    let pendingMood: string | undefined
 
     try {
       if (backendInput) {
-        // 后端模式:前端只负责传递,不拼接任何提示词
+        // 后端模式:v5 拆分 global_prompt / character_prompt 两条 system 消息
         const request = buildBackendRequest(
           backendInput.message,
           characterName,
           backendInput.history,
+          {
+            // v5: global_prompt = 全局世界观/规则(FIXED_SYSTEM_PROMPT + 用户世界观)
+            globalPrompt: (() => {
+              const fixed = settingsStore.getFullSystemPrompt()
+              const world = settingsStore.worldView.trim()
+              return world ? `${fixed}\n\n【世界观背景】\n${world}` : fixed
+            })(),
+            // v5: character_prompt = 角色专属提示词 + 回复风格规则
+            characterPrompt: (() => {
+              const role = settingsStore.getCharacterPrompt(characterName)
+              return role ? `${role}\n\n${EMPHASIS_RULE}` : EMPHASIS_RULE
+            })(),
+            // 兼容字段:合并后的完整 system 提示词(后端优先使用拆分字段)
+            systemPrompt: (() => {
+              const fixed = settingsStore.getFullSystemPrompt()
+              const role = settingsStore.getCharacterPrompt(characterName)
+              const roleWithRule = role
+                ? `${role}\n\n${EMPHASIS_RULE}`
+                : EMPHASIS_RULE
+              return fixed ? `${fixed}\n\n【角色设定】\n${roleWithRule}` : roleWithRule
+            })(),
+            think: settingsStore.thinkEnabled,
+            // v4: 实验性功能-强制每条搜索
+            forceSearch: settingsStore.forceSearch,
+            // v7: 实验性功能-沉浸式对话模式(false 时后端在角色提示词后追加禁止括号描写规则)
+            immersiveMode: settingsStore.immersiveMode,
+          },
         )
-        fullText = await fetchBackendReply(
+        const backendResult = await fetchBackendReply(
           settingsStore.apiConfig,
           request,
           chatStore.getAiSignal(),
         )
+        fullText = backendResult.reply
+        // 可选 mood 字段(token 形式,如 sns_emoji_001);缺失时为 undefined
+        pendingMood = backendResult.mood
       } else {
-        // 原有模式:系统提示词 + 角色提示词 + 历史消息,SSE 流式调用
+        // 原有模式:系统提示词 + 全局世界观 + 角色提示词 + 历史消息,SSE 流式调用
         const systemPrompt = settingsStore.getFullSystemPrompt()
         const characterPrompt = settingsStore.getCharacterPrompt(characterName)
+        // 角色提示词末尾追加强制回复风格规则(描述:台词 ≈ 2:1)
+        const characterPromptWithRule = characterPrompt
+          ? `${characterPrompt}\n\n${EMPHASIS_RULE}`
+          : EMPHASIS_RULE
         const history = chatStore.getChatHistory()
 
-        const messages = buildMessages(systemPrompt, characterPrompt, history)
+        // v2:注入全局世界观背景（自定义 API 模式专用）
+        const worldView = settingsStore.worldView.trim()
+        const systemWithWorld = worldView
+          ? `${systemPrompt}\n\n【世界观背景】\n${worldView}`
+          : systemPrompt
+
+        const messages = buildMessages(systemWithWorld, characterPromptWithRule, history)
 
         await streamChat({
           config: settingsStore.apiConfig,
@@ -123,10 +211,35 @@ export function useAiChat() {
       .replace(/\\r/g, '')      // 清除残留字面量 \r
       .replace(/\\"/g, '"')     // 字面量 \" → "
 
-    const segments = normalizedText
+    const rawSegments = normalizedText
       .split('\n')
       .map((s) => s.trim())
       .filter((s) => s.length > 0)
+
+    // ---- 合并"纯括号段" ---------------------------------------------------
+    // 模型偶发格式不稳定:把括号描写单独另起一行(如 "(动作)\n\n台词")。
+    // 若照原样分段,会出现只有括号描写的独立消息,写入 contextHistory 后,
+    // 下一轮模型会模仿历史中"只有括号的 assistant 回复",导致整段回复
+    // 退化成只有括号描写没有台词。这里将纯括号段并入相邻段(优先并入下一段),
+    // 保证显示与历史中都不会出现"只有括号"的独立消息。
+    // 纯括号段:整段去掉首尾括号后无其他字符,如 "(微微颔首)"。
+    const segments: string[] = []
+    const pendingBrackets: string[] = []
+    for (const seg of rawSegments) {
+      if (/^\([^)]*\)$/.test(seg)) {
+        pendingBrackets.push(seg)
+        continue
+      }
+      // 正常段:把之前暂存的纯括号段拼到其开头(并入下一段)
+      const prefix = pendingBrackets.splice(0, pendingBrackets.length).join('')
+      segments.push(prefix + seg)
+    }
+    // 末尾仍有纯括号段(整段回复全是括号):并入上一段末尾,无上一段则保留
+    if (pendingBrackets.length > 0) {
+      const tail = pendingBrackets.join('')
+      if (segments.length > 0) segments[segments.length - 1] += `\n${tail}`
+      else segments.push(tail)
+    }
 
     if (segments.length === 0) {
       // 无内容:结束响应(空的 loading 气泡会被 abortAiResponse 逻辑清理)
@@ -135,6 +248,8 @@ export function useAiChat() {
     }
 
     // ---- 第一段:填入当前 loading 气泡 -----------------------------------
+    // 后端模式的心情表情(token)随首段消息一并写入(缺失时 appendAiChunk 拿到 undefined)
+    chatStore.setPendingAiMood(pendingMood)
     chatStore.appendAiChunk(segments[0])
 
     if (segments.length === 1) {
@@ -184,7 +299,7 @@ export function useAiChat() {
    *
    * 完整流程:
    *   1. 检查 API 配置(未配置时抛出错误,由调用方引导用户配置)
-   *   2. 后端模式:先截取历史(不含当前输入),再添加用户消息到对话
+   *   2. 后端模式:先截取历史(不含当前输入),应用智能总结(超 50 条时),再添加用户消息
    *   3. 触发 AI 响应(后端模式拿到 reply 后 / 原有模式流式分段顺序显示)
    *
    * @param text 用户输入文本
@@ -200,9 +315,13 @@ export function useAiChat() {
 
     // 后端模式:先截取历史(此时尚未写入当前输入,天然不含它)
     const isBackend = settingsStore.apiConfig.apiMode === 'backend'
-    const backendInput: BackendInput | undefined = isBackend
-      ? { message: text, history: chatStore.getChatHistory() }
-      : undefined
+    let backendInput: BackendInput | undefined
+    if (isBackend) {
+      const rawHistory = chatStore.getChatHistory()
+      // 智能总结:超 50 条时总结前 N 条并插入摘要(失败降级为最近 50 条)
+      const history = await applySmartSummary(rawHistory, settingsStore)
+      backendInput = { message: text, history }
+    }
 
     // 1. 添加用户消息(含上下文历史同步)
     chatStore.sendUserMessage(text)
@@ -228,15 +347,17 @@ export function useAiChat() {
       throw new Error('API 未配置：请先在设置中填写 Base URL、API Key 和模型名')
     }
 
-    // 后端模式:图片已由 sendImage 写入 contextHistory(最后一条),
-    // 用 slice 弹出它(不修改 store 数据),历史中不含当前输入
+    // 后端模式:图片已由 sendImage 写入 contextHistory(最后一条,含 image dataURL)。
+    // v3: 保留该条目在 history 中,让后端能拿到图片数据做 vision 识别(不再 slice 弹出)。
     const isBackend = settingsStore.apiConfig.apiMode === 'backend'
     let backendInput: BackendInput | undefined
     if (isBackend) {
       const history = chatStore.getChatHistory()
+      // 图片消息也应用 50 条截断(智能总结跳过,保持纯图片流程不变)
+      const trimmed = history.slice(-BACKEND_HISTORY_LIMIT)
       backendInput = {
         message: '[图片]',
-        history: history.slice(0, -1),
+        history: trimmed,
       }
     }
 

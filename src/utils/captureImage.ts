@@ -82,6 +82,8 @@ export async function captureRegion(
   try {
     svgDataUrl = await toSvg(el, {
       cacheBust: true,
+      // 跳过 @font-face 字体内嵌(4.3MB woff2 → base64 序列化极慢/卡顿)
+      skipFonts: true,
       style: {
         position: 'absolute',
         left: '0',
