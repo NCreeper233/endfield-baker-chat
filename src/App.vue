@@ -66,6 +66,10 @@ function hashNoticeText(text: string): string {
  * 最后按当前"不再提醒"状态决定本次是否弹出。
  */
 async function loadNotice() {
+  if (!NOTICE_CONTENT_URL) {
+    noticeOpen.value = !settingsStore.noticeDismissed
+    return
+  }
   try {
     const res = await fetch(NOTICE_CONTENT_URL, { cache: 'no-store' })
     if (res.ok) {

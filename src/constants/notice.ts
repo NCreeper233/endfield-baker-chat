@@ -8,16 +8,22 @@
 // =============================================================================
 
 /** 弹窗标题 */
-export const NOTICE_TITLE = '欢迎来到佩丽卡AI'
+// export const NOTICE_TITLE = '欢迎来到佩丽卡AI'
+export const NOTICE_TITLE = '服务公告'
 
 /** 弹窗正文(自由编辑) */
-export const NOTICE_CONTENT = `感谢你使用佩丽卡AI —— 基于《明日方舟：终末地》世界观的 AI 角色聊天应用。
+// export const NOTICE_CONTENT = `感谢你使用佩丽卡AI —— 基于《明日方舟：终末地》世界观的 AI 角色聊天应用。
+//
+// · 与 29 位干员自由对话，体验真实角色性格与世界观
+// · 支持思考模式、强制搜索、智能总结等实验性功能
+// · 对话历史本地存储，支持导出/导入完整数据（含 API 配置与自定义提示词）
+//
+// 祝你与干员们的相处愉快。`
+export const NOTICE_CONTENT = `由于近期更换服务器，这两天暂时不提供服务（网站现在无法使用），现已临时上线单独的旧版本网站供临时使用，地址详细信息请加群获取！
 
-· 与 29 位干员自由对话，体验真实角色性格与世界观
-· 支持思考模式、强制搜索、智能总结等实验性功能
-· 对话历史本地存储，支持导出/导入完整数据（含 API 配置与自定义提示词）
+网站数据的导入/导出不受影响，可自行保存迁移数据
 
-祝你与干员们的相处愉快。`
+QQ群：1105542731`
 
 /** 确认按钮文案(灰色;点击仅关闭本次,下次仍弹) */
 export const NOTICE_CONFIRM_TEXT = '知道了'
@@ -35,7 +41,8 @@ export const NOTICE_DISMISS_TEXT = '不再提醒'
  * 内容变化 → 重置"不再提醒"并弹出新公告;内容未变 → 按"不再提醒"状态决定。
  * fetch 失败(离线等) → 回退上方内置常量。
  */
-export const NOTICE_CONTENT_URL = 'https://notice.peilika.beer/notice.json'
+// export const NOTICE_CONTENT_URL = 'https://notice.peilika.beer/notice.json'
+export const NOTICE_CONTENT_URL = ''
 
 /** 记录"已展示正文"哈希的 localStorage key(TXT 内容变化时用于重置不再提醒) */
 export const NOTICE_CONTENT_HASH_KEY = 'endfield-baker-settings-notice-content-hash'
