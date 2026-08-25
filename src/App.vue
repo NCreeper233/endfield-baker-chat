@@ -28,6 +28,8 @@ import { MATERIALS } from './constants/materials'
 import { useDebugMode } from './composables/useDebugMode'
 import { useSettingsStore } from './stores/settings'
 import {
+  NOTICE_TITLE,
+  NOTICE_CONTENT,
   NOTICE_CONTENT_URL,
   NOTICE_CONTENT_HASH_KEY,
 } from './constants/notice'
@@ -67,6 +69,16 @@ function hashNoticeText(text: string): string {
  */
 async function loadNotice() {
   if (!NOTICE_CONTENT_URL) {
+    // 无远程源:用内置常量拼接的完整文本做 hash,内容变化时重置"不再提醒"
+    const localText = `${NOTICE_TITLE}\n${NOTICE_CONTENT}`
+    const hash = hashNoticeText(localText)
+    const lastHash = localStorage.getItem(NOTICE_CONTENT_HASH_KEY)
+    if (lastHash !== hash) {
+      settingsStore.noticeDismissed = false
+      try {
+        localStorage.setItem(NOTICE_CONTENT_HASH_KEY, hash)
+      } catch {}
+    }
     noticeOpen.value = !settingsStore.noticeDismissed
     return
   }
