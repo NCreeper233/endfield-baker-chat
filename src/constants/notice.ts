@@ -19,9 +19,9 @@ export const NOTICE_TITLE = '服务公告'
 // · 对话历史本地存储，支持导出/导入完整数据（含 API 配置与自定义提示词）
 //
 // 祝你与干员们的相处愉快。`
-export const NOTICE_CONTENT = `由于近期更换服务器，这两天暂时不提供服务（网站现在无法使用），现已临时上线单独的旧版本网站供临时使用，地址详细信息请加群获取！
+export const NOTICE_CONTENT = `由于近期更换服务器，这两天暂时不提供服务（网站现在无法使用），现已临时上线单独的旧版本网站供临时使用，新的临时地址及其他详细信息请加群获取！
 
-网站数据的导入/导出不受影响，可自行保存迁移数据
+现网站数据的导入/导出不受影响，可自行保存迁移数据！
 
 QQ群：1105542731`
 
@@ -46,3 +46,13 @@ export const NOTICE_CONTENT_URL = ''
 
 /** 记录"已展示正文"哈希的 localStorage key(TXT 内容变化时用于重置不再提醒) */
 export const NOTICE_CONTENT_HASH_KEY = 'endfield-baker-settings-notice-content-hash'
+
+/**
+ * 公告版本号(每次更新公告内容时递增)。
+ * 版本变化时强制重置所有用户的"不再提醒"状态,确保新公告必弹。
+ * 恢复旧公告时也应递增版本号(而非回退),避免 localStorage 中已记录的旧版本号导致跳过。
+ */
+export const NOTICE_VERSION = 1
+
+/** 记录已弹出的公告版本的 localStorage key */
+export const NOTICE_VERSION_KEY = 'endfield-baker-notice-version'

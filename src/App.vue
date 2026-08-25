@@ -32,6 +32,8 @@ import {
   NOTICE_CONTENT,
   NOTICE_CONTENT_URL,
   NOTICE_CONTENT_HASH_KEY,
+  NOTICE_VERSION,
+  NOTICE_VERSION_KEY,
 } from './constants/notice'
 
 const chatStore = useChatStore()
@@ -68,6 +70,15 @@ function hashNoticeText(text: string): string {
  * 最后按当前"不再提醒"状态决定本次是否弹出。
  */
 async function loadNotice() {
+  // ---- 硬重置:版本变化时强制重置所有用户的"不再提醒" -------------------------
+  try {
+    const lastVersion = Number(localStorage.getItem(NOTICE_VERSION_KEY) || '0')
+    if (lastVersion !== NOTICE_VERSION) {
+      settingsStore.noticeDismissed = false
+      localStorage.setItem(NOTICE_VERSION_KEY, String(NOTICE_VERSION))
+    }
+  } catch {}
+
   if (!NOTICE_CONTENT_URL) {
     // 无远程源:用内置常量拼接的完整文本做 hash,内容变化时重置"不再提醒"
     const localText = `${NOTICE_TITLE}\n${NOTICE_CONTENT}`

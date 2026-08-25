@@ -9,7 +9,7 @@
 // 样式: 迁移自网站迁移公告弹窗(MigrationNoticeDialog)的 dialog-shell 外壳
 //       (用户选定样式:深色直角面板 + 网格纹理 + 居中按钮)。
 // =============================================================================
-import { computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import {
   NOTICE_TITLE,
   NOTICE_CONTENT,
@@ -39,13 +39,53 @@ const displayContent = computed(() => props.content?.trim() || NOTICE_CONTENT)
 
 /** 确认:仅关闭本次弹窗(由父级复位 open) */
 function onConfirm() {
+  if (confirmCooldown.value > 0) return
   emit('confirm')
 }
 
 /** 不再提醒:永久关闭(由父级写入持久化标记) */
 function onDismiss() {
+  if (dismissCooldown.value > 0) return
   emit('dismiss')
 }
+
+// ---- 冷却逻辑 ---------------------------------------------------------------
+const CONFIRM_COOLDOWN = 5
+const DISMISS_COOLDOWN = 10
+
+/** 确定按钮剩余冷却秒数 */
+const confirmCooldown = ref(0)
+/** 不再提醒按钮剩余冷却秒数 */
+const dismissCooldown = ref(0)
+
+let cooldownTimer: ReturnType<typeof setInterval> | null = null
+
+function startCooldown() {
+  clearCooldown()
+  confirmCooldown.value = CONFIRM_COOLDOWN
+  dismissCooldown.value = DISMISS_COOLDOWN
+  cooldownTimer = setInterval(() => {
+    if (confirmCooldown.value > 0) confirmCooldown.value--
+    if (dismissCooldown.value > 0) dismissCooldown.value--
+    if (confirmCooldown.value <= 0 && dismissCooldown.value <= 0) {
+      clearCooldown()
+    }
+  }, 1000)
+}
+
+function clearCooldown() {
+  if (cooldownTimer !== null) {
+    clearInterval(cooldownTimer)
+    cooldownTimer = null
+  }
+}
+
+watch(() => props.open, (val) => {
+  if (val) startCooldown()
+  else clearCooldown()
+}, { immediate: true })
+
+onBeforeUnmount(() => clearCooldown())
 </script>
 
 <template>
@@ -57,11 +97,21 @@ function onDismiss() {
         <p class="mn__text">{{ displayContent }}</p>
 
         <div class="mn__actions">
-          <button class="mn__btn mn__btn--primary" type="button" @click="onConfirm">
-            {{ NOTICE_CONFIRM_TEXT }}
+          <button
+            class="mn__btn mn__btn--primary"
+            type="button"
+            :disabled="confirmCooldown > 0"
+            @click="onConfirm"
+          >
+            {{ confirmCooldown > 0 ? `（${confirmCooldown}秒后可点击）` : NOTICE_CONFIRM_TEXT }}
           </button>
-          <button class="mn__btn" type="button" @click="onDismiss">
-            {{ NOTICE_DISMISS_TEXT }}
+          <button
+            class="mn__btn"
+            type="button"
+            :disabled="dismissCooldown > 0"
+            @click="onDismiss"
+          >
+            {{ dismissCooldown > 0 ? `（${dismissCooldown}秒后可点击）` : NOTICE_DISMISS_TEXT }}
           </button>
         </div>
       </div>
@@ -87,6 +137,17 @@ function onDismiss() {
   // 按钮水平居中(与迁移公告弹窗一致)
   &__actions {
     justify-content: center;
+  }
+
+  // 冷却中按钮样式
+  &__btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    filter: none;
+
+    &:hover {
+      filter: none;
+    }
   }
 }
 </style>
