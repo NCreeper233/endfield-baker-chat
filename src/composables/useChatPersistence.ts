@@ -3,6 +3,8 @@
 // -----------------------------------------------------------------------------
 //   - 介质:IndexedDB(库 endfield-baker,单 objectStore "data")
 //   - 自动保存:deep watch(cards)→ 300ms 防抖 → 深拷贝写库;运行时态不持久化
+//   - 列表排序记录(cardActivity)另存一个 key:卡片标识 → 最后活跃时刻,
+//     与 cards 同一批读写,但互不依赖(它坏了只是退回内置顺序)
 //   - 启动恢复:loadProject() 读取并校验,失败/超时静默回退初始数据
 //   - 导出/导入:ZIP 压缩包(文本 JSON + 独立图片),见 utils/zipExport.ts
 //   - 结构版本:PROJECT_VERSION = 1
@@ -10,6 +12,7 @@
 import { watch } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
+import { useUsageStore } from '../stores/usage'
 import {
   isCards,
   sanitizeCards,
@@ -17,6 +20,7 @@ import {
 } from '../utils/zipExport'
 import { getNativeFileBridge, createNativeStore } from '../utils/nativeStorage'
 import type { Card } from '../types/chat'
+import { devWarn } from '../utils/logger'
 
 const DB_NAME = 'endfield-baker'
 const STORE_NAME = 'data'
@@ -25,6 +29,15 @@ const KEY_SETTINGS = 'settings'
 const KEY_MY_GENDER = 'myGender'
 const KEY_STRIP_VARIANT = 'stripVariant'
 const KEY_VERSION = 'version'
+/** 用量统计快照(与卡片数据独立,互不依赖:任一方损坏都不影响另一方) */
+const KEY_USAGE = 'usage'
+/**
+ * 列表排序记录(主卡标识 → 最后一次来消息的时刻)
+ *
+ * 独立 key:它只是"列表怎么排"这一条展示偏好,坏了/丢了最多退回内置顺序,
+ * 绝不该影响卡片数据本身。键是卡片身份(干员名 / 群成员集合),不是下标。
+ */
+const KEY_CARD_ACTIVITY = 'cardActivity'
 
 /** 写库防抖窗口(ms) */
 const SAVE_DEBOUNCE_MS = 300
@@ -177,6 +190,9 @@ export function useChatPersistence(
   store: ReturnType<typeof useChatStore>,
   settingsStore: ReturnType<typeof useSettingsStore>,
 ) {
+  /** 载入时实际恢复出来的卡片数(用于"空覆盖"护栏) */
+  let loadedCardCount = 0
+
   /**
    * 防抖写库器:schedule(延迟写) + flush(立即写)
    * 写入统一 doWrite:深拷贝后落库,并同步库内结构版本。
@@ -186,10 +202,16 @@ export function useChatPersistence(
 
     const doWrite = async () => {
       try {
-        await putRecordUnified(key, JSON.parse(JSON.stringify(get())))
+        const snapshot = get()
+        // 数据层护栏:get() 返回 {__skipWrite:true} 时本次不写(见 scheduleCards)
+        if (snapshot && typeof snapshot === 'object' &&
+            (snapshot as { __skipWrite?: boolean }).__skipWrite) {
+          return
+        }
+        await putRecordUnified(key, JSON.parse(JSON.stringify(snapshot)))
         if (KEY_VERSION !== key) await putRecordUnified(KEY_VERSION, PROJECT_VERSION)
       } catch (err) {
-        console.warn(`[persist] 写入 ${key} 失败`, err)
+        devWarn(`[persist] 写入 ${key} 失败`, err)
       }
     }
 
@@ -215,37 +237,70 @@ export function useChatPersistence(
     return { schedule, flush }
   }
 
-  const scheduleCards = debounceWrite(KEY_CARDS, () => store.cards)
-  const scheduleMyGender = debounceWrite(KEY_MY_GENDER, () => store.myGender)
-  const scheduleStripVariant = debounceWrite(KEY_STRIP_VARIANT, () => store.stripVariantIndex)
   // v6: 设置快照(apiConfig/promptOverrides/think/forceSearch/summary/noticeDismissed)
   const scheduleSettings = debounceWrite(KEY_SETTINGS, () => settingsStore.getSettingsSnapshot())
+  // 卡片写库:错误消息(请求失败占位气泡)只显示、绝不持久化——写库前剥离 isError 消息
+  const scheduleCards = debounceWrite(KEY_CARDS, () => {
+    const cards = store.cards
+    // 【2026-10-04 护栏】载入时本来有卡、现在却空了 → 一定是加载没完成/异常,
+    // 绝不能把空列表写回去(那等于删档)。宁可这次不保存,等下次真实变化再写。
+    if (cards.length === 0 && loadedCardCount > 0) {
+      devWarn(`[persist] 跳过写库:内存里 0 张卡,但载入时有 ${loadedCardCount} 张` +
+              '(疑似启动未完成,拒绝空覆盖)')
+      return { __skipWrite: true }
+    }
+    return cards.map((c) => ({
+      ...c,
+      conversations: c.conversations.map((conv) => ({
+        ...conv,
+        messages: conv.messages.filter((m) => !m.isError),
+      })),
+    }))
+  })
   const { schedule: cardSchedule, flush: cardFlush } = scheduleCards
+  const scheduleMyGender = debounceWrite(KEY_MY_GENDER, () => store.myGender)
+  const scheduleStripVariant = debounceWrite(KEY_STRIP_VARIANT, () => store.stripVariantIndex)
   const { schedule: myGenderSchedule, flush: myGenderFlush } = scheduleMyGender
   const { schedule: stripVariantSchedule, flush: stripVariantFlush } = scheduleStripVariant
   const { schedule: settingsSchedule, flush: settingsFlush } = scheduleSettings
+
+  // v7: 用量统计(最近一次 / 累计 / 校准比值 / 前缀指纹),独立 key
+  const usageStore = useUsageStore()
+  const scheduleUsage = debounceWrite(KEY_USAGE, () => usageStore.getSnapshot())
+  const { schedule: usageSchedule, flush: usageFlush } = scheduleUsage
+
+  // 列表排序记录:每次盖章都会换一个新对象 → 依赖变化即落盘(300ms 防抖吸收连发)
+  const scheduleCardActivity = debounceWrite(KEY_CARD_ACTIVITY, () => store.cardActiveAt)
+  const { schedule: cardActivitySchedule, flush: cardActivityFlush } = scheduleCardActivity
 
   installUnloadFlush()
 
   const unwatchCards = watch(() => store.cards, cardSchedule, { deep: true })
   const unwatchMyGender = watch(() => store.myGender, myGenderSchedule)
   const unwatchStripVariant = watch(() => store.stripVariantIndex, stripVariantSchedule)
+  const unwatchCardActivity = watch(() => store.cardActiveAt, cardActivitySchedule)
   // 深度监听 settings store 全部相关状态,变化即落盘
   const unwatchSettings = watch(
     () => settingsStore.getSettingsSnapshot(),
     settingsSchedule,
     { deep: true },
   )
+  // 用量统计每次 record/getSnapshot 都会产出新对象 → 依赖变化即触发落盘
+  const unwatchUsage = watch(() => usageStore.getSnapshot(), usageSchedule, { deep: true })
 
   function disposeWatchers() {
     unwatchCards()
     unwatchMyGender()
     unwatchStripVariant()
+    unwatchCardActivity()
     unwatchSettings()
+    unwatchUsage()
     flushReady.delete(cardFlush)
     flushReady.delete(myGenderFlush)
     flushReady.delete(stripVariantFlush)
+    flushReady.delete(cardActivityFlush)
     flushReady.delete(settingsFlush)
+    flushReady.delete(usageFlush)
   }
 
   /**
@@ -254,26 +309,35 @@ export function useChatPersistence(
    */
   async function loadProject(): Promise<void> {
     try {
-      const [cardsRaw, versionRaw, myGenderRaw, stripVariantRaw, settingsRaw] = await Promise.all([
-        getRecordUnified(KEY_CARDS),
-        getRecordUnified(KEY_VERSION),
-        getRecordUnified(KEY_MY_GENDER),
-        getRecordUnified(KEY_STRIP_VARIANT),
-        getRecordUnified(KEY_SETTINGS),
-      ])
+      const [cardsRaw, versionRaw, myGenderRaw, stripVariantRaw, settingsRaw, usageRaw, cardActivityRaw] =
+        await Promise.all([
+          getRecordUnified(KEY_CARDS),
+          getRecordUnified(KEY_VERSION),
+          getRecordUnified(KEY_MY_GENDER),
+          getRecordUnified(KEY_STRIP_VARIANT),
+          getRecordUnified(KEY_SETTINGS),
+          getRecordUnified(KEY_USAGE),
+          getRecordUnified(KEY_CARD_ACTIVITY),
+        ])
       // v6: 恢复设置快照(api配置/提示词覆盖/开关等),缺失时跳过
       if (settingsRaw && typeof settingsRaw === 'object') {
         settingsStore.applySettingsSnapshot(settingsRaw as Record<string, unknown>)
       }
       const fromVersion = typeof versionRaw === 'number' ? versionRaw : 0
       if (fromVersion !== PROJECT_VERSION) {
+        // 【2026-10-04 修复:以前这里直接 return,等于把用户数据判死刑】
+        // 触发条件很常见:上一次保存"卡片写成功、版本键还没写"时 App 被系统杀掉,
+        // 重启后版本键缺失 → 旧代码不恢复卡片 → 空列表被自动保存覆盖 → 聊天记录全丢。
+        // 现在:版本不匹配**照样把能读出来的数据恢复出来**,只是版本更高(降级运行)时
+        // 禁止写回,避免旧版本覆盖新版本数据。
         if (fromVersion > PROJECT_VERSION) {
-          console.warn(`[persist] 库内结构版本 ${fromVersion} 高于本应用 ${PROJECT_VERSION},使用初始数据`)
+          devWarn(`[persist] 库内结构版本 ${fromVersion} 高于本应用 ${PROJECT_VERSION}:` +
+                  '已按只读方式载入数据(不写回)')
           blockWrites = true
         } else {
-          console.warn(`[persist] 库内结构版本 ${fromVersion} 低于本应用 ${PROJECT_VERSION},使用初始数据`)
+          devWarn(`[persist] 库内结构版本 ${fromVersion} 与本应用 ${PROJECT_VERSION} 不一致:` +
+                  '已恢复数据并将在下次保存时补齐版本键(不再丢弃)')
         }
-        return
       }
       if (myGenderRaw === 'female' || myGenderRaw === 'male') {
         store.setMyGender(myGenderRaw)
@@ -282,10 +346,17 @@ export function useChatPersistence(
         store.setStripVariant(stripVariantRaw)
       }
       if (isCards(cardsRaw)) {
-        store.replaceAllCards(sanitizeCards(cardsRaw as Card[]))
+        const restored = sanitizeCards(cardsRaw as Card[])
+        store.replaceAllCards(restored)
+        loadedCardCount = restored.length
       }
+      // 列表排序记录必须**在卡片树装好之后**恢复:replaceAllCards 会清空它
+      // (换数据集时旧的活跃记录没有意义),这里再把落盘的那份盖回去。
+      store.applyCardActivity(cardActivityRaw)
+      // 用量统计与卡片数据互不依赖:卡片结构版本不匹配时它也不该被丢弃
+      usageStore.applySnapshot(usageRaw)
     } catch (err) {
-      console.warn('[persist] 读取失败,使用初始数据', err)
+      devWarn('[persist] 读取失败,使用初始数据', err)
     }
   }
 

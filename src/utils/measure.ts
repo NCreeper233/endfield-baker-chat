@@ -207,6 +207,39 @@ function getCanvasCtx(fontSize: number): CanvasRenderingContext2D {
  * @param text   消息文本(支持 \n 换行,可含表情 token)
  * @returns      外框宽高 + 内文宽度
  */
+/**
+ * 量出一段 range 内容里"最宽一行"的宽度
+ *
+ * `Range.getClientRects()` 对含内联元素的内容是**逐片段**返回 rect 的:
+ * 文字一段、每个 inline-block(表情 <img>)各一段。同一行因此可能有多条 rect,
+ * 直接取 max 只会得到最长的那一片段(连续两个表情 = 一个表情的宽),
+ * 于是气泡被算窄、后面的表情被迫换行。
+ *
+ * 这里先把 rect 按行归并,再取每行的"最右 − 最左"作为行宽。
+ * 归并判据用**垂直交叠**而非 top 相等:表情图是 vertical-align:middle,
+ * 它和同一行的文字行盒 top 并不相同,按 top 分组会把一行拆成两行。
+ */
+function maxLineWidth(range: Range): number {
+  const rects = [...range.getClientRects()]
+    .filter((r) => r.width > 0 || r.height > 0)
+    .sort((a, b) => a.top - b.top)
+  const lines: { top: number; bottom: number; left: number; right: number }[] = []
+  for (const r of rects) {
+    const line = lines.find((ln) => r.top < ln.bottom - 0.5 && r.bottom > ln.top + 0.5)
+    if (line) {
+      line.top = Math.min(line.top, r.top)
+      line.bottom = Math.max(line.bottom, r.bottom)
+      line.left = Math.min(line.left, r.left)
+      line.right = Math.max(line.right, r.right)
+    } else {
+      lines.push({ top: r.top, bottom: r.bottom, left: r.left, right: r.right })
+    }
+  }
+  let widest = 0
+  for (const ln of lines) widest = Math.max(widest, ln.right - ln.left)
+  return widest
+}
+
 function measureWith(config: MeasureConfig, text: string): BubbleBox {
   const innerMax = config.innerMax
   const ctx = getCanvasCtx(config.fontSize)
@@ -230,13 +263,16 @@ function measureWith(config: MeasureConfig, text: string): BubbleBox {
   rulerEl.innerHTML = emojiToHtml(text)
   const rulerLines = Math.round(rulerEl.scrollHeight / config.lineHeight)
   if (Number.isFinite(rulerLines) && rulerLines > 0) lines = rulerLines
+  const range = document.createRange()
+  range.selectNodeContents(rulerEl)
   // 内容宽:取最宽一行的真实渲染宽度。
   // 不能读 scrollWidth——内容不溢出时 scrollWidth 恒等于容器宽(innerMax),
   // 会把短消息撑到最大宽度;getClientRects 返回每行的真实 rect。
-  const range = document.createRange()
-  range.selectNodeContents(rulerEl)
-  let contentW = 0
-  for (const r of range.getClientRects()) contentW = Math.max(contentW, r.width)
+  // 也不能直接对 rects 取 max:Range 对内联内容是**逐片段**给的 rect,一行里
+  // 两个并排的 <img>(连续表情 token,如 [sns_emoji_033][sns_emoji_033])会返回
+  // 两条各只有半个表情宽的 rect,取 max 等于按"一个表情"算宽 —— 气泡窄一点,
+  // 第二个表情就被挤到下一行。必须先按行归并、再取该行的最右 − 最左。
+  const contentW = maxLineWidth(range)
   rulerW = Math.min(contentW, innerMax)
   innerW = Math.max(innerW, rulerW)
 

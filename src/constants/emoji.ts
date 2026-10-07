@@ -37,8 +37,14 @@ export const EMOJIS: Emoji[] = Object.keys(emojiModules)
     return { token: `[${TOKEN_PREFIX}${num}]`, src: emojiModules[path] }
   })
 
-/** 匹配单个表情 token(如 [sns_emoji_001]) */
-const EMOJI_TOKEN_RE = /\[sns_emoji_(\d+)\]/g
+/**
+ * 匹配单个表情 token(如 [sns_emoji_001])
+ *
+ * 导出给 utils/aiText 用于按"字数"判定短段:一个 token 在用户眼里是**一个字**,
+ * 按原始长度算会当成 15 个字,短段合并就会漏掉纯表情行。
+ * 只做 replace 使用(不要在本模块外用 test/exec —— 带 g 标志会有 lastIndex 残留)。
+ */
+export const EMOJI_TOKEN_RE = /\[sns_emoji_(\d+)\]/g
 
 /** 非方形表情的原始尺寸(宽×高,px);未列出的默认为 60×60。
  *  用于按真实宽高比渲染,避免横幅/竖条等异形表情被压扁。 */
@@ -121,7 +127,18 @@ export function emojiToHtml(text: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-  return escaped.replace(EMOJI_TOKEN_RE, (m) => emojiImgHtml(m, emojiByToken.get(m) ?? ''))
+  return escaped.replace(EMOJI_TOKEN_RE, (m) => {
+    // 归一化 token 到 3 位(模型可能输出 [sns_emoji_1] / [sns_emoji_01] 等非标准格式)
+    const num = m.match(/\d+/)?.[0] ?? ''
+    const normalized = `[${TOKEN_PREFIX}${num.padStart(3, '0')}]`
+    const src = emojiByToken.get(normalized)
+    // 2026-09-30 修复:查不到映射时**原样输出 token 文本**,绝不返回空 src。
+    // 原实现 `?? ''` 会生成 <img src=""> —— 浏览器既无法加载图片、又不会显示任何
+    // 文字(alt 为空),用户看到的就是"表情 token 没变成表情包图片"(实际是破图)。
+    // 现在:素材缺失/序号越界(N>037)时按可读文本输出,保底不丢信息。
+    if (!src) return m
+    return emojiImgHtml(normalized, src)
+  })
 }
 
 /** 需当作换行处理的块级标签(contenteditable 换行可能产生 div/p 等) */

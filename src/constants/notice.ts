@@ -8,51 +8,23 @@
 // =============================================================================
 
 /** 弹窗标题 */
-// export const NOTICE_TITLE = '欢迎来到佩丽卡AI'
-export const NOTICE_TITLE = '服务公告'
+export const NOTICE_TITLE = '欢迎来到佩丽卡AI'
 
 /** 弹窗正文(自由编辑) */
-// export const NOTICE_CONTENT = `感谢你使用佩丽卡AI —— 基于《明日方舟：终末地》世界观的 AI 角色聊天应用。
-//
-// · 与 29 位干员自由对话，体验真实角色性格与世界观
-// · 支持思考模式、强制搜索、智能总结等实验性功能
-// · 对话历史本地存储，支持导出/导入完整数据（含 API 配置与自定义提示词）
-//
-// 祝你与干员们的相处愉快。`
-export const NOTICE_CONTENT = `由于近期更换服务器，这两天暂时不提供服务（网站现在无法使用），现已临时上线单独的旧版本网站供临时使用，新的临时地址及其他详细信息请加群获取！
+export const NOTICE_CONTENT = `感谢你使用佩丽卡AI —— 基于《明日方舟：终末地》世界观的 AI 角色聊天应用。
 
-现网站数据的导入/导出不受影响，可自行保存迁移数据！
+· 与 29 位干员自由对话，体验真实角色性格与世界观
+· 支持思考模式、强制搜索、智能总结等实验性功能
+· 对话历史本地存储，支持导出/导入完整数据（含 API 配置与自定义提示词）
 
-QQ群：1105542731`
+祝你与干员们的相处愉快。`
 
 /** 确认按钮文案(灰色;点击仅关闭本次,下次仍弹) */
-export const NOTICE_CONFIRM_TEXT = '知道了'
+export const NOTICE_CONFIRM_TEXT = '确定'
 
 /** 不再提醒按钮文案(亮黄色;点击后永久不再弹出) */
 export const NOTICE_DISMISS_TEXT = '不再提醒'
 
-/**
- * 公告网络源 URL(经 Cloudflare 隧道托管到本机的 JSON/TXT 文件)。
- *
- * 支持两种内容形态:
- *   - JSON 对象:{"title": "标题", "content": "正文"} —— title 缺省用内置标题
- *   - 纯文本:整段文本作为正文,标题用内置 NOTICE_TITLE
- * 各端每次启动 fetch 该地址,与上次接收到的内容做哈希对比:
- * 内容变化 → 重置"不再提醒"并弹出新公告;内容未变 → 按"不再提醒"状态决定。
- * fetch 失败(离线等) → 回退上方内置常量。
- */
-// export const NOTICE_CONTENT_URL = 'https://notice.peilika.beer/notice.json'
-export const NOTICE_CONTENT_URL = ''
-
-/** 记录"已展示正文"哈希的 localStorage key(TXT 内容变化时用于重置不再提醒) */
-export const NOTICE_CONTENT_HASH_KEY = 'endfield-baker-settings-notice-content-hash'
-
-/**
- * 公告版本号(每次更新公告内容时递增)。
- * 版本变化时强制重置所有用户的"不再提醒"状态,确保新公告必弹。
- * 恢复旧公告时也应递增版本号(而非回退),避免 localStorage 中已记录的旧版本号导致跳过。
- */
-export const NOTICE_VERSION = 1
-
-/** 记录已弹出的公告版本的 localStorage key */
-export const NOTICE_VERSION_KEY = 'endfield-baker-notice-version'
+// 说明:公告的网络数据源 URL、内容哈希 key 已统一迁移到 constants/popups.ts
+// (公告与提醒、更新三类弹窗共用同一个服务端 JSON)。
+// 本文件只保留离线/拉取失败时使用的内置回退文案。

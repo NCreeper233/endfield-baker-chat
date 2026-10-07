@@ -57,6 +57,13 @@ const props = defineProps<{
    * - 切换对话首屏:不传,直接真实尺寸(整体走 chat-in 入场)
    */
   prevRect?: { w: number; h: number }
+  /**
+   * 是否画选中描边(「导出选中消息」模式)
+   *
+   * 描的是**气泡自身的轮廓**:圆角矩形 + 尾巴各自用同一套几何描一遍,
+   * 而不是套一个矩形框 —— 尾巴那段因此也在轮廓里。
+   */
+  picked?: boolean
 }>()
 
 /** 注入几何(气泡字号/边距/圆角;默认全局,导出模式由 ChatExportStage 覆盖)。
@@ -81,6 +88,10 @@ const textVisible = ref(!props.prevRect)
 
 /** 尺寸过渡时长(ms),与 CSS transition 一致 */
 const TRANSITION_MS = 100
+
+/** 选中描边(「导出选中消息」模式):强调黄,沿气泡外轮廓 2px */
+const PICK_COLOR = '#ffef00'
+const PICK_W = 2
 
 /**
  * 过渡期间用到的 rAF / setTimeout 句柄
@@ -206,6 +217,9 @@ const svgStyle = computed(() => ({
   width: `${svgW.value}px`,
   height: `${svgH.value}px`,
   transition: `width ${TRANSITION_MS}ms ease-out, left ${TRANSITION_MS}ms ease-out`,
+  // 选中描边画在形状**外侧**,默认的 overflow:hidden 会把它沿 svg 边缘切掉;
+  // 只在选中时放开(此时没有尺寸过渡,不存在原注释里"过渡中被裁出直角边"的问题)
+  overflow: props.picked ? 'visible' : 'hidden',
 }))
 
 /**
@@ -252,26 +266,54 @@ const tailStyle = computed(() => ({
  * scoped CSS 样式不会进入克隆的 SVG 子树。把布局样式放 inline style 后,
  * 深克隆天然复制,导出图与屏幕观感一致,无需事后内联计算样式。
  */
+/**
+ * 外框样式(负责垂直居中 + 文字淡入)
+ *
+ * 这里必须是 flex 且**只能有一个子元素**:气泡比文字高时(尺寸过渡期间尤其明显)
+ * 靠 align-items 把整块文字垂直居中。
+ *
+ * 文字本身不能直接挂在这个 flex 上 —— 消息里夹着表情时,`文本 + <img> + 文本`
+ * 会被 flex 拆成多个匿名 flex item,按 row 方向并排,一段文字变一列
+ * (长回复会变成"多列并排 + 底部被裁")。故文字一律放进下面的 __inner,
+ * flex 容器只有一个孩子,内部按普通内联流排版。
+ */
 const textStyle = computed(() => ({
   display: 'flex',
   alignItems: 'center',
+  width: `${props.box.innerW}px`,
+  height: `${props.box.rectH}px`,
+  justifyContent: props.side === 'mine' ? 'flex-end' : 'flex-start',
+  opacity: textVisible.value ? 1 : 0,
+  transition: `opacity ${TRANSITION_MS / 2}ms ease`,
+}))
+
+/**
+ * 文字块样式(真正的排版层)
+ *
+ * 布局关键样式(display/font/white-space/word-break 等)全部写入 inline style:
+ * html-to-image 对 SVG 根元素是深克隆(cloneNode(true)),不递归 cloneChildren,
+ * scoped CSS 样式不会进入克隆的 SVG 子树。把布局样式放 inline style 后,
+ * 深克隆天然复制,导出图与屏幕观感一致,无需事后内联计算样式。
+ */
+const textInnerStyle = computed(() => ({
+  display: 'block',
+  width: '100%',
   fontFamily: BUBBLE_FONT,
   fontSize: `${geom.value.bubbleFontSize}px`,
   lineHeight: `${geom.value.bubbleLineHeight}px`,
   whiteSpace: 'pre-line',
   wordBreak: 'break-word' as const,
   userSelect: 'text' as const,
-  width: `${props.box.innerW}px`,
-  height: `${props.box.rectH}px`,
-  justifyContent: props.side === 'mine' ? 'flex-end' : 'flex-start',
+  // 2026-09-30 按用户要求：玩家消息与对方一样**左对齐**（此前误改为右对齐，已撤销）。
+  // 注意：这是 inline style —— 本组件用 <svg><foreignObject> 渲染，scoped CSS
+  // 不会进入克隆子树，对齐必须内联，否则导出图与屏幕不一致。
+  textAlign: 'left' as const,
   color: props.side === 'mine' ? BUBBLE_TEXT_MINE : BUBBLE_TEXT_OTHER,
   // html-to-image 的 cloneCSSStyle 会把外层容器的 computed style
   // (含 -webkit-text-fill-color: rgb(0,0,0))内联到克隆节点。该属性通过 CSS 继承
   // 传递给 foreignObject 内的文字 div,且优先级高于 color,导致对方气泡白字变黑。
   // 显式内联 webkitTextFillColor 覆盖继承值,确保导出图文字颜色与屏幕一致。
   '-webkit-text-fill-color': props.side === 'mine' ? BUBBLE_TEXT_MINE : BUBBLE_TEXT_OTHER,
-  opacity: textVisible.value ? 1 : 0,
-  transition: `opacity ${TRANSITION_MS / 2}ms ease`,
 }))
 </script>
 
@@ -295,13 +337,49 @@ const textStyle = computed(() => ({
       :style="tailStyle"
       :fill="fillColor"
     />
+    <!-- 选中描边:只描**并集的外轮廓**(含尾巴),不描内部接缝。
+         做法(无需手写合并路径):
+           ① 把同一组形状(圆角矩形 + 尾巴)整体外扩填成强调黄
+           ② 再用气泡底色把并集的内部原样盖回来
+         两层相减,剩下的正好是沿外轮廓的一圈;矩形左缘、尾巴直边这些
+         "两图形相接处"都落在并集内部,被第②层盖掉,因此不会描到中间。 -->
+    <template v-if="picked">
+      <g :fill="PICK_COLOR" :stroke="PICK_COLOR" :stroke-width="PICK_W * 2">
+        <rect
+          :x="rectX"
+          y="0"
+          :rx="geom.bubbleRadius"
+          :ry="geom.bubbleRadius"
+          :style="rectStyle"
+        />
+        <path
+          d="M0,0s7.8,3.37,8.2,13.65S21.85,0,21.85,0H0Z"
+          :style="tailStyle"
+        />
+      </g>
+      <g :fill="fillColor" :stroke="fillColor" stroke-width="0">
+        <rect
+          :x="rectX"
+          y="0"
+          :rx="geom.bubbleRadius"
+          :ry="geom.bubbleRadius"
+          :style="rectStyle"
+        />
+        <path
+          d="M0,0s7.8,3.37,8.2,13.65S21.85,0,21.85,0H0Z"
+          :style="tailStyle"
+        />
+      </g>
+    </template>
     <foreignObject :x="rectX + geom.bubblePadX" y="0" :width="box.innerW" :height="box.rectH">
       <div
         xmlns="http://www.w3.org/1999/xhtml"
         class="chat-bubble__text"
         :style="textStyle"
-        v-html="emojiToHtml(text ?? '')"
-      ></div>
+      >
+        <!-- 真正的文字层:flex 容器只留这一个孩子,表情 <img> 在这里按内联流排版 -->
+        <div class="chat-bubble__inner" :style="textInnerStyle" v-html="emojiToHtml(text ?? '')"></div>
+      </div>
     </foreignObject>
   </svg>
 </template>
@@ -316,14 +394,15 @@ const textStyle = computed(() => ({
   filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.35));
 
   &__text {
-    display: flex;
-    align-items: center;
-    font-family: $font-bubble;
-    font-size: $font-size-bubble;
-    line-height: 1.5;
-    white-space: pre-line;
-    word-break: break-word;
-    user-select: text;
+    // 注意:这里刻意不写 display/font/white-space —— 它们是排版关键样式,
+    // 必须留在 inline style 里,否则 html-to-image 深克隆 SVG 时不会带上
+    // (见脚本里 textInnerStyle 的注释)。
+    box-sizing: border-box;
+  }
+
+  &__inner {
+    // 同理,排版样式在 inline style;这里只留兜底
+    box-sizing: border-box;
   }
 }
 </style>

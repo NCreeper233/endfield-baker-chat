@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="32pt" height="32pt" viewBox="0 0 32 32" version="1.1" xmlns="http://www.w3.org/2000/svg">
+<g id="#ffffffff">
+<!-- 基线:把三根柱子"坐"在一条工业风的横梁上,避免三根悬空的方块 -->
+<path fill="#ffffff" stroke="#ffffff" stroke-width="0.09375" opacity="1.00" d=" M 2.40 26.20 L 29.60 26.20 L 29.60 28.40 L 2.40 28.40 Z" />
+<!-- 三根递增柱:输出用量随时间增长的观感,一眼可辨"统计面板" -->
+<path fill="#ffffff" stroke="#ffffff" stroke-width="0.09375" opacity="1.00" d=" M 5.10 16.40 L 9.70 16.40 L 9.70 24.60 L 5.10 24.60 Z" />
+<path fill="#ffffff" stroke="#ffffff" stroke-width="0.09375" opacity="1.00" d=" M 13.70 11.20 L 18.30 11.20 L 18.30 24.60 L 13.70 24.60 Z" />
+<path fill="#ffffff" stroke="#ffffff" stroke-width="0.09375" opacity="1.00" d=" M 22.30 5.20 L 26.90 5.20 L 26.90 24.60 L 22.30 24.60 Z" />
+<!-- 左上角命中标记:与最高柱同高的一撇,暗示"缓存命中" -->
+<path fill="#ffffff" stroke="#ffffff" stroke-width="0.09375" opacity="1.00" d=" M 5.10 4.40 L 12.60 4.40 L 12.60 6.40 L 5.10 6.40 Z" />
+</g>
+</svg>

@@ -77,15 +77,24 @@
     inset: 0;
     z-index: 200;
     display: flex;
-    align-items: center;
     justify-content: center;
+    // 内容高于视口时允许整屏滚动;居中不能用 align-items: center ——
+    // flex 居中在内容溢出时会把顶部一并推到视口外(flexbox 经典问题),
+    // 表现为"弹窗上边和下边都被挡掉一部分"。改用面板 margin: auto 居中。
+    overflow-y: auto;
+    padding: 16px;
     background: rgba(0, 0, 0, 0.75);
 
     // 面板:圆角深色卡片,内容区统一内边距
     &__panel {
       position: relative;
+      // margin:auto 在空间足够时居中,不足时不产生负外边距(顶部不会被裁)
+      margin: auto;
+      // 面板自身也限高滚动,双保险
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
       width: #{$panel-w};
-      max-width: calc(100vw - 24px); // 移动端窄屏:面板不超视口宽
+      max-width: 100%; // 移动端窄屏:面板不超视口宽(外层已有 16px 内边距)
       padding: 28px 32px 20px;
       border-radius: 0;
       background-color: $color-dialog-bg;
@@ -113,33 +122,40 @@
     }
 
     // 右上角 × 关闭按钮
+    //
+    // 与设置菜单(SettingsDialog 的 .sd__close)保持一致:淡化白 ×,悬停只拉不透明度,
+    // 不加背景色块。此前这里是"28×28 圆角色块 + hover 白层",与设置菜单两样 ——
+    // 站内弹窗里只有设置菜单是手写的,于是它成了唯一的不一致源。
     &__close {
       position: absolute;
-      top: 8px;
-      right: 10px;
-      z-index: 1;
-      width: 28px;
-      height: 28px;
-      padding: 0;
+      top: 12px;
+      right: 16px;
+      z-index: 2;
+      // 命中区补偿:× 字形本身只有约 14×24,对触屏偏小。
+      // 用「等量 padding + 负 margin」把可点区域撑到约 30×36,字形位置与外观完全
+      // 不变 —— 本元素是绝对定位,负 margin 恰好抵消 padding 推出的位移。
+      // (设置菜单不支持点空白关闭,触屏上全靠这个 ×,命中区不能太小。)
+      padding: 6px 8px;
+      margin: -6px -8px;
       border: none;
-      border-radius: 50%;
-      background: transparent;
-      color: $color-subcard-text;
+      background: none;
+      color: $color-text-primary;
       font-family: $font-harmony;
-      font-size: 22px;
+      font-size: 24px;
       line-height: 1;
       cursor: pointer;
+      opacity: 0.5;
 
       &:hover {
-        background: $color-hover-overlay;
+        opacity: 1;
       }
     }
 
     &__title {
       margin: 0 0 #{$title-mb};
       font-family: $font-harmony;
-      font-size: 22px;
-      font-weight: 500;
+      font-size: 20px;
+      font-weight: 600;
       color: $color-text-primary;
     }
 
@@ -192,5 +208,317 @@
   .#{$prefix}-enter-from,
   .#{$prefix}-leave-to {
     opacity: 0;
+  }
+}
+
+/// 推荐选项按钮核心样式(白底胶囊)
+///
+/// 与参考项目 endfield-baker-maker 的选项按钮同款:白底、直角取消为全圆角、
+/// 深色文字。尺寸(高/字号/内边距)由组件侧按端注入,此 mixin 只负责"外观核心"。
+@mixin flow-pill-core {
+  border-radius: 999px;
+  border: none;
+  background: #ffffff;
+  color: #2a2a2a;
+  font-family: $font-bubble;
+  font-size: 22px;
+  line-height: 46px;
+  box-sizing: border-box;
+  appearance: none;
+  -webkit-appearance: none;
+  text-align: center;
+}
+
+/// 群聊「聊天形式 / 发言模式」三选一按钮组(创建群聊弹窗 + 群聊设置弹窗共用)
+///
+/// 这两个弹窗各有一套类名(gc__ / gs__),但控件是同一个:三个按钮横排、
+/// 每个显示"标题 + 说明",选中 = **纯黄底 + 黑字**。之前两处各写一份,
+/// 选中态还不一样(创建弹窗是淡黄底、设置弹窗是纯黄底),故收敛于此。
+///
+/// 用法(组件样式顶层):
+///   @include speak-mode-options('gs__modes', 'gs__mode', 'gs__mode-label', 'gs__mode-desc');
+///
+/// @param {String} $row   按钮行的类名(横向等距排列)
+/// @param {String} $btn   单个按钮的类名
+/// @param {String} $label 按钮标题的类名
+/// @param {String} $desc  按钮说明的类名
+@mixin speak-mode-options($row, $btn, $label, $desc) {
+  .#{$row} {
+    display: flex;
+    gap: 8px;
+  }
+
+  .#{$btn} {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid $color-dialog-border;
+    background: rgba(0, 0, 0, 0.3);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+
+    &:hover {
+      background: $color-hover-overlay;
+    }
+
+    // 选中 = 纯黄色底 + 黑字(与设置菜单的选中态同一套观感)。
+    // 注意要连 :hover 一起写死:否则黄底上再叠 12% 白层会发灰,
+    // 鼠标一放上去"纯黄"就没了。
+    &.is-active,
+    &.is-active:hover {
+      border-color: $color-subcard-selected;
+      background: $color-subcard-selected;
+
+      .#{$label} {
+        color: $color-subcard-text-selected;
+      }
+
+      .#{$desc} {
+        // 黄底上的次级文字:同色系压淡,保留"标题深、说明浅"的层次
+        color: rgba(28, 28, 28, 0.7);
+      }
+    }
+  }
+
+  .#{$label} {
+    display: block;
+    font-family: $font-harmony;
+    font-size: 14px;
+    color: $color-subcard-text;
+    transition: color 0.15s ease;
+  }
+
+  .#{$desc} {
+    display: block;
+    margin-top: 4px;
+    font-family: $font-harmony;
+    font-size: 11px;
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.4);
+    transition: color 0.15s ease;
+  }
+}
+
+/// 主卡"机体":矩形底 / 纹理 / 淡纹 / 名字 / 下划线 / 转角装饰 + hover 白层 + 选中白层。
+///
+/// 单人主卡(CharacterCardItem)与群聊卡(GroupCardItem)必须**逐像素一致**。
+/// 两处各写一份拷贝一定会随时间漂移(改了单聊忘了群聊),故收敛于此。
+///
+/// 用法:在 `.card { ... }` 内 `@include main-card-chrome;`。
+/// 组件再自行追加各自的专属部件(子卡 / 折叠按钮 / ⋯ 按钮)。
+@mixin main-card-chrome {
+  position: absolute;
+  left: 47.42px;
+  top: 0;
+  width: 0;
+  height: 0;
+  cursor: pointer;
+  // hover 白层(与子卡共用)
+  @include hover-overlay(458.28px, 92.99px, 4.39px);
+
+  &__rect {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 458.28px;
+    height: 92.99px;
+    border-radius: 4.39px;
+    background: $color-card-bg;
+  }
+
+  &__texture {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 457.6px;
+    height: 92.4px;
+    opacity: 0.5;
+  }
+
+  &__faint {
+    position: absolute;
+    left: 35.28px;
+    top: 0.38px;
+    width: 422.76px;
+    height: 92.04px;
+    opacity: 0.02;
+  }
+
+  &__name {
+    position: absolute;
+    left: 102.02px;
+    top: 32.32px;
+    line-height: 1;
+    white-space: nowrap;
+    color: $color-text-primary;
+    font-size: $font-size-name;
+    font-weight: 500;
+    user-select: text;
+    // 名字可能超长(群聊名尤其):超宽省略,避免盖住右侧控件
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__underline {
+    position: absolute;
+    left: 104.02px;
+    top: 62.72px;
+    width: 42.75px;
+    height: 4.5px;
+    opacity: 0.4;
+  }
+
+  &__corner {
+    position: absolute;
+    left: 394.21px;
+    top: 15.75px;
+    width: 45px;
+    height: 6px;
+    opacity: 0.4;
+  }
+
+  // 选中态:白色遮罩常显(与 hover 遮罩同一视觉)。
+  // 必须排在 hover-overlay 之后 —— 两者特异性相同,靠源序决定胜负。
+  &.is-selected::before {
+    opacity: 1;
+  }
+}
+
+/// 主卡头像框:76×76 方框 + 1px 描边 + 裁剪层 + 图片裁剪配方。
+///
+/// 单人主卡与群聊九宫格共用 —— 群聊卡在 `&-clip` 内再铺一层宫格,
+/// 每格复用同一套 `&-img` 配方,从而保证"头像大小和边框样式和单人一样"。
+///
+/// 用法:在 `.card { ... }` 内 `@include card-avatar-frame;`。
+@mixin card-avatar-frame {
+  &__avatar {
+    position: absolute;
+    left: 8.5px;
+    top: 8.5px;
+    width: 76px;
+    height: 76px;
+    border-radius: 6px;
+    border: 1px solid $color-avatar-border;
+    // 外层刻意不裁:让 chat-indicator 能超出边框显示
+    overflow: visible;
+    z-index: 11;
+
+    // 裁剪夹层:overflow:hidden 限制内部 img scale 后的可见范围
+    &-clip {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      border-radius: 6px;
+    }
+
+    &-img {
+      position: relative;
+      z-index: 11;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      // 头像原图为竖长方形(如 456x564),取上端正方形区域显示;
+      // 再 scale 放大收紧裁剪范围,只保留脑袋部分(去掉周围留白)
+      object-position: 45% 15%;
+      transform: scale(1.3);
+      transform-origin: 40% 45%;
+    }
+  }
+
+  // 立绘构图特殊的角色(N=阿达希尔/聂菲斯,见 isOriginalScaleAvatar)改用原比例:
+  // 它们四周留白多,沿用 scale(1.3) 会把脑袋本身切掉。
+  // 标记统一加在 **img 自身** 上(单人主卡与群聊宫格各自加在自己的 img 上)。
+  &__avatar-img.is-original-scale {
+    transform: scale(1.1);
+    transform-origin: 40% 45%;
+    object-position: 45% 15%;
+  }
+
+  &:hover &__avatar {
+    border-color: $color-avatar-border-hover;
+  }
+}
+
+/// 头像右上角的"未读消息"浮标:定位 + 左右晃动动画。
+///
+/// 动画周期 4s:左→右→左→右→归正(0~25%) + 静止等待(75%)。
+/// 单人主卡与群聊卡必须同一张素材、同一条动画 —— 收敛于此,避免"群聊卡的
+/// 浮标晃得不一样"这类静默漂移。
+///
+/// **显示条件由调用方决定**:只有"还没有任何对话记录"的卡才挂这个浮标
+/// (已经聊过的干员不再挂 —— 见两个卡组件里的 hasChatRecord)。
+///
+/// 用法:在 `.card { ... }` 内 `@include card-chat-indicator;`
+/// (与 main-card-chrome 同级 include —— 本 mixin 自带 `&__chat-indicator`,
+///  并把 @keyframes 写在 `.card` 这一层,与抽取前的结构完全一致)。
+@mixin card-chat-indicator {
+  &__chat-indicator {
+    position: absolute;
+    right: -18px;
+    top: -14px;
+    width: 40px;
+    height: 40px;
+    z-index: 12;
+    transform-origin: center center;
+    animation: card-chat-wiggle 4s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  @keyframes card-chat-wiggle {
+    0% {
+      transform: rotate(0deg);
+    }
+    5% {
+      transform: rotate(-14deg);
+    }
+    10% {
+      transform: rotate(14deg);
+    }
+    15% {
+      transform: rotate(-14deg);
+    }
+    20% {
+      transform: rotate(14deg);
+    }
+    25% {
+      transform: rotate(0deg);
+    }
+    100% {
+      transform: rotate(0deg);
+    }
+  }
+}
+
+/// 角色列表上方操作带里的方形按钮外壳(加号 / 设置 / 分享 / 删除)。
+///
+/// 四个按钮同处一条带内、必须同尺寸同质感,故收敛于此。
+/// 图标本体由调用方给出:svg 走 `currentColor`,img 自行调透明度。
+///
+/// @param {Number | String} $size    按钮边长
+/// @param {Number | String} $radius  圆角
+@mixin list-action-btn($size: 40px, $radius: 4.39px) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: #{$size};
+  height: #{$size};
+  padding: 0;
+  border: 1px solid $color-subcard-line;
+  border-radius: #{$radius};
+  background: $color-card-bg;
+  color: $color-subcard-text;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, opacity 0.2s ease, transform 0.2s ease;
+
+  &:hover {
+    background: $color-hover-overlay;
+    color: $color-text-primary;
+  }
+
+  &:focus-visible {
+    outline: 1px solid $color-subcard-selected;
+    outline-offset: 1px;
   }
 }

@@ -28,15 +28,42 @@ const props = defineProps<{
 }>()
 
 /**
- * 移动端双击进入聊天视图(由 App provide;桌面端为 null/空操作)。
- * 单击只高亮选中(selectSub),双击时两次 click 已先完成选中,进入即显示该对话。
+ * 移动端进入聊天视图(由 App provide;桌面端为空操作 —— 内部会判断 isMobile)
  */
 const enterMobileChat = inject<(() => void) | null>('enterMobileChat', null)
 
+/**
+ * 点按:移动端**单击即进入对话**(并同时选中它)
+ *
+ * 以前是"单击选中、双击进入",双击在列表里既慢又容易点空(尤其 iOS 上
+ * 两次点按还会被系统当作缩放手势);既然单击已经明确了"我要跟这个角色聊",
+ * 再要求点第二次没有意义。桌面端没有"进入聊天视图"这回事 ——
+ * enterMobileChat 内部判 isMobile,桌面上是空操作,单击只选中。
+ *
+ * 删除模式下点击的含义变成"勾选 / 取消勾选"(不切会话、也不进聊天视图),
+ * 否则无法多选:点一下就把选中态挪走了,底部条上的"已选"跟列表对不上。
+ */
+function onTap(): void {
+  if (chatStore.deleteMode) {
+    chatStore.toggleDeleteSelect(props.subIndex)
+    return
+  }
+  chatStore.selectSub(props.subIndex)
+  enterMobileChat?.()
+}
+
 const chatStore = useChatStore()
 
-/** 该子卡是否选中(全局单选) */
-const isSelected = computed(() => chatStore.activeSub === props.subIndex)
+/**
+ * 该子卡是否选中(全局单选)
+ *
+ * 删除模式下不再画常规的"选中黄层":那时的"选中"由左缘的悬浮黄条表达
+ * (见下方 isDeleteSelected),两套高亮同时出现会分不清"选了几段"。
+ */
+const isSelected = computed(() => !chatStore.deleteMode && chatStore.activeSub === props.subIndex)
+
+/** 该子卡是否已在删除模式里被勾选(画悬浮黄条) */
+const isDeleteSelected = computed(() => chatStore.isDeleteSelected(props.subIndex))
 
 /**
  * 子卡预览文本
@@ -79,10 +106,11 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
       'is-selected': isSelected,
     }"
     :style="rootStyle"
-    @click="chatStore.selectSub(subIndex)"
-    @dblclick="enterMobileChat?.()"
+    @click="onTap"
   >
     <div class="subcard__rect" />
+    <!-- 删除模式:被勾选的对话在左缘挂一条悬浮黄条 -->
+    <span v-if="isDeleteSelected" class="subcard__del-bar" />
     <img class="subcard__texture" :src="MATERIALS.cardTexture" alt="" />
     <img class="subcard__faint" :src="MATERIALS.subFaint" alt="" />
     <div class="subcard__icon-box" />
@@ -90,7 +118,9 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
     <img class="subcard__arrow subcard__arrow--second" :src="MATERIALS.subArrow" alt="" />
     <img class="subcard__icon" :src="badgeIcon" alt="" />
     <p class="subcard__text" v-html="previewHtml"></p>
-    <img class="subcard__deco-badge" :src="MATERIALS.decoBadge" alt="" />
+    <!-- 小方块装饰:原 deco_sns_tweet_decorate_06.webp 只是 21×21 画布左上角
+         4×4 的一小块,已弃用素材,改为直接绘制(见样式里的 &__deco-badge) -->
+    <span class="subcard__deco-badge" />
     <img class="subcard__deco-wing" :src="MATERIALS.decoWing" alt="" />
     <div class="subcard__line" />
   </div>
@@ -108,6 +138,18 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
   height: 0;
   // hover 白层(与主卡共用 hover-overlay mixin)
   @include hover-overlay(435.53px, 68.95px, 4.12px);
+
+  // 勾选黄条入场:从中间长出来(纯视觉,不影响布局)
+  @keyframes subcard-del-bar-in {
+    from {
+      opacity: 0;
+      transform: scaleY(0.35);
+    }
+    to {
+      opacity: 1;
+      transform: scaleY(1);
+    }
+  }
 
   // top 由父组件通过 :style 传入(支持任意子卡数量);
   // --second 仅保留用于 arrow 过渡时长区分,不再覆盖 top
@@ -149,6 +191,23 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
     height: 68.4px;
     opacity: 0.5;
     transition: opacity 0.25s ease;
+  }
+
+  // 删除模式的勾选标记:左缘一条悬浮黄条(与 rect 同高,略探出卡片左缘)
+  //
+  // 用自绘而非沿用选中黄层:黄层会把整张卡刷成黄色,多选时一片黄
+  // 反而看不出"选了哪几段";细黄条 + 阵列感更清楚。
+  &__del-bar {
+    position: absolute;
+    left: -5px;
+    top: 0;
+    width: 5px;
+    height: 68.95px;
+    border-radius: 2px;
+    background: $color-subcard-selected;
+    box-shadow: 0 0 12px rgba(255, 239, 0, 0.45);
+    pointer-events: none;
+    animation: subcard-del-bar-in 0.18s ease-out;
   }
 
   &__faint {
@@ -266,23 +325,41 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
     }
   }
 
+  // 小方块装饰(自绘,不再用素材)
+  //
+  // 原 deco_sns_tweet_decorate_06.webp 是 21×21 位图,但内容只有左上角 4×4
+  // 的一小块(其余全透明,由 42 的同类素材可推知这是裁切留白)。按原显示尺寸
+  // 29.19px / 21 = 1.39 换算,这一小块即 4 × 1.39 = 5.56px,正好落在原框左上角。
+  //
+  // 颜色:原图是纯白 + brightness(0.11),255 × 0.11 ≈ 28 = #1c1c1c,
+  // 与 $color-subcard-line 完全同值,故直接上色、不再套滤镜。
   &__deco-badge {
     position: absolute;
     left: 26.76px;
     top: 11.43px;
-    width: 29.19px;
-    height: 29.19px;
+    width: 5.56px;
+    height: 5.56px;
+    background: $color-subcard-line;
     opacity: 0;
-    filter: brightness(0.11);
     transition: opacity 0.25s ease;
   }
 
+  // 虚线装饰(现已改用矢量 deco_sns_tweet_decorate_42.svg)
+  //
+  // 原 42.webp 是 31×9 位图,内容仅占其中 29×7(左、上各 2px 透明留白,
+  // 右、下为 0);而 svg 的 viewBox 28.45×6.93 是**紧贴内容**的裁切。
+  // 若沿用原框(38.13×11.07,按 31×9 定尺寸),svg 会被拉伸到 3.444 的
+  // 宽高比 —— 纵向拉长约 30%,虚线明显变粗。
+  // 故把框改成"内容本身"的尺寸与位置:
+  //   缩放 38.13 / 31 = 1.23 → 内容 29×1.23 = 35.67 宽,7×1.23 = 8.61 高
+  //   位置也要补回被裁掉的留白:(2,2) × 1.23 = 2.46 → 左 34.99+2.46、上 5.65+2.46
+  //   高度按 svg 宽高比 28.45/6.93 = 4.1053 反推:35.67 / 4.1053 = 8.69
   &__deco-wing {
     position: absolute;
-    left: 34.99px;
-    top: 5.65px;
-    width: 38.13px;
-    height: 11.07px;
+    left: 37.45px;
+    top: 8.11px;
+    width: 35.67px;
+    height: 8.69px;
     transform: scaleX(-1);
     opacity: 0;
     filter: brightness(0.11);

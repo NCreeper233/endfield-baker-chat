@@ -15,8 +15,8 @@
 
 import { computed, type ComputedRef, type InjectionKey } from 'vue'
 import {
+  chatViewportHeight,
   isMobileView,
-  viewportHeight,
   viewportWidth,
 } from '../composables/useMobile'
 import {
@@ -24,6 +24,7 @@ import {
   CHAT_BOTTOM_DECO,
   CHAT_DOTS_SIZE,
   CHAT_END_DECO,
+  CHAT_FRAME,
   CHAT_GAP,
   CHAT_SCROLL,
   CHAT_SHOTS,
@@ -42,6 +43,7 @@ import {
 } from '../utils/measure'
 import { PANEL, PANEL_EDGE_MASK_H, PANEL_TOP_DECO_H, PANEL_TOP_DECO_W } from './panel'
 import { CHARACTER_LIST_TOP, TOP_PAD } from './characterCard'
+import { extraInputH } from '../composables/useInputHeight'
 
 /** 聊天区几何(全部为"画布坐标",行级布局由 useChatRows 内部转滚动相对) */
 export interface ChatGeometry {
@@ -59,6 +61,13 @@ export interface ChatGeometry {
   detailY: number
   detailW: number
   detailH: number
+  /**
+   * 可视视口高度(px)
+   *
+   * 移动端 = useMobile 的可视视口高:**软键盘弹出时已扣除键盘**。
+   * 输入面板「展开成 2/3 屏大输入框」按它算,键盘怎么弹都不会盖住输入框。
+   */
+  viewportH: number
   // 滚动容器
   scrollX: number
   scrollY: number
@@ -104,6 +113,12 @@ export interface ChatGeometry {
   scrollBottomPad: number
   dotsSize: number
   // 气泡测量与渲染参数
+  /** 群聊「新话题」提示行字号(px,比气泡小一档) */
+  topicFontSize: number
+  /** 群聊「新话题」提示行行高(px) */
+  topicLineHeight: number
+  /** 括号描写居中行:文本左右内缩量(px,避免长句顶到聊天框边缘) */
+  centerTextPadX: number
   bubbleFontSize: number
   bubbleLineHeight: number
   bubblePadX: number
@@ -137,6 +152,7 @@ export const DESKTOP_GEOM: ChatGeometry = {
   detailY: CHAT_SHOTS.detail.y,
   detailW: CHAT_SHOTS.detail.w,
   detailH: CHAT_SHOTS.detail.h,
+  viewportH: CHAT_SHOTS.detail.y + CHAT_SHOTS.detail.h,
   scrollX: CHAT_SCROLL.x,
   scrollY: CHAT_SCROLL.y,
   scrollW: CHAT_SCROLL.w,
@@ -175,6 +191,11 @@ export const DESKTOP_GEOM: ChatGeometry = {
   endDecoGap: CHAT_END_DECO.gap,
   scrollBottomPad: SCROLL_BOTTOM_PAD,
   dotsSize: CHAT_DOTS_SIZE,
+  // 群聊「新话题」提示行:比气泡正文小一档的灰字
+  topicFontSize: 16,
+  topicLineHeight: 24,
+  // 括号描写居中行:纯居中文本(无气泡、无两侧细线),左右各内缩 30px
+  centerTextPadX: 30,
   bubbleFontSize: BUBBLE_FONT_SIZE,
   bubbleLineHeight: BUBBLE_LINE_HEIGHT,
   bubblePadX: BUBBLE_PAD_X,
@@ -197,24 +218,42 @@ export const DESKTOP_GEOM: ChatGeometry = {
  * @param w 视口宽
  * @param h 视口高
  */
-export function mobileGeometry(w: number, h: number): ChatGeometry {
+/**
+ * 移动端几何:按视口推导。
+ *
+ * 布局规则(竖屏 375×667 示例):
+ *   上下结构:strip(头图,占位高) → 滚动区(消息) → 底部输入面板
+ *   消息区:左右边距 + 头像(56px) + 头像→气泡间距;气泡按视口宽度流式换行
+ *   气泡字号 16px(桌面 20.88),整体比桌面紧凑;头像保留可辨识尺寸
+ *
+ * @param w 视口宽
+ * @param h 视口高
+ * @param extraInput 输入框因文本变长而增高的量(px):面板随之变高、滚动区变矮。
+ *                   设置项「新版输入面板」开启时最多只长一行;
+ *                   "展开成 2/3 屏大输入框"是浮层,**不走这里** —— 浮层不能把聊天区顶上去。
+ */
+export function mobileGeometry(
+  w: number,
+  h: number,
+  extraInput = 0,
+): ChatGeometry {
   // 视口尺寸兜底:键盘过渡等场景传入的 w/h 可能瞬时异常(0/极小),
   // 用最小可用尺寸保证布局不塌缩(头图缩放系数/锚点/面板始终在可视区域内)。
   const safeW = Math.max(w, 320)
   const safeH = Math.max(h, 300)
   const padX = 12 // 消息区左右边距
   const avatarBox = 72 // 移动端头像盒(80 偏大,72 居中;我方/对方一致)
-  const stripImgH = 66 // 头图 l/r 素材高度(px,各变体一致)
-  // 左右段素材原宽合计(各变体:25+440 / 19+458 / 21+451,取最大值保证任意变体可完整放下)
-  const STRIP_SEGS_MAX_TOTAL_W = 477
-  // 左右段优先完整等比放下:k = min(1, 视口宽 / 左右段最大总宽)
-  const stripK = Math.min(1, safeW / STRIP_SEGS_MAX_TOTAL_W)
-  const stripH = stripImgH * stripK // 头图占位高(左右段等比)
-  const panelH = 56 // 底部输入面板高
+  // head.svg 移动端:固定高度50px,纯CSS三段式(左蓝条+中深色拉伸+右蓝块)
+  const stripH = 50
+  // 输入框长高 → 面板整体加高(panelTop / scrollH / bottomDecoY 都由 panelH 推出)
+  const grow = Math.max(0, extraInput)
+  const panelH = 50 + grow // 底部输入面板高(单行 50,输入框长一行则再加一行)
   const scrollX = 0
   // 头部与聊天框之间留 6px 缝隙:滚动区整体下移 6px,高度相应减 6px
   const scrollY = stripH + 6
   const scrollW = safeW
+  // detailH 延伸到视口底部,让 chat-frame 包住底部输入面板
+  const detailH = safeH - scrollY
   const scrollH = Math.max(120, safeH - stripH - 6 - panelH)
 
   const otherAvatarX = padX
@@ -236,11 +275,12 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
     stripW: safeW,
     stripH,
     stripSegmented: true,
-    stripImgH,
+    stripImgH: 67,
     detailX: 0,
     detailY: scrollY,
     detailW: safeW,
-    detailH: scrollH,
+    detailH,
+    viewportH: safeH,
     scrollX,
     scrollY,
     scrollW,
@@ -255,11 +295,11 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
     gapSame: 12,
     gapCross: 26,
     gapSpeaker: 42,
-    panelLeft: 0,
-    panelWidth: safeW,
-    panelHeight: panelH,
+    panelLeft: CHAT_FRAME.line,
+    panelWidth: safeW - CHAT_FRAME.line * 2,
+    panelHeight: panelH - CHAT_FRAME.line,
     panelTop,
-    panelEdgeMaskH: 40,
+    panelEdgeMaskH: 20,
     panelTopDecoW: safeW,
     panelTopDecoH: 16,
     // 底部装饰:底边距 detail 底 13px(与桌面语义一致)
@@ -279,9 +319,13 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
     endDecoGap: 16,
     scrollBottomPad: 48,
     dotsSize: CHAT_DOTS_SIZE,
-    // 移动端气泡:字号 16 / 行高 24 / 边距 10×7 / 最小 40×34 / 圆角 10 / 加载气泡 80 宽
-    bubbleFontSize: 16,
-    bubbleLineHeight: 24,
+    // 移动端气泡:字号 14 / 行高 22 / 边距 10×7 / 最小 40×34 / 圆角 10 / 加载气泡 80 宽
+    topicFontSize: 12,
+    topicLineHeight: 18,
+    // 移动端窄:内缩收一档
+    centerTextPadX: 16,
+    bubbleFontSize: 14,
+    bubbleLineHeight: 20,
     bubblePadX: 10,
     bubblePadY: 7,
     bubbleMinW: 40,
@@ -296,9 +340,30 @@ export function mobileGeometry(w: number, h: number): ChatGeometry {
 export const chatGeometryKey: InjectionKey<ComputedRef<ChatGeometry> | ChatGeometry> =
   Symbol('chatGeometry')
 
+/**
+ * 桌面几何 + 输入框增高量
+ *
+ * DESKTOP_GEOM 是一份静态常量(整张设计稿量出来的),不能就地改;输入框的
+ * 增高量却是响应式的,故在这里派生出"面板变高、滚动区变矮"的一份。
+ * 底部装饰(bottomDecoY)是设计稿固定坐标,不随面板变高而移动,故不动它。
+ */
+export function desktopGeometry(extraInput = 0): ChatGeometry {
+  const grow = Math.max(0, extraInput)
+  if (grow <= 0) return DESKTOP_GEOM
+  return {
+    ...DESKTOP_GEOM,
+    panelHeight: DESKTOP_GEOM.panelHeight + grow,
+    panelTop: DESKTOP_GEOM.panelTop - grow,
+    scrollH: Math.max(120, DESKTOP_GEOM.scrollH - grow),
+  }
+}
+
 /** 全局响应式几何(useMobile 模块级 refs 驱动:移动端 → 移动几何,桌面 → 桌面几何) */
-export const globalChatGeometry = computed<ChatGeometry>(() =>
-  isMobileView.value
-    ? mobileGeometry(viewportWidth.value, viewportHeight.value)
-    : DESKTOP_GEOM,
-)
+export const globalChatGeometry = computed<ChatGeometry>(() => {
+  // 输入框的增高量(文本越长越高):面板与滚动区必须一起跟着变
+  const grow = extraInputH.value
+  if (!isMobileView.value) return desktopGeometry(grow)
+  // (高度用 chatViewportHeight 而非布局视口:软键盘弹出时它是可视视口高度,
+  //  面板因此排在键盘正上方而不是被键盘盖住 —— iOS 上 innerHeight 不变)
+  return mobileGeometry(viewportWidth.value, chatViewportHeight.value, grow)
+})

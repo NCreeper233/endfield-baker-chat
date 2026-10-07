@@ -3,20 +3,35 @@
 // 应用根组件
 // -----------------------------------------------------------------------------
 // 组装:背景层 + 等比缩放画布(顶部标题 + 干员卡片列表 + 聊天区 + 顶部工具栏)。
-// 删除确认弹窗为独立组件(DeleteConfirmDialog),打开状态与删除动作在此持有。
+// 删除走"删除模式":操作带上的删除按钮进入多选,底部条(DeleteModeBar)选删除对象。
 // 调试模式:URL 包含 #debug 时,useDebugMode 会在左下角渲染气泡尺寸信息。
 // =============================================================================
 import { ref, computed, inject, provide, toValue, watch, onMounted, onBeforeUnmount } from 'vue'
+import type { ChatMessage, GroupSpeakMode } from './types/chat'
 import AppBackground from './components/layout/AppBackground.vue'
 import DesignCanvas from './components/layout/DesignCanvas.vue'
 import HeaderTop from './components/header/HeaderTop.vue'
 import CharacterCardList from './components/character/CharacterCardList.vue'
 import ChatArea from './components/chat/ChatArea.vue'
-import DeleteConfirmDialog from './components/layout/DeleteConfirmDialog.vue'
+import DeleteModeBar from './components/character/DeleteModeBar.vue'
+import MessageSelectBar from './components/chat/MessageSelectBar.vue'
+import GroupContinueNudge from './components/chat/GroupContinueNudge.vue'
 import ChatExportDialog from './components/layout/ChatExportDialog.vue'
 import SettingsDialog from './components/layout/SettingsDialog.vue'
+import UsagePanel from './components/layout/UsagePanel.vue'
+import GroupCreateDialog from './components/character/GroupCreateDialog.vue'
+import GroupSettingsDialog from './components/character/GroupSettingsDialog.vue'
+import ExitConfirmDialog from './components/layout/ExitConfirmDialog.vue'
+import AlertDialog from './components/layout/AlertDialog.vue'
 import NoticeDialog from './components/layout/NoticeDialog.vue'
+import StylePreferenceDialog from './components/layout/StylePreferenceDialog.vue'
+import UpdateDialog from './components/layout/UpdateDialog.vue'
+import SplashOverlay from './components/splash/SplashOverlay.vue'
+// ⛔ 临时彩蛋(可删):月亮物理玩具 —— 开屏动画放完后整屏出场。
+//    删法见 src/easteregg/moon/README.md(本行与下方模板里的 <MoonEgg /> 一起删)。
+import MoonEgg from './easteregg/moon/MoonEgg.vue'
 import { useChatStore } from './stores/chat'
+import { useSettingsStore } from './stores/settings'
 import { useMobile } from './composables/useMobile'
 import {
   chatGeometryKey,
@@ -26,124 +41,331 @@ import {
 } from './constants/chatGeometry'
 import { MATERIALS } from './constants/materials'
 import { useDebugMode } from './composables/useDebugMode'
-import { useSettingsStore } from './stores/settings'
-import {
-  NOTICE_TITLE,
-  NOTICE_CONTENT,
-  NOTICE_CONTENT_URL,
-  NOTICE_CONTENT_HASH_KEY,
-  NOTICE_VERSION,
-  NOTICE_VERSION_KEY,
-} from './constants/notice'
-
+import { usePopups } from './composables/usePopups'
+import { flushPendingWrites } from './composables/useChatPersistence'
+import { isLegacyDemoGroupShell } from './utils/groupMeta'
+import { deleteBarH } from './composables/useDeleteBar'
+import { devInfo, devWarn } from './utils/logger'
 const chatStore = useChatStore()
 const settingsStore = useSettingsStore()
+
+// ---- 创建群聊弹窗(第三版群聊,纯 UI) --------------------------------------
+/** 弹窗是否展开 */
+const groupDialogOpen = ref(false)
+
+/** 群聊设置弹窗:打开时记录目标群聊在 cards 中的下标(null = 关闭) */
+const groupSettingsIndex = ref<number | null>(null)
+
+/** 点击群聊卡右上角「⋯」→ 打开群聊设置 */
+function onOpenGroupSettings(cardIndex: number): void {
+  groupSettingsIndex.value = cardIndex
+}
+
+/**
+ * 弹窗确认创建
+ *
+ * 只做前端建卡:往 store 的 cards 里插入一张群聊主卡并选中,
+ * 建群后自动切到群聊列表。
+ */
+function onCreateGroup(members: string[], myRole: string, speakMode: GroupSpeakMode) {
+  chatStore.createGroupCard(members, myRole, undefined, speakMode)
+}
+
+// ---- 群聊演示数据回收(历史遗留清理) ----------------------------------------
+// 早期为确认 UI 曾播种过三个假群,现已废弃(不再播种)。
+//
+// 但老版本的白名单净化会把卡片级字段(members 等)丢掉,这些残留数据在库中
+// 已经退化成"群聊名 + 单聊壳",所以按标题精确匹配清理一次。
+// 标题清单与"空壳"判定统一放在 utils/groupMeta:那边新增的群聊识别要用同一份,
+// 否则被识别回来的演示群空壳会绕过这里的清理。
+
+/**
+ * 清理历史遗留的演示群
+ *
+ * 只删「没有 members(已退化)+ 首个子对话名恰好等于演示标题」的卡片;
+ * 玩家自己建的群都带 members,且名字不会与演示标题重合,不会被误删。
+ */
+function purgeLegacyDemoGroups(): void {
+  const kept = chatStore.cards.filter((c) => !isLegacyDemoGroupShell(c))
+  if (kept.length === chatStore.cards.length) return
+  chatStore.replaceAllCards(kept)
+  devInfo('[群聊] 已清理历史遗留演示群,剩余卡片', kept.length)
+}
 
 // 调试浮层(非调试模式下为空操作)
 useDebugMode()
 
-// ---- 首次公告弹窗:每次打开弹出,直到点"不再提醒";正文来自网络公告源 ---------
-/** 公告弹窗标题(网络 JSON 的 title;缺省用内置常量) */
-const noticeTitle = ref('')
+// ---- 弹窗(公告 / 提醒 / 更新) ---------------------------------------------
+// 数据来自服务端单一 JSON(https://notice.peilika.beer/popup.json,见 constants/popups):
+// 公告(title/content)/ 提醒(alerts)/ 更新(version + downloads)三合一。
+// 三类弹窗按「公告 → 提醒 → 更新」排队,同一时刻只渲染一个。
+//
+// ⚠️ 公告开关与组件必须成对:enableNotice: true 时队首可能是 'notice',
+//    必须同时渲染 <NoticeDialog>(见下方模板)—— 否则这个队首没有任何组件
+//    能关掉它,排在后面的提醒 / 更新会被永久堵住,一次都弹不出来。
+// forceUpdate: false —— 更新弹窗仅在客户端(Windows / 安卓)弹出,网页端不弹。
+//
+// enableAlert: true —— 「提醒」弹窗(服务端 popup.json 的 alerts)已恢复启用。
+//    它是队列的一环(公告 → 提醒 → 更新):数据里还有未确认的提醒就先弹提醒。
+//    ⚠️ 若只想临时关掉它,必须在这里关(usePopups 的 enableAlert: false),
+//       而不是仅在模板里不渲染 AlertDialog —— 否则 'alert' 会占住队首,
+//       把后面的更新弹窗永久堵死(与之前的公告 bug 同一类)。
+const {
+  noticeTitle,
+  noticeContent,
+  alerts,
+  latestVersion,
+  platform,
+  activePopup,
+  loadPopupData,
+  onNoticeConfirm,
+  onNoticeDismiss,
+  confirmAlerts,
+  ignoreUpdate,
+  downloadUrl,
+} = usePopups({ enableNotice: true, enableAlert: true, forceUpdate: false })
 
-/** 公告弹窗正文(App 启动时从网络公告源读取;失败回退内置常量) */
-const noticeContent = ref('')
+// ---- 弹窗类型 ---------------------------------------------------------------
+// 测试版已转为公测,原先的「管理员密码门禁」已于 2026-09-25 整体移除。
+// 现在直接按队列依次出现:公告 → 提醒 → 更新,同一时刻只有一个。
+const popupKind = computed(() => activePopup.value)
 
-/** 公告弹窗是否显示(未选择"不再提醒"时每次启动显示) */
-const noticeOpen = ref(false)
+// ---- 首次使用偏好弹窗(动作 / 神态描写的显示样式) --------------------------
+/**
+ * 一次性标记的 localStorage key
+ *
+ * 刻意**不进设置快照**(不是设置项,不进导出包):它的语义是"这条询问已经问过",
+ * 换设备 / 重装后再问一次是合理行为。
+ */
+const STYLE_PREF_ASKED_KEY = 'endfield-baker-settings-style-pref-asked'
 
-/** 简单内容哈希(判断公告内容是否变化,重置"不再提醒"用) */
-function hashNoticeText(text: string): string {
-  let h = 5381
-  for (let i = 0; i < text.length; i++) {
-    h = ((h << 5) + h + text.charCodeAt(i)) >>> 0
+function readStylePrefAsked(): boolean {
+  try {
+    return localStorage.getItem(STYLE_PREF_ASKED_KEY) === '1'
+  } catch {
+    return false
   }
-  return h.toString(36)
+}
+
+/** 是否已经问过(问过就不再弹) */
+const stylePrefAsked = ref(readStylePrefAsked())
+
+/**
+ * 本次会话是否点过「稍后再说」
+ *
+ * 刻意**只在内存里**:点过之后本次会话不再打扰,但刷新 / 重开页面时它归位,
+ * 弹窗照旧会出现 —— 这正是"稍后再说"与三个选项的区别(选项才写一次性标记)。
+ */
+const stylePrefSnoozed = ref(false)
+
+/** 开屏动画是否播完 —— 播完之前不弹,否则会被全屏遮罩盖住 2~3 秒 */
+const splashDone = ref(false)
+
+/**
+ * 是否显示首次使用偏好弹窗
+ *
+ * 四个条件同时满足才弹:
+ *   1. 还没问过(一次性)
+ *   2. 本次会话没点过「稍后再说」
+ *   3. 开屏动画已结束
+ *   4. 公告 / 提醒 / 更新队列当前为空 —— 这个弹窗**不插队**,避免两个弹窗叠在一起
+ */
+const stylePrefOpen = computed(
+  () =>
+    !stylePrefAsked.value &&
+    !stylePrefSnoozed.value &&
+    splashDone.value &&
+    popupKind.value === null,
+)
+
+/**
+ * 应用首次使用偏好
+ *
+ * 全部落到已有开关上(不新增设置项):
+ *   none  → 第一步选了「不开启动作/神态描写」:打开「沉浸式对话模式」,
+ *           让后端不再写括号描写,只留台词;样式开关一个都不动
+ *   color → 开启描写 + 居中 + 彩色
+ *   mono  → 开启描写 + 居中但统一色
+ *   off   → 开启描写,但描写留在气泡里(不居中)
+ *
+ * ⚠️ 后三种都要先把 immersiveMode 关掉:它的默认值是**开**(后端不写括号),
+ *    若只改居中/彩色而不管它,后端压根不会写括号描写,玩家选的样式就永远看不到。
+ * 选完即置一次性标记,并立刻落盘(与其它设置改动同一条持久化路径)。
+ */
+function onStylePreference(mode: 'none' | 'color' | 'mono' | 'off'): void {
+  if (mode === 'none') {
+    settingsStore.immersiveMode = true
+  } else {
+    // 要让后端写括号描写,先关掉「沉浸式对话模式」
+    settingsStore.immersiveMode = false
+    if (mode === 'color') {
+      settingsStore.bracketCenter = true
+      settingsStore.bracketColor = true
+    } else if (mode === 'mono') {
+      settingsStore.bracketCenter = true
+      settingsStore.bracketColor = false
+    } else {
+      settingsStore.bracketCenter = false
+      settingsStore.bracketColor = false
+    }
+  }
+  stylePrefAsked.value = true
+  try {
+    localStorage.setItem(STYLE_PREF_ASKED_KEY, '1')
+  } catch {
+    // 存储不可用:标记只留在内存里,本次会话内不会重复弹
+  }
+  flushPendingWrites()
 }
 
 /**
- * 启动时从网络公告源拉取公告:
- * - 内容支持 JSON({"title","content"})或纯文本;hash 取整段原文,
- *   任何修改(标题/正文/结构)都视为内容变化 → 重置"不再提醒"并重新弹出,
- *   同时记录新 hash 防止反复重置。
- * - 拉取失败(离线等) → 回退内置常量正文,不重置标记。
- * 最后按当前"不再提醒"状态决定本次是否弹出。
+ * 稍后再说:关掉本次,样式自动落到「默认括号样式」
+ *
+ * 两个语义刻意分开:
+ *   - **样式**(居中 / 彩色)按默认值落地:括号描写留在气泡里,与旧版观感一致
+ *   - **是否开启描写**(immersiveMode)不动:那一问玩家没回答,不该替他决定 ——
+ *     它保持当前值(新用户即应用默认),想改随时去设置里拨
+ * 另外**不写一次性标记**:下次进入(刷新 / 重开)照旧会问;本次会话内不再打扰。
  */
-async function loadNotice() {
-  // ---- 硬重置:版本变化时强制重置所有用户的"不再提醒" -------------------------
-  try {
-    const lastVersion = Number(localStorage.getItem(NOTICE_VERSION_KEY) || '0')
-    if (lastVersion !== NOTICE_VERSION) {
-      settingsStore.noticeDismissed = false
-      localStorage.setItem(NOTICE_VERSION_KEY, String(NOTICE_VERSION))
-    }
-  } catch {}
+function onStylePreferenceLater(): void {
+  settingsStore.bracketCenter = false
+  settingsStore.bracketColor = false
+  stylePrefSnoozed.value = true
+  flushPendingWrites()
+}
 
-  if (!NOTICE_CONTENT_URL) {
-    // 无远程源:用内置常量拼接的完整文本做 hash,内容变化时重置"不再提醒"
-    const localText = `${NOTICE_TITLE}\n${NOTICE_CONTENT}`
-    const hash = hashNoticeText(localText)
-    const lastHash = localStorage.getItem(NOTICE_CONTENT_HASH_KEY)
-    if (lastHash !== hash) {
-      settingsStore.noticeDismissed = false
-      try {
-        localStorage.setItem(NOTICE_CONTENT_HASH_KEY, hash)
-      } catch {}
-    }
-    noticeOpen.value = !settingsStore.noticeDismissed
-    return
-  }
+// ---- 退出确认(三端统一) ---------------------------------------------------
+// 电脑版:Electron 主进程拦截窗口关闭后发来 flush-request
+// 手机版:系统返回键(Capacitor WebView 会触发 popstate)
+// 网页版:浏览器后退(同样走 popstate)
+// 玩家点「保存并退出」才真正退出;点「取消」则留在应用内。
+const exitOpen = ref(false)
+
+/**
+ * 是否已真正退出(用于网页端)
+ *
+ * 浏览器安全策略不允许脚本关闭"不是由脚本打开"的标签页,window.close() 会
+ * 静默失败 —— 用户点完「保存并退出」后仍停在应用里,观感就是"没退出"。
+ * 因此网页端补一个明确的退出态:界面整体收起,只留一块"可以关闭此页面"的提示。
+ * 打包端(EXE/APK)走原生退出,通常看不到这一屏。
+ */
+const exited = ref(false)
+
+/** 确认退出时执行的动作 */
+let exitCommit: (() => void) | null = null
+/** 取消退出时执行的动作 */
+let exitRevert: (() => void) | null = null
+
+/** 请求退出:先弹出确认框 */
+function requestExit(onCommit: () => void, onRevert?: () => void) {
+  exitCommit = onCommit
+  exitRevert = onRevert ?? null
+  exitOpen.value = true
+}
+
+/** 保存并退出:停留片刻展示「正在保存」动画,再执行真正退出 */
+function onExitSave() {
+  window.setTimeout(() => {
+    exitOpen.value = false
+    const commit = exitCommit
+    exitCommit = null
+    exitRevert = null
+    commit?.()
+  }, 1200)
+}
+
+/** 取消:留在应用内 */
+function onExitCancel() {
+  exitOpen.value = false
+  const revert = exitRevert
+  exitCommit = null
+  exitRevert = null
+  revert?.()
+}
+
+/** Electron 桥(由 preload 注入;网页端/手机端为 undefined) */
+type NativeBridge = { flushDone?: () => void; cancelClose?: () => void }
+function nativeBridge(): NativeBridge | undefined {
+  return (window as unknown as { nativeStorage?: NativeBridge }).nativeStorage
+}
+
+/**
+ * 电脑版:主进程在关闭窗口前发来 flush-request
+ *
+ * 此处不立即冲刷,而是先弹出退出确认框;玩家点「保存并退出」后才
+ * 冲刷持久化并通知主进程关闭 —— 否则要等主进程的兜底超时才退出,
+ * 表现为"点了关闭后卡几秒才关掉"。
+ */
+const onFlushRequest = () => {
+  requestExit(
+    () => {
+      flushPendingWrites()
+      nativeBridge()?.flushDone?.()
+    },
+    () => {
+      // 取消关闭:通知主进程复位,下次关闭仍会拦截
+      nativeBridge()?.cancelClose?.()
+    },
+  )
+}
+
+/**
+ * 是否已进入"真正退出"流程
+ *
+ * history.go(-n) 本身会再派发一次 popstate。若不屏蔽,拦截器会又压一层栈、
+ * 又弹一次确认框 —— 就是"点保存并退出、转完圈又弹同一个窗口、人还留在页面"。
+ */
+let exiting = false
+
+/**
+ * 确认退出时需要回退的历史层数
+ *
+ *   1 层 = 应用自身所在的条目
+ *   1 层 = 我们为拦截返回而压入的守卫层
+ *
+ * 守卫层在每次回退时都是"先被退掉、再重新压入"(同一 URL 的 pushState 会
+ * 截断前进历史),所以栈里**始终只有一层守卫** —— 这个数字固定为 2,
+ * 绝不能随用户按了几次返回而累加,否则会一次退到站外。
+ */
+const EXIT_HISTORY_STEPS = 2
+
+/** 尽力告知原生层退出(APK 走 Capacitor 的 App 插件;网页端无此能力) */
+function tryNativeExit(): void {
   try {
-    const res = await fetch(NOTICE_CONTENT_URL, { cache: 'no-store' })
-    if (res.ok) {
-      const text = (await res.text()).trim()
-      if (text) {
-        // JSON 形态:{"title":?, "content":?};非 JSON 视为纯文本正文
-        try {
-          const parsed = JSON.parse(text)
-          if (parsed && typeof parsed === 'object') {
-            if (typeof parsed.content === 'string' && parsed.content.trim()) {
-              noticeContent.value = parsed.content.trim()
-              noticeTitle.value = typeof parsed.title === 'string' && parsed.title.trim()
-                ? parsed.title.trim()
-                : ''
-            } else {
-              noticeContent.value = text
-            }
-          } else {
-            noticeContent.value = text
-          }
-        } catch {
-          noticeContent.value = text
-        }
-        const hash = hashNoticeText(text)
-        const lastHash = localStorage.getItem(NOTICE_CONTENT_HASH_KEY)
-        if (lastHash !== hash) {
-          // 公告内容已更新:重置"不再提醒",让用户看到新公告
-          settingsStore.noticeDismissed = false
-          try {
-            localStorage.setItem(NOTICE_CONTENT_HASH_KEY, hash)
-          } catch {
-            // 存储不可用:静默,下次启动会再次检测
-          }
-        }
-      }
-    }
+    const cap = (window as unknown as {
+      Capacitor?: { Plugins?: { App?: { exitApp?: () => void } } }
+    }).Capacitor
+    cap?.Plugins?.App?.exitApp?.()
   } catch {
-    // fetch 失败(本地文件变体等):正文回退内置常量,状态不重置
+    // 非 Capacitor 环境,忽略
   }
-  noticeOpen.value = !settingsStore.noticeDismissed
 }
 
-/** 确认:仅关闭本次,下次仍弹 */
-function onNoticeConfirm() {
-  noticeOpen.value = false
-}
+/** 手机版返回键 / 网页版后退:同样先弹确认框 */
+const onPopState = () => {
+  // 这是我们自己 history.go() 触发的回退,不是用户按的返回键:直接忽略
+  if (exiting) return
 
-/** 不再提醒:写入持久化(data.json + localStorage),此后不再弹出 */
-function onNoticeDismiss() {
-  settingsStore.noticeDismissed = true
-  noticeOpen.value = false
+  // 重新压栈,保证下次返回仍能被拦截
+  history.pushState(null, '', location.href)
+  requestExit(() => {
+    exiting = true
+    // 网页端:先切到明确的退出态,保证用户一定看得到"已退出"
+    exited.value = true
+    // 退掉守卫层 + 应用自身条目,回到用户原本所在的上一页
+    history.go(-EXIT_HISTORY_STEPS)
+    // 网页端再尽力关一次窗口(脚本打开的标签页 / 部分 WebView 会生效)。
+    // 浏览器安全策略不允许关闭非脚本打开的窗口,那种情况下人只能留在页面,
+    // 但至少不会再重复弹确认框。
+    window.setTimeout(() => {
+      try {
+        window.close()
+      } catch {
+        // 忽略
+      }
+      tryNativeExit()
+    }, 0)
+  })
 }
 
 // 自定义页面背景(带 localStorage 持久化:刷新保留、不随 .baker 导出、
@@ -153,14 +375,37 @@ function onNoticeDismiss() {
 // ≤768px 视口进入移动端模式:
 //   list 视图 = 对话列表全屏;选中对话后切 chat 视图 = 全屏聊天窗口。
 // 移动端聊天窗口是独立自适应组件(MobileChat),不复用 1920 设计稿画布。
-const { isMobile, width, height } = useMobile()
+const { isMobile, width, height, keyboardOffsetTop, keyboardInset, chatViewportHeight } =
+  useMobile()
+
+/**
+ * 移动端聊天容器的定位
+ *
+ * 浏览器(尤其 iOS)在软键盘弹出时会把可视视口整体向下平移,而 position:fixed
+ * 是相对**布局视口**定位的 —— 于是整个界面被顶到屏幕外,只剩一大片背景。
+ * 这里把容器直接钉在可视视口上:top = 可视视口偏移,height = 可视视口高度,
+ * 浏览器怎么平移都严丝合缝,输入面板自然落在键盘正上方。
+ * 键盘未弹出时 offsetTop 恒为 0、高度等于视口高度,与原布局完全一致。
+ */
+const mChatStyle = computed(() => ({
+  top: keyboardOffsetTop.value + 'px',
+  height: chatViewportHeight.value + 'px',
+}))
 
 /** 移动端视图:list=对话列表 / chat=聊天窗口 */
 const mobileView = ref<'list' | 'chat'>('list')
 
 /** 移动端列表画布设计尺寸(与 CharacterCardList 一致) */
 const MOBILE_LIST_W = 526
-const MOBILE_LIST_H = 897.27
+/**
+ * 移动端列表画布总高度
+ *
+ * = CharacterCardList 里两张卡的底边:模式切换宿主(62+40=102)与
+ * 列表容器(.character-card 顶部 122.57 + 高 897.27 = 1019.84)。
+ * 早期误写成 897.27(只等于列表容器自身高度),导致缩放系数偏大约 13.7%,
+ * 页面下方内容被切掉一截。
+ */
+const MOBILE_LIST_H = 1019.84
 /** 移动端列表页顶部预留(px,视口坐标):避开 fixed 工具栏,容纳 HeaderTop 标题 */
 const MOBILE_LIST_TOP_PAD = 40
 /**
@@ -193,7 +438,7 @@ watch(
   },
 )
 
-// 移动端双击子对话进入聊天视图(由 SubCard 双击触发;桌面端不生效)
+// 移动端单击子对话 / 群聊卡进入聊天视图(由列表卡触发;桌面端内部判 isMobile,不生效)
 provide('enterMobileChat', () => {
   if (isMobile.value) mobileView.value = 'chat'
 })
@@ -227,14 +472,30 @@ function scheduleChatHeal(focusDelay: boolean) {
   }, delay)
 }
 
+/**
+ * 软键盘当前是否顶着可视视口
+ *
+ * iOS 上 window.innerHeight 在键盘弹出时**不变**,原先那条
+ * `innerHeight < height - 30` 的守卫在 iOS 上永远不成立 —— 自愈检测会在
+ * 键盘展开、布局正在过渡的过程中照常执行,一旦误判就会强制重挂载聊天区
+ * (销毁输入框 → 键盘收起),正是"键盘一弹就乱"的帮凶之一。
+ */
+function isKeyboardOpen(): boolean {
+  if (keyboardInset.value > 0) return true
+  const vv = window.visualViewport
+  if (!vv) return window.innerHeight < height.value - 30
+  return vv.height < window.innerHeight - 80
+}
+
 function checkChatVisible() {
-  // 键盘压缩中:innerHeight 明显小于几何高度 → 键盘还开着,跳过检测
-  if (window.innerHeight < height.value - 30) return
+  // 键盘展开中:布局本来就在过渡,跳过检测(避免误判重挂载)
+  if (isKeyboardOpen()) return
   requestAnimationFrame(() => {
     const el = document.querySelector('.m-chat .chat-scroll') as HTMLElement | null
     if (!el) return
     const r = el.getBoundingClientRect()
     const vw = window.innerWidth
+    // getBoundingClientRect 给的是布局视口坐标,所以比较基准也要用布局视口高度
     const vh = window.innerHeight
     const visible =
       r.width > 50 &&
@@ -246,7 +507,7 @@ function checkChatVisible() {
     if (!visible) {
       // 连续误判保护:同一次键盘会话最多自愈 3 次
       if (healCount >= 3) {
-        console.warn('[App] 聊天区不可见且自愈已达上限,停止尝试', {
+        devWarn('[App] 聊天区不可见且自愈已达上限,停止尝试', {
           rect: { l: r.left, t: r.top, w: r.width, h: r.height },
           vw,
           vh,
@@ -254,7 +515,7 @@ function checkChatVisible() {
         return
       }
       healCount++
-      console.warn('[App] 检测到聊天区不可见,强制重挂载自愈', {
+      devWarn('[App] 检测到聊天区不可见,强制重挂载自愈', {
         rect: { l: r.left, t: r.top, w: r.width, h: r.height },
         vw,
         vh,
@@ -271,8 +532,21 @@ function checkChatVisible() {
   })
 }
 
+/**
+ * 是否是 WebKit(iOS Safari / 所有 iOS 浏览器 / 桌面 Safari)
+ *
+ * 自愈重挂载针对的是 Chromium(Edge/夸克)合成层残留 bug,WebKit 上没有这个问题,
+ * 反而会因为"销毁输入框 → 键盘收起 → 再聚焦"造成键盘闪烁。iOS 上直接关掉。
+ */
+const isWebKit = (() => {
+  if (typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent
+  return /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg\//.test(ua)
+})()
+
 /** 键盘/视口变化监听(自愈触发源):输入聚焦/失焦 + visualViewport 变化 */
 function onHealSignal(event?: Event) {
+  if (isWebKit) return
   const type = event?.type
   // 记录输入框焦点状态(重挂载后恢复用)
   const t = event?.target as Node | null
@@ -296,63 +570,132 @@ function onMobileBack() {
 const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
 const mobileGeom = computed<ChatGeometry>(() => toValue(injectedGeom))
 
-/** 返回按钮(51px 圆形)在头部内的垂直居中偏移(+1px 视觉微调) */
+/** 返回按钮(36px 圆形)在头部内的垂直居中偏移(+1px 视觉微调) */
 const mBackTop = computed(() =>
-  mobileGeom.value.stripSegmented ? (mobileGeom.value.stripH - 51) / 2 + 1 : 6,
+  mobileGeom.value.stripSegmented ? (mobileGeom.value.stripH - 38) / 2 + 1 : 6,
 )
 
-/**
- * 右上角工具栏是否可见(E 键切换)
- *
- * 仅会话内生效,不持久化,刷新页面即恢复可见。
- */
-const showToolbar = ref(true)
 
-/** 是否应忽略该键盘事件(输入框 / textarea / contenteditable 内按 E 不切换) */
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
-  const tag = target.tagName
-  return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable
-}
-
-/** E 键切换工具栏显隐 */
-function onToolbarToggleKeydown(event: KeyboardEvent) {
-  if (event.key.toLowerCase() !== 'e') return
-  if (event.ctrlKey || event.metaKey || event.altKey) return
-  if (isEditableTarget(event.target)) return
-  showToolbar.value = !showToolbar.value
-}
 
 onMounted(() => {
-  document.addEventListener('keydown', onToolbarToggleKeydown)
   // 聊天区可见性自愈监听:输入聚焦/失焦(键盘弹出/收起) + visualViewport 变化
   document.addEventListener('focusin', onHealSignal)
   document.addEventListener('focusout', onHealSignal)
   window.visualViewport?.addEventListener('resize', onHealSignal)
   window.visualViewport?.addEventListener('scroll', onHealSignal)
-  // 公告弹窗:启动时拉取外部 TXT 正文并检测内容变化(重置"不再提醒")
-  void loadNotice()
+  // 弹窗数据:启动时拉取测试专用 JSON(公告 / 提醒 / 最新版本)
+  void loadPopupData()
+
+  // 群聊:清理历史遗留的演示群(不再播种任何假数据)
+  purgeLegacyDemoGroups()
+
+  // ---- 退出确认:三端监听 ----
+  // 处理函数定义在 setup 顶层(见上方 onFlushRequest / onPopState),
+  // 这样 onBeforeUnmount 才能取到同一引用并正确移除。
+  window.addEventListener('dsh-flush-request', onFlushRequest)
+  // 手机版返回键 / 网页版后退:先压入一条历史记录,
+  // 使返回动作触发 popstate 而不是直接离开页面。
+  history.pushState(null, '', location.href)
+  window.addEventListener('popstate', onPopState)
 })
 onBeforeUnmount(() => {
-  document.removeEventListener('keydown', onToolbarToggleKeydown)
   document.removeEventListener('focusin', onHealSignal)
   document.removeEventListener('focusout', onHealSignal)
   window.visualViewport?.removeEventListener('resize', onHealSignal)
   window.visualViewport?.removeEventListener('scroll', onHealSignal)
+  window.removeEventListener('dsh-flush-request', onFlushRequest)
+  window.removeEventListener('popstate', onPopState)
   if (healTimer !== null) clearTimeout(healTimer)
 })
 
-/** 删除确认弹窗是否展开(删除按钮 toggle) */
-const confirmOpen = ref(false)
+/**
+ * 删除模式:由操作带上的删除按钮 toggle
+ *
+ * 状态与勾选都在 chat store 里(deleteMode / deleteSelection),因为列表项
+ * (要不要画勾选黄条)与底部条(已选数量、删什么)都要读它。
+ * 旧版那种"点删除弹菜单、再二次确认"的弹窗已删除。
+ */
+function onToggleDeleteMode(): void {
+  chatStore.toggleDeleteMode()
+}
 
-/** 导出聊天截图弹窗是否展开(分享按钮 toggle) */
+/**
+ * 删除模式下移动端列表的尾部留白(px,画布设计口径)
+ *
+ * 底部条是 fixed 浮层,会盖住列表最后一张卡。移动端列表是满屏滚动的,
+ * 所以在删除模式下把尾部留白加到"条高 + 一点间隙"(按当前画布缩放换算回设计值),
+ * 内容就能滚到条上方;桌面端列表在左侧、与居中的底部条不重叠,保持原留白。
+ */
+const listBottomPad = computed(() => {
+  const BASE = 80 // 与 .card-pad 的默认高度一致
+  if (!chatStore.deleteMode || !isMobile.value) return BASE
+  const zoom = Math.max(mobileListZoom.value, 0.01)
+  return Math.max(BASE, Math.ceil((deleteBarH.value + 24) / zoom))
+})
+
+/** 导出聊天截图弹窗是否展开(选中消息模式底部条的两个出口) */
 const shareOpen = ref(false)
+
+/**
+ * 导出弹窗这次要导出的消息子集
+ *
+ * undefined = 全量导出(「导出全部消息」那条路);有值 = 只导出这些消息
+ * (「导出选中消息」那条路)。两条路走的是完全同一套截图实现。
+ */
+const exportMessages = ref<ChatMessage[] | undefined>(undefined)
+
+/** 选中消息模式的「导出选中消息」:把选中的子集交给同一个导出弹窗 */
+function onExportSelectedMessages(): void {
+  const msgs = chatStore.selectedMessages
+  if (msgs.length === 0) return
+  exportMessages.value = msgs
+  chatStore.exitMsgSelect()
+  shareOpen.value = true
+}
+
+/**
+ * 选中消息模式的「导出全部消息」:不传子集 = 整段对话全量导出
+ *
+ * 与原来设置菜单里的「分享」是同一条路(同一套离屏截图实现、同一个文件名),
+ * 只是入口挪到了这里 —— 顺手把选中模式收掉,弹窗就是这次导出的全部状态。
+ */
+function onExportAllMessages(): void {
+  exportMessages.value = undefined
+  chatStore.exitMsgSelect()
+  shareOpen.value = true
+}
+
+/** 导出弹窗关闭:子集一并清掉,下次打开不会沿用上一次的选择 */
+function onCloseExport(): void {
+  shareOpen.value = false
+  exportMessages.value = undefined
+}
 
 /** 设置弹窗是否展开(API 配置 + 提示词编辑 + 数据管理 + 背景) */
 const settingsOpen = ref(false)
 
-/** "请先选中角色卡片"提示弹窗(新建对话时未选中任何角色触发) */
-const needSelectOpen = ref(false)
+/**
+ * Token 用量 / 缓存命中面板是否展开(操作带上的用量按钮 toggle)
+ *
+ * 非模态浮层:开着它照样能聊天,方便边发边看命中率变化。
+ * 入口按钮只在自定义 API 模式渲染(见 CharacterCardList)。
+ */
+const usageOpen = ref(false)
+
+/** 通用提示弹窗(新建对话未选角色 / 群聊流程控制条提示等共用) */
+const hintText = ref('')
+/** 当前是否有提示在显示 */
+const hintOpen = computed(() => hintText.value !== '')
+
+/** 弹一条提示 */
+function showHint(text: string): void {
+  hintText.value = text
+}
+
+/** 关闭提示 */
+function closeHint(): void {
+  hintText.value = ''
+}
 
 /**
  * 聊天按钮(chat09)行为:
@@ -360,24 +703,55 @@ const needSelectOpen = ref(false)
  *   → 在选中主卡下追加子会话(无需进入子对话)
  * - 未选中任何角色 → 弹出"请先选中角色"提示
  */
-function onChatNew() {
-  if (chatStore.activeCardIndex === null) {
-    needSelectOpen.value = true
+/**
+ * 列表上方操作带的加号
+ *
+ * 群聊模式下语义是"创建群聊",单聊模式下是"新建对话" —— 由 App 统一分发,
+ * CharacterCardList / ChatModeSwitch 都不参与判断。
+ */
+function onAdd() {
+  if (chatStore.chatMode === 'group') {
+    groupDialogOpen.value = true
     return
   }
-  chatStore.createChildConversation()
+  onChatNew()
+}
+
+function onChatNew() {
+  if (chatStore.activeCardIndex === null) {
+    showHint('请先选中角色卡片')
+    return
+  }
+  // 群聊主卡不支持再建子会话:建出来只会是一个空占位。
+  // 这里直接给出提示,store 侧同样会拒绝,双保险。
+  if (!chatStore.createChildConversation()) {
+    showHint(chatStore.activeIsGroup ? '群聊里不能再新建对话' : '请先选中角色卡片')
+  }
 }
 </script>
 
 <template>
+  <!-- ============ 已退出(网页端):界面整体收起,只留提示 ============
+       浏览器不允许脚本关闭非脚本打开的标签页,这是能做到的、明确的"退出"表现 -->
+  <div v-if="exited" class="exit-done">
+    <p class="exit-done__title">已保存并退出</p>
+    <p class="exit-done__sub">当前进度已写入本地，可以关闭此页面了</p>
+  </div>
+
   <AppBackground />
 
   <!-- ==================== 桌面端(>768px):1920 设计稿等比画布 ==================== -->
   <template v-if="!isMobile">
     <DesignCanvas>
       <HeaderTop />
-      <CharacterCardList />
-      <ChatArea @open-settings="settingsOpen = true" />
+      <CharacterCardList
+        @add="onAdd"
+        @group-settings="onOpenGroupSettings"
+        @open-settings="settingsOpen = true"
+        @open-delete="onToggleDeleteMode"
+        @open-usage="usageOpen = !usageOpen"
+      />
+      <ChatArea @open-settings="settingsOpen = true" @hint="showHint" />
     </DesignCanvas>
   </template>
 
@@ -398,14 +772,21 @@ function onChatNew() {
           }"
         >
           <HeaderTop />
-          <CharacterCardList />
+          <CharacterCardList
+            :bottom-pad="listBottomPad"
+            @add="onAdd"
+            @group-settings="onOpenGroupSettings"
+            @open-settings="settingsOpen = true"
+            @open-delete="onToggleDeleteMode"
+            @open-usage="usageOpen = !usageOpen"
+          />
         </div>
       </div>
     </div>
     <!-- 聊天视图:直接复用桌面端 ChatArea 组件与样式。
          布局由几何层(chatGeometry)按视口驱动;输入面板贴底。
          fixed + 合成层 + 自愈,移动端输入框为原生 textarea -->
-    <div v-else class="m-chat">
+    <div v-else class="m-chat" :style="mChatStyle">
       <!-- 返回列表按钮:白色圆形 SVG,位于头部右侧垂直居中 -->
       <button
         class="m-chat__back"
@@ -438,89 +819,123 @@ function onChatNew() {
         </svg>
       </button>
       <!-- 自愈重挂载:chatEpoch 变化时强制重建 ChatArea(修复 Chromium 键盘合成残留) -->
-      <ChatArea :key="chatEpoch" @open-settings="settingsOpen = true" />
+      <ChatArea
+        :key="chatEpoch"
+        @open-settings="settingsOpen = true"
+        @hint="showHint"
+      />
     </div>
   </template>
 
-  <!-- 右上角工具栏(E 键整体隐藏/显示,刷新恢复可见)。
-       移动端:仅列表视图显示(聊天视图由 MobileChat 顶栏提供设置入口) -->
-  <div v-show="showToolbar && (!isMobile || mobileView === 'list')">
-  <!-- 新建对话按钮:右上角起始位;选中子对话时在选中父级卡片下追加子会话(无论是否展开);
-       未选中任何对话时弹出"请先选中会话"提示 -->
-  <button
-    class="edit-toggle edit-toggle--chat09"
-    type="button"
-    @click="onChatNew"
-  >
-    <img :src="MATERIALS.editBtnChat09" alt="聊天" />
-  </button>
-  <!-- 角色名称开关按钮(已注释停用):位于 chat09(建会话)与背景(自定义背景)之间;
-       点击切换"每条带头像的气泡上方是否显示小号灰字角色名"(localStorage 持久化)。
-       角色名称显示功能整体停用,按钮一并注释保留,便于日后恢复。 -->
-  <!-- <button
-    class="edit-toggle edit-toggle--character"
-    :class="{ 'edit-toggle--active': chatStore.showCharacterNames }"
-    type="button"
-    :aria-pressed="chatStore.showCharacterNames"
-    @click="chatStore.toggleShowCharacterNames()"
-  >
-  </button> -->
-  <!-- 背景自定义按钮与数据管理按钮已移除:功能并入设置弹窗("背景"/"数据管理"标签页) -->
-  <!-- 删除对话按钮:与 chat09 按钮同列(正下方),始终可见;点击弹出确认弹窗 -->
-  <button
-    class="edit-toggle edit-toggle--delete"
-    type="button"
-    @click="confirmOpen = !confirmOpen"
-  >
-    <img :src="MATERIALS.editBtnDeleteIndeed" alt="删除对话" />
-  </button>
 
-  <!-- 右侧操作按钮:横向等距排列,始终可见。
-       分享 → 打开导出聊天截图弹窗 -->
-  <button class="edit-toggle edit-toggle--share" type="button" @click="shareOpen = true">
-    <img :src="MATERIALS.editBtnShare" alt="分享" />
-  </button>
-  <!-- 设置按钮:位于按钮列最左侧(share 左侧),login_btn_setting 图标;
-       点击打开 API 配置 + 提示词编辑 + 数据管理 + 背景 + 关于 弹窗 -->
-  <button
-    class="edit-toggle edit-toggle--settings"
-    type="button"
-    @click="settingsOpen = true"
-  >
-    <img :src="MATERIALS.loginBtnSetting" alt="设置" />
-  </button>
-  </div>
+  <!-- 删除模式的底部条:多选后在这里选"删什么"(对话 / 历史 / 上下文)并执行。
+       仅删除模式下挂载(它挂载时会把自己的高度上报给列表,用于留出尾部空档)。 -->
+  <DeleteModeBar v-if="chatStore.deleteMode" />
 
-  <!-- 删除对话确认弹窗:fixed 视口定位,1920 原始尺寸不缩放 -->
-  <DeleteConfirmDialog :open="confirmOpen" @close="confirmOpen = false" />
-  <!-- 导出聊天截图弹窗:分享按钮触发(右侧工具栏显示) -->
+  <!-- 选中消息模式的底部条:勾选若干条消息 → 导出为一张长图 -->
+  <MessageSelectBar
+    v-if="chatStore.msgSelectMode"
+    @export="onExportSelectedMessages"
+    @export-all="onExportAllMessages"
+  />
+
+  <!-- 群聊「继续对话」浮条:角色们每聊满 20 条浮出一次,不点则再聊一轮就自动暂停。
+       与上面那条导出条同一类"贴窗口底的浮条"(同位置、同层级、同材质),
+       所以同样挂在根层 —— 不进缩放过的设计画布,像素观感才一致。 -->
+  <GroupContinueNudge />
+  <!-- 导出聊天截图弹窗(右侧工具栏的分享入口 + 选中消息底部条的两个出口共用);
+        全量与子集只差 messages 一个入参,截图实现同一套 -->
   <ChatExportDialog
     :open="shareOpen"
     :conversation-title="chatStore.counterpartName"
-    @close="shareOpen = false"
+    :messages="exportMessages"
+    @close="onCloseExport"
   />
-  <!-- "请先选中会话"提示弹窗:新建对话时未选中任何对话触发 -->
+  <!-- 通用提示弹窗(新建对话未选角色 / 群聊流程控制条提示等) -->
   <Transition name="ns">
-    <div v-if="needSelectOpen" class="ns" @click.self="needSelectOpen = false">
+    <div v-if="hintOpen" class="ns" @click.self="closeHint">
       <div class="ns__panel">
-        <p class="ns__text">请先选中角色卡片</p>
-        <button class="ns__btn" type="button" @click="needSelectOpen = false">确定</button>
+        <p class="ns__text">{{ hintText }}</p>
+        <button class="ns__btn" type="button" @click="closeHint">确定</button>
       </div>
     </div>
   </Transition>
   <!-- 设置弹窗:API 配置 + 系统提示词 + 角色提示词编辑 + 数据管理 + 背景 -->
+  <!-- 创建群聊弹窗(第三版群聊) -->
+  <GroupCreateDialog
+    :open="groupDialogOpen"
+    @close="groupDialogOpen = false"
+    @create="onCreateGroup"
+  />
+  <!-- 群聊设置:「⋯」打开。
+       删除群聊不在这里 —— 那个入口已收敛到操作带的删除按钮(见上方的删除模式) -->
+  <GroupSettingsDialog
+    :open="groupSettingsIndex !== null"
+    :card-index="groupSettingsIndex"
+    @close="groupSettingsIndex = null"
+  />
+
   <SettingsDialog
     :open="settingsOpen"
     @close="settingsOpen = false"
   />
-  <!-- 首次公告弹窗(每次打开弹出,直到点"不再提醒";正文来自网络公告源 notice.peilika.beer) -->
+
+  <!-- Token 用量 / 缓存命中面板:非模态浮层,可拖动,位置持久化。
+       入口在角色列表上方的操作带(仅自定义 API 模式渲染)。 -->
+  <UsagePanel :open="usageOpen" @close="usageOpen = false" />
+
+  <!--
+    弹窗(公告 → 提醒 → 更新):由 popupKind(= usePopups 的 activePopup)决定
+    当前渲染哪一个,同一时刻只有一个;关掉队首后自动出下一个
+    (队列推进见 composables/usePopups)。
+  -->
+  <!-- 公告弹窗(每次启动弹,直到点「不再提醒」;服务端公告正文变化会自动重置该标记) -->
   <NoticeDialog
-    :open="noticeOpen"
-    :content="noticeContent"
+    :open="popupKind === 'notice'"
     :title="noticeTitle"
+    :content="noticeContent"
     @confirm="onNoticeConfirm"
     @dismiss="onNoticeDismiss"
   />
+  <!-- 提醒弹窗(可能多条:同窗内左右滑动查看,点「确定」一次性确认全部)
+       由 usePopups 的 enableAlert 控制当前是否进入队列(现为开启)。 -->
+  <AlertDialog
+    :open="popupKind === 'alert'"
+    :alerts="alerts"
+    @confirm="confirmAlerts"
+  />
+  <!-- 更新弹窗(忽略此版本 / 前往下载;网页端不会进入队列) -->
+  <UpdateDialog
+    :open="popupKind === 'update'"
+    :version="latestVersion"
+    :download-url="downloadUrl()"
+    :platform="platform"
+    @ignore="ignoreUpdate"
+  />
+
+  <!-- 首次使用偏好(动作/神态描写的样式,三选一 + 稍后再说)
+       只在"开屏结束 + 上面三类弹窗都关掉 + 本次更新后还没问过 + 本次会话没点稍后"时出现。 -->
+  <StylePreferenceDialog
+    :open="stylePrefOpen"
+    @choose="onStylePreference"
+    @later="onStylePreferenceLater"
+  />
+
+  <!-- 退出确认弹窗(电脑版关窗 / 手机版返回键 / 网页版后退 均先经此确认) -->
+  <ExitConfirmDialog
+    :open="exitOpen"
+    @save="onExitSave"
+    @cancel="onExitCancel"
+  />
+
+  <!-- 开屏动画(启动时全屏覆盖,2-3 秒后自动淡出,不阻塞数据加载/公告弹窗)。
+       @complete → splashDone:首次使用偏好弹窗等它播完再弹,否则被遮罩盖住。 -->
+  <SplashOverlay @complete="splashDone = true" />
+
+  <!-- ⛔ 临时彩蛋(可删):月亮物理玩具。
+       自己盯开屏遮罩消失后才出场,所以刻意排在 <SplashOverlay /> 之后;
+       删法见 src/easteregg/moon/README.md(连同上面那行 import 一起删)。 -->
+  <MoonEgg />
 </template>
 
 <style scoped lang="scss">
@@ -543,52 +958,6 @@ function onChatNew() {
   }
 }
 
-.edit-toggle {
-  position: fixed;
-  right: 60px;
-  // 整列按钮改到页面顶端,横向等距排布(不再纵向叠在右侧)
-  top: 44px;
-  z-index: 100;
-  padding: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  width: auto;
-  height: auto;
-
-  // 新建对话按钮:位于按钮列最右端
-  &--chat09 {
-    right: 60px;
-  }
-
-  // 背景自定义按钮:位于 chat09 按钮左侧(同排横向等距,75px)
-  // 删除对话按钮:与 chat09 同排横向等距(间距 75px)
-  &--delete {
-    right: 135px;
-  }
-
-  // 分享按钮(导出聊天截图):横向等距排列
-  &--share {
-    right: 210px;
-  }
-
-  // 设置按钮:位于按钮列最左侧(share 左侧,同排横向等距)
-  &--settings {
-    right: 285px;
-  }
-
-  img {
-    display: block;
-    width: 25px;
-    height: auto;
-    opacity: 0.5;
-  }
-
-  // 唯一特效:hover 时图标染为 #999898 灰色
-  &:hover img {
-    filter: $icon-hover-gray-filter;
-  }
-}
 
 // ---- 移动端列表视图 --------------------------------------------------------
 // 对话列表(526×897 设计稿)等比缩放铺满手机视口;列表自身可滚动。
@@ -605,12 +974,19 @@ function onChatNew() {
     display: flex;
     align-items: flex-start;
     justify-content: center;
-    padding-top: 40px;
+    // 顶部预留 fixed 工具栏空间；刘海/挖孔屏再补上安全区，
+    // 避免列表标题被状态栏或摄像头区域遮住。
+    // --safe-top 默认 0px（见 styles/_base.scss），普通设备布局零变化。
+    padding-top: calc(40px + var(--safe-top, 0px));
   }
 
   &__zoom {
     position: relative;
     flex: none;
+    // touch-action: manipulation —— 去掉移动端 300ms 点击延迟、禁掉双击缩放。
+    // 列表里点卡片就是要进对话,若还留着双击缩放,连点两下会被浏览器当成缩放。
+    // (模式开关的 touch-action:none 比 manipulation 更严格,不受影响)
+    touch-action: manipulation;
   }
 }
 
@@ -632,11 +1008,11 @@ function onChatNew() {
   // 层级高于头图(strip z1)与滚动区
   &__back {
     position: absolute;
-    right: 8px;
+    right: 16px;
     top: 0;
     z-index: 130;
-    width: 51px;
-    height: 51px;
+    width: 38px;
+    height: 38px;
     padding: 0;
     border: none;
     background: transparent;
@@ -655,32 +1031,33 @@ function onChatNew() {
 }
 
 // ---- 移动端适配 -----------------------------------------------------------
-// 移动端工具栏:图标放大到 28px(触控友好)、间距 38px、起点贴近右边缘 12px,
-// 四个按钮(chat09/delete/share/settings)在 ≥320px 视口下完整可见。
-@media (max-width: 600px) {
-  .edit-toggle {
-    right: 12px;
-    top: 12px;
 
-    img {
-      width: 28px;
-    }
+// ---- 已退出(网页端)-------------------------------------------------------
+// 铺满整屏、最高层级:退出后不再渲染任何应用界面
+.exit-done {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 24px;
+  background: $color-bg-root;
+  text-align: center;
 
-    &--chat09 {
-      right: 12px;
-    }
+  &__title {
+    font-family: $font-harmony;
+    font-size: 20px;
+    color: $color-text-primary;
+  }
 
-    &--delete {
-      right: 78px;
-    }
-
-    &--share {
-      right: 144px;
-    }
-
-    &--settings {
-      right: 210px;
-    }
+  &__sub {
+    font-family: $font-harmony;
+    font-size: 14px;
+    line-height: 1.6;
+    color: rgba(255, 255, 255, 0.45);
   }
 }
 </style>

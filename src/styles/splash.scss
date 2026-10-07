@@ -1,0 +1,196 @@
+// =============================================================================
+// 开屏动画(SplashOverlay)样式 —— 移植自 evercall-main1 LoadingCover
+// Endfield 风格:左侧垂直进度条 + 中央 Logo + 状态文字,完成时黄屏扫过淡出
+// =============================================================================
+
+.splash-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: #0f1419;
+  z-index: 99999;
+  overflow: hidden;
+}
+
+.splash-overlay .splash-center {
+  position: absolute;
+  top: 50%;
+  right: 12%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  z-index: 10;
+}
+
+.splash-overlay .splash-logo {
+  max-width: 240px;
+  max-height: 240px;
+  opacity: 0.9;
+}
+
+.splash-overlay .splash-site-name {
+  font-size: clamp(0.75rem, 1.5vw, 1rem);
+  font-weight: 600;
+  color: #ffffff;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+/* 进度条容器 - 左侧垂直 */
+.splash-overlay .splash-progress-container {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 12px;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.splash-overlay .splash-progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: var(--progress);
+  background: #f7ff48;
+  transition: height 0.05s linear;
+}
+
+/* 进度信息 - 跟随进度条 */
+.splash-overlay .splash-progress-info {
+  position: absolute;
+  left: 24px;
+  top: var(--progress);
+  transform: translateY(-100%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  transition: top 0.05s linear;
+  padding-bottom: 12px;
+}
+
+.splash-overlay .splash-percent {
+  font-size: clamp(32px, 5vw, 48px);
+  font-weight: 700;
+  color: #f7ff48;
+  letter-spacing: 2px;
+  line-height: 1;
+}
+
+.splash-overlay .splash-status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.splash-overlay .splash-status-dot {
+  width: 6px;
+  height: 6px;
+  background: #f7ff48;
+  border-radius: 50%;
+  animation: splash-blink 0.8s ease-in-out infinite;
+}
+
+.splash-overlay .splash-status-text {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(247, 255, 72, 0.8);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+/* 扫屏覆盖层 - 全屏黄幕 */
+.splash-overlay .splash-sweep {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #f7ff48;
+  transform: scaleX(0);
+  transform-origin: left;
+  pointer-events: none;
+  z-index: 50;
+}
+
+.splash-overlay.splash-sweeping .splash-sweep {
+  animation: splash-sweep 0.4s ease-in-out forwards;
+}
+
+.splash-overlay.splash-fadeout {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.splash-overlay.splash-fadeout .splash-sweep {
+  transform: scaleX(1);
+}
+
+@keyframes splash-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes splash-sweep {
+  0% { transform: scaleX(0); transform-origin: left; }
+  100% { transform: scaleX(1); transform-origin: left; }
+}
+
+/* 移动端适配:内容居中、进度条移到底部横条 */
+@media (max-width: 768px) {
+  .splash-overlay .splash-center {
+    top: 50%;
+    right: auto;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    gap: 16px;
+  }
+
+  .splash-overlay .splash-logo {
+    max-width: 160px;
+    max-height: 160px;
+  }
+
+  .splash-overlay .splash-site-name {
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+  }
+
+  .splash-overlay .splash-progress-container {
+    left: 1rem;
+    width: calc(100% - 2rem);
+    height: 8px;
+    top: auto;
+    bottom: 30px;
+  }
+
+  .splash-overlay .splash-progress-fill {
+    width: var(--progress);
+    height: 100%;
+    transition: width 0.05s linear;
+  }
+
+  .splash-overlay .splash-progress-info {
+    top: auto;
+    bottom: 24px;
+    left: 0;
+    transform: translateX(calc(1rem + (100vw - 2rem) * var(--progress-num) / 100 + 12px));
+    flex-direction: row;
+    gap: 8px;
+    padding-bottom: 0;
+  }
+
+  .splash-overlay .splash-percent {
+    font-size: 14px;
+  }
+
+  .splash-overlay .splash-status-line {
+    display: none;
+  }
+}

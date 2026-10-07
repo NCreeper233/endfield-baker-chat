@@ -31,11 +31,18 @@ import {
 import { captureRegion, type CaptureRegion } from '../../utils/captureImage'
 import ChatArea from './ChatArea.vue'
 import AppBackground from '../layout/AppBackground.vue'
+import type { ChatMessage } from '../../types/chat'
 
 const props = defineProps<{
   /** 截图倍率(1×/2×/3×/4×),变化即重新截图 */
   scale: number
-  /** 自定义背景图(data URL,与应用背景一致) */
+  /**
+   * 只导出这几条消息(缺省 = 当前会话全部消息)
+   *
+   * 传给 useChatRows 与 ChatArea,渲染/排版/裁剪全走原有一套 ——
+   * 「导出选中消息」与「导出整段对话」的差别仅在这个数据源。
+   */
+  messages?: ChatMessage[]
 }>()
 
 // 导出画布强制桌面几何:即使当前视口是移动端,导出图仍按 1920 设计稿布局
@@ -44,8 +51,11 @@ provide(chatGeometryKey, DESKTOP_GEOM)
 
 const { measure } = useBubbleMeasure()
 
+/** 子集消息(响应式;未传时为 undefined → useChatRows 取当前会话全量) */
+const messagesRef = computed(() => props.messages)
+
 /** rows 仅取 lastRow 用于推算 frameH / region(渲染由 ChatArea 自身完成) */
-const { lastRow } = useChatRows({ measure })
+const { lastRow } = useChatRows({ measure, messages: messagesRef })
 
 /**
  * 聊天框导出高度 = max(设计稿滚动高, 内容高 + 尾部空间)
@@ -144,7 +154,7 @@ defineExpose({ imageSrc, capturing, error, ready })
       <!-- 背景(模糊图 + 遮罩,absolute 铺满 stage) -->
       <AppBackground absolute />
       <!-- 聊天区(export-mode:复用主界面同一套渲染,关闭动画/交互) -->
-      <ChatArea export-mode />
+      <ChatArea export-mode :messages="props.messages" />
     </div>
   </div>
 </template>

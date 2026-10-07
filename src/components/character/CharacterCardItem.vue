@@ -14,7 +14,9 @@
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
+import { useSettingsStore } from '../../stores/settings'
 import { MATERIALS } from '../../constants/materials'
+import { isOriginalScaleAvatar } from '../../constants/character'
 import { subTopInCard } from '../../constants/characterCard'
 import SubCard from './SubCard.vue'
 
@@ -26,6 +28,7 @@ const props = defineProps<{
 }>()
 
 const chatStore = useChatStore()
+const settingsStore = useSettingsStore()
 const { cardSubRanges } = storeToRefs(chatStore)
 
 /** 该卡片是否折叠 */
@@ -47,6 +50,44 @@ const subIndices = computed(() => {
 
 /** 该主卡对应的干员数据(name + avatar) */
 const character = computed(() => chatStore.cardCharacters[props.index])
+
+/**
+ * 是否正在显示第二张头像(带 avatarAlt 的角色才有意义,目前只有「管理员」)
+ *
+ * 状态在**设置 store** 里(随设置快照落盘),不在组件内 ——
+ * 这样刷新后仍是你选的那张,而且聊天区里对方的头像读的是同一份状态,两处一致。
+ */
+const showAltAvatar = computed(() => settingsStore.isAvatarAltOn(character.value.name))
+
+/** 这张卡的头像能否切换(有第二张形象) */
+const canSwitchAvatar = computed(() => !!character.value.avatarAlt)
+
+/** 当前该显示的头像 */
+const avatarUrl = computed(() =>
+  showAltAvatar.value && character.value.avatarAlt ? character.value.avatarAlt : character.value.avatar,
+)
+
+/**
+ * 点击头像
+ *
+ * 能切换的角色:换一张图,并**阻止冒泡** —— 否则这一下会顺带把卡片折叠/选中。
+ * 不能切换的角色:什么都不做,让事件照常冒泡(整卡行为与改动前完全一致)。
+ */
+function onAvatarClick(e: MouseEvent): void {
+  if (!canSwitchAvatar.value) return
+  e.stopPropagation()
+  settingsStore.toggleAvatarAlt(character.value.name)
+}
+
+/**
+ * 该主卡是否已经有对话记录(任意一段子对话里有消息)
+ *
+ * 有记录 = 已经聊过 → 头像右上角不再挂那个晃动的消息浮标;
+ * 一次都没聊过的新卡才保留浮标,用作"点这里开始聊"的提示。
+ */
+const hasChatRecord = computed(() =>
+  (chatStore.cards[props.index]?.conversations ?? []).some(c => c.messages.length > 0),
+)
 
 /** 局部 hover 状态:null=未 hover / 'card'=主卡 / 数字=对应子卡在主卡内的下标 */
 const hover = ref<null | 'card' | number>(null)
@@ -108,23 +149,50 @@ function leave(event: PointerEvent) {
       <img class="card__corner" :src="MATERIALS.cornerDeco" alt="" />
       <div
         class="card__avatar"
+        :class="{ 'is-switchable': canSwitchAvatar }"
+        :title="canSwitchAvatar ? '点击切换形象' : undefined"
+        @click="onAvatarClick"
       >
         <!-- 裁剪夹层:overflow:hidden 限制 img scale 后的可见范围,
              外层 &__avatar 保持 overflow:visible 让 chat-indicator 能超出边框显示 -->
         <div class="card__avatar-clip">
-          <img class="card__avatar-img" :src="character.avatar" alt="" />
+          <img
+            class="card__avatar-img"
+            :class="{ 'is-original-scale': isOriginalScaleAvatar(character.name) }"
+            :src="avatarUrl"
+            alt=""
+          />
         </div>
-        <!-- 角标动画:永远显示 -->
+        <!-- 消息浮标:只有还没聊过的卡才挂(有对话记录的干员不显示) -->
         <img
+          v-if="!hasChatRecord"
           class="card__chat-indicator"
           :src="MATERIALS.chatBadge"
           alt=""
         />
       </div>
-      <!-- 折叠按钮:纯视觉(点击已由整卡接管,此处穿透到 .card) -->
+      <!-- 折叠按钮:纯视觉(点击已由整卡接管,此处穿透到 .card)。
+           圆环与人字箭头均为自绘 —— 原 line_common_circle_food.webp /
+           deco_common_arrow_p2.webp 已弃用,尺寸按原素材像素反推(见样式)。 -->
       <button class="card__btn" type="button" tabindex="-1" aria-hidden="true">
-        <img class="card__btn-circle" :src="MATERIALS.circleBorder" alt="" />
-        <img class="card__btn-arrow" :src="MATERIALS.cardArrow" alt="" />
+        <!-- 空心圆环:viewBox 与原素材画布同为 260×260,
+             外径 256(四周留 2px)、描边 16 → 中线半径 = 128 − 16/2 = 120 -->
+        <svg class="card__btn-circle" viewBox="0 0 260 260" aria-hidden="true">
+          <circle cx="130" cy="130" r="120" fill="none" stroke="#fff" stroke-width="16" />
+        </svg>
+        <!-- 人字形 chevron:viewBox 与原素材画布同为 24×19,
+             故显示尺寸(18×14.25)与位置无需任何改动。
+             张角 = 2×atan(半宽 9.2 / 进深 11.0) ≈ 80°(原素材约 65°,已按要求开大) -->
+        <svg class="card__btn-arrow" viewBox="0 0 24 19" aria-hidden="true">
+          <polyline
+            points="2.8 3.9 12 14.9 21.2 3.9"
+            fill="none"
+            stroke="#f0f0f0"
+            stroke-width="3.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
       </button>
     </div>
 
@@ -162,154 +230,34 @@ function leave(event: PointerEvent) {
 
 // ---- 主卡 ----------------------------------------------------------------
 .card {
-  position: absolute;
-  left: 47.42px;
-  top: 0;
-  width: 0;
-  height: 0;
-  cursor: pointer;
-  // hover 白层(与子卡共用 hover-overlay mixin)
-  @include hover-overlay(458.28px, 92.99px, 4.39px);
+  // 机体(矩形底/纹理/淡纹/名字/下划线/转角装饰/hover 白层/选中白层)、
+  // 头像框、右上角消息浮标 —— 三块与群聊卡(GroupCardItem)共用同一组 mixin,
+  // 保证两种卡在这些部位逐像素一致,且今后不会单边漂移。
+  @include main-card-chrome;
+  @include card-avatar-frame;
+  @include card-chat-indicator;
 
-  &__rect {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 458.28px;
-    height: 92.99px;
-    border-radius: 4.39px;
-    background: $color-card-bg;
-  }
-
-  &__texture {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 457.6px;
-    height: 92.4px;
-    opacity: 0.5;
-  }
-
-  &__faint {
-    position: absolute;
-    left: 35.28px;
-    top: 0.38px;
-    width: 422.76px;
-    height: 92.04px;
-    opacity: 0.02;
-  }
-
-  &__name {
-    position: absolute;
-    left: 102.02px;
-    top: 32.32px;
-    line-height: 1;
-    white-space: nowrap;
-    color: $color-text-primary;
-    font-size: $font-size-name;
-    font-weight: 500;
-    user-select: text;
-    // 群聊名可能超长:超宽省略,避免盖住折叠按钮
-    max-width: 300px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  &__underline {
-    position: absolute;
-    left: 104.02px;
-    top: 62.72px;
-    width: 42.75px;
-    height: 4.5px;
-    opacity: 0.4;
-  }
-
-  &__corner {
-    position: absolute;
-    left: 394.21px;
-    top: 15.75px;
-    width: 45px;
-    height: 6px;
-    opacity: 0.4;
-  }
-
-  &__avatar {
-    position: absolute;
-    left: 8.5px;
-    top: 8.5px;
-    width: 76px;
-    height: 76px;
-    border-radius: 6px;
-    border: 1px solid $color-avatar-border;
-    overflow: visible;
-    z-index: 11;
-
-    // 裁剪夹层:与外层同尺寸、同圆角,overflow:hidden 限制内部 img 的 scale 可见范围
-    &-clip {
-      position: absolute;
-      inset: 0;
-      overflow: hidden;
-      border-radius: 6px;
-    }
-
-    &-img {
-      position: relative;
-      z-index: 11;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      // 头像原图为竖长方形(如 456x564),取上端正方形区域显示;
-      // 再 scale 放大收紧裁剪范围,只保留脑袋部分(去掉周围留白)
-      object-position: center top;
-      transform: scale(1.1);
-      transform-origin: center 45%;
-    }
-  }
-
-  // 未读消息提示图标:头像右上角,以图片中心为轴左右晃动
-  // 动画周期 4s:左→右→左→右→归正(2s) + 等待 2s
-  &__chat-indicator {
-    position: absolute;
-    right: -20px;
-    top: -16px;
-    z-index: 12;
-    transform-origin: center center;
-    animation: card-chat-wiggle 4s ease-in-out infinite;
-    pointer-events: none;
-  }
-
-  @keyframes card-chat-wiggle {
-    0% {
-      transform: rotate(0deg);
-    }
-    5% {
-      transform: rotate(-14deg);
-    }
-    10% {
-      transform: rotate(14deg);
-    }
-    15% {
-      transform: rotate(-14deg);
-    }
-    20% {
-      transform: rotate(14deg);
-    }
-    25% {
-      transform: rotate(0deg);
-    }
-    100% {
-      transform: rotate(0deg);
-    }
-  }
-
-  &:hover &__avatar,
+  // 主卡的 hover 态除 :hover 外还有一个 class 形式 is-hover(由 hover===card 设置):
+  // 鼠标从主卡移向子卡时 :hover 会短暂丢失,靠它兜住,避免头像描边闪一下。
   &.is-hover &__avatar {
     border-color: $color-avatar-border-hover;
   }
 
+  // 「管理员」那张卡(带 avatarAlt)的头像可以点击切换男女形象:
+  // 给个手型,并在悬停时把描边提亮一档,暗示"这里能点"
+  // (列表整体是点击驱动的,这里不额外开 tabindex,与其它卡片保持一致)
+  &__avatar.is-switchable {
+    cursor: pointer;
+
+    &:hover {
+      border-color: $color-avatar-border-hover;
+    }
+  }
+
   &__btn {
     position: absolute;
-    left: 415.92px;
+    // 415.92 → 411.92:整体左移 4px(原位置离卡片右缘 11.16px,略靠外)
+    left: 411.92px;
     top: 52.31px;
     width: 31.2px;
     height: 31.2px;
@@ -326,9 +274,18 @@ function leave(event: PointerEvent) {
     }
 
     &-circle {
-      inset: 0;
-      width: 100%;
-      height: 100%;
+      // 原 line_common_circle_food.webp:260×260 画布里的**空心圆环**,
+      // 外径 256(四周各留 2px)、描边 16px、纯白。
+      // 按显示尺寸换算(31.2 / 260 = 0.12):外径 256×0.12 = 30.72,
+      // 四周各留 (31.2 − 30.72) / 2 = 0.24。
+      //
+      // 刻意用 svg 而非 CSS `border` + `border-radius`:实测 border 宽度会被
+      // Chrome 吸附到整数 device px —— 本画布 zoom≈0.745 时 1.92px 被压成 1px,
+      // 圆环比原图细约 30%。svg 是整体平滑缩放,描边宽度等比保留。
+      left: 0.24px;
+      top: 0.24px;
+      width: calc(100% - 0.48px);
+      height: calc(100% - 0.48px);
     }
 
     &-arrow {
@@ -344,11 +301,6 @@ function leave(event: PointerEvent) {
   // 折叠态:箭头回到 0deg
   &.is-collapsed .card__btn-arrow {
     transform: rotate(0deg);
-  }
-
-  // 选中态:白色遮罩常显(与 hover 遮罩同一视觉)
-  &.is-selected::before {
-    opacity: 1;
   }
 
   // 子卡容器(仅作为 v-for 的承载,本身无尺寸/定位)

@@ -2,7 +2,8 @@
 // =============================================================================
 // 导出聊天截图弹窗(ChatExportDialog)
 // -----------------------------------------------------------------------------
-// 工具栏点「分享」打开:离屏渲染当前对话全量消息 → 预览 PNG(固定 1×) → 下载。
+// 入口只有一个 —— 选中消息模式底部条的「导出选中消息」/「导出全部消息」:
+// 离屏渲染当前对话消息 → 预览 PNG(固定 1×) → 下载。
 // 结构沿用 DataManagerDialog 的 dialog-shell 外壳(类前缀 ce);
 // 离屏画布 v-if 按需挂载(打开才渲染、关闭即卸载),不常驻占用内存。
 // =============================================================================
@@ -11,13 +12,19 @@ import { useChatStore } from '../../stores/chat'
 import { MATERIALS } from '../../constants/materials'
 import { downloadDataUrl } from '../../utils/captureImage'
 import ChatExportStage from '../chat/ChatExportStage.vue'
+import type { ChatMessage } from '../../types/chat'
 
 const props = defineProps<{
-  /** 是否展开(App 的「分享」按钮控制) */
+  /** 是否展开(选中消息模式底部条的两个导出出口控制) */
   open: boolean
   /** 当前对话标题(下载文件名用) */
   conversationTitle: string
-  /** 自定义背景图(data URL,与应用背景一致) */
+  /**
+   * 只导出这几条消息(缺省 = 当前对话全量)
+   *
+   * 「导出选中消息」用它;截图链路(离屏画布 / 裁剪 / 下载)与全量导出完全同一套。
+   */
+  messages?: ChatMessage[]
 }>()
 
 const emit = defineEmits<{
@@ -40,10 +47,21 @@ const error = computed(() => stageRef.value?.error ?? null)
 /** 预览是否按原大查看(默认等比缩小适配面板) */
 const zoomed = ref(false)
 
-/** 下载文件名:{对话标题}-对话截图.png */
+/** 下载文件名:{对话标题}-对话截图.png(只导出选中时注明"选中") */
 function filename() {
-  return `${props.conversationTitle || '对话'}-对话截图.png`
+  const suffix = isSubset.value ? '-选中消息' : '-对话截图'
+  return `${props.conversationTitle || '对话'}${suffix}.png`
 }
+
+/** 是否只导出选中消息 */
+const isSubset = computed(() => !!props.messages)
+
+/** 面板副标题:全量显示对话名,子集额外注明条数 */
+const subtitle = computed(() =>
+  isSubset.value
+    ? `${props.conversationTitle} · 已选 ${props.messages?.length ?? 0} 条消息`
+    : props.conversationTitle,
+)
 
 function onDownload() {
   const src = stageRef.value?.imageSrc
@@ -72,10 +90,10 @@ watch(
         <!-- 右上角 × 关闭按钮 -->
         <button class="ce__close" type="button" aria-label="关闭" @click="emit('close')">×</button>
         <h2 class="ce__title">导出聊天截图</h2>
-        <p class="ce__text">{{ conversationTitle }}</p>
+        <p class="ce__text">{{ subtitle }}</p>
 
         <!-- 未选中对话:提示先行选中(不渲染离屏画布) -->
-        <p v-if="!hasSub" class="ce__empty-hint">请先在左侧选中一段对话，再点击「分享」导出。</p>
+        <p v-if="!hasSub" class="ce__empty-hint">请先在左侧选中一段对话，再导出聊天截图。</p>
 
         <template v-else>
           <!-- 预览区:点击在"等比缩小 / 原大(可滚动)"间切换 -->
@@ -115,6 +133,7 @@ watch(
       v-if="open && hasSub"
       ref="stageRef"
       :scale="1"
+      :messages="props.messages"
     />
   </Teleport>
 </template>

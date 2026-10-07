@@ -64,3 +64,17 @@
     transform: none;
   }
 }
+
+// 括号描写居中行入场:淡入 + 轻微上浮(节奏同 chat-in,幅度更小)
+// 只在"追加新消息"时播放(见 ChatMessageRow:row.prevRect 存在 = 非首屏);
+// 切换对话的首屏整屏由 chat-in 统一入场,居中行不单独动画。
+@keyframes centered-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

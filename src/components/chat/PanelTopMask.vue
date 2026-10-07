@@ -43,10 +43,8 @@ const maskStyle = computed(() => ({
 
 <style scoped lang="scss">
 @use '../../styles/variables' as *;
-@use '../../styles/mixins' as *;
 
-// 面板上方遮罩横条:背景同色 + scroll-mask 顶部 0-51px 渐入,
-// 51px 以下实心贴面板上缘,不裁右侧
+// 面板上方遮罩横条:背景同色,从面板顶向上渐隐(底部实心→顶部透明)
 .panel-top-mask {
   position: absolute;
   // 高于 .chat-scroll(z3)压在消息之上;低于面板(z10)
@@ -54,6 +52,7 @@ const maskStyle = computed(() => ({
   pointer-events: none;
   user-select: none;
   background: $color-panel-bg;
-  @include scroll-mask(0px, 51px, calc(100% - 0px), calc(100% - 0px), 0px);
+  -webkit-mask-image: linear-gradient(to top, #000 0%, #000 40%, transparent 100%);
+  mask-image: linear-gradient(to top, #000 0%, #000 40%, transparent 100%);
 }
 </style>

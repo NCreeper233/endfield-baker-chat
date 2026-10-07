@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="_图层_3" data-name="图层_3" xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24.81 66.97">
+  <!-- Generator: Adobe Illustrator 30.6.0, SVG Export Plug-In . SVG Version: 2.1.4 Build 109)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: #a7aaaa;
+      }
+
+      .st1 {
+        fill: #5b5c5c;
+      }
+
+      .st2, .st3 {
+        fill: #19cffd;
+      }
+
+      .st4 {
+        fill: #8f9292;
+      }
+
+      .st5 {
+        fill: #494949;
+      }
+
+      .st6 {
+        stroke: #5a5959;
+        stroke-width: .7px;
+      }
+
+      .st6, .st7, .st8 {
+        fill: none;
+      }
+
+      .st6, .st9, .st8, .st3 {
+        stroke-miterlimit: 10;
+      }
+
+      .st10 {
+        opacity: .78;
+      }
+
+      .st11 {
+        clip-path: url(#clippath-1);
+      }
+
+      .st12 {
+        fill: #9fa2a2;
+      }
+
+      .st13 {
+        fill: #3a3a3a;
+      }
+
+      .st14 {
+        fill: #686868;
+      }
+
+      .st15 {
+        fill: #8c8c8c;
+      }
+
+      .st16 {
+        fill: #444;
+      }
+
+      .st17 {
+        fill: #198ffd;
+      }
+
+      .st18 {
+        fill: #1d1d1d;
+      }
+
+      .st9 {
+        fill: #3c3c3c;
+      }
+
+      .st9, .st8 {
+        stroke: #818080;
+      }
+
+      .st19 {
+        fill: #6b6b6b;
+      }
+
+      .st20 {
+        fill: #7f7f7f;
+      }
+
+      .st21 {
+        fill: #b8bcbc;
+      }
+
+      .st3 {
+        stroke: #3a3a3a;
+        stroke-width: 2.5px;
+      }
+
+      .st22 {
+        fill: #7a7a7a;
+      }
+
+      .st24 {
+        fill: #707070;
+      }
+
+      .st25 {
+        fill: #c5c9c9;
+      }
+    </style>
+    <clipPath id="clippath-1">
+      <path class="st7" d="M16.38.5h1291.25c8.76,0,15.88,7.11,15.88,15.88v50.12H.5V16.38C.5,7.61,7.61.5,16.38.5Z"/>
+    </clipPath>
+  </defs>
+    <path id="_背景" class="st9" d="M16.38.5h1291.25c8.76,0,15.88,7.11,15.88,15.88v50.12H.5V16.38C.5,7.61,7.61.5,16.38.5Z"/>
+    <path id="_右侧灰色矩形" class="st25" d="M1200.82,1h106.31c8.76,0,15.87,7.11,15.87,15.87v44.13h-122.18V1h0Z"/>
+    <rect id="_蓝色背景" class="st2" x="928.41" y=".49" width="279.38" height="62"/>
+    <rect id="_蓝色块2" class="st2" x="907.37" y="21.46" width="22.22" height="23.64"/>
+    <rect id="_蓝色块1" class="st2" x="889.83" y=".63" width="20.82" height="20.82"/>
+    <g id="_右侧蓝色条纹">
+      <rect class="st2" x="1226.38" y="1" width="3.53" height="62"/>
+      <rect class="st2" x="1220.03" y="1" width="3.53" height="62"/>
+      <rect class="st2" x="1214.55" y="1" width="3.53" height="62"/>
+      <rect class="st2" x="1209.72" y=".76" width="3.53" height="62"/>
+      <rect class="st2" x="1205.57" y=".89" width="3.53" height="62"/>
+    </g>
+    <g id="_加号1">
+      <rect class="st16" x="1248.07" y="2.31" width="10.99" height="2.01"/>
+      <rect class="st16" x="1252.57" y="1.34" width="2.01" height="7.93"/>
+    </g>
+    <g id="_加号2">
+      <rect class="st16" x="1248.02" y="58.03" width="10.99" height="2.01"/>
+      <rect class="st16" x="1252.51" y="53.07" width="2.01" height="7.93"/>
+    </g>
+    <g>
+      <g id="_左侧人物头像">
+        <path class="st13" d="M1149.9,50.9h-41.28c-.53,1.45-.92,2.97-1.14,4.54h43.57c-.22-1.57-.61-3.09-1.14-4.54h0Z"/>
+        <path class="st13" d="M1149.24,49.3c-.6-1.29-1.31-2.51-2.13-3.65h-35.7c-.82,1.14-1.54,2.36-2.13,3.65h39.97-.01Z"/>
+        <path class="st13" d="M1107.28,57.61c-.01.3-.03.59-.03.89,0,1.37.13,2.7.37,4h43.26c.24-1.3.37-2.63.37-4,0-.3-.02-.59-.03-.89h-43.94Z"/>
+        <path class="st13" d="M1116.96,40.25c-1.82,1.23-3.45,2.72-4.82,4.43h34.22c-1.52-1.88-3.34-3.51-5.39-4.8,3.85-3.39,6.29-8.34,6.29-13.88,0-10.22-8.28-18.5-18.5-18.5s-18.5,8.28-18.5,18.5c0,5.73,2.61,10.86,6.71,14.25h-.01Z"/>
+      </g>
+      <g id="_右侧人物头像">
+        <path class="st3" d="M1183.32,38.53c3.85-3.39,6.29-8.34,6.29-13.88,0-10.22-8.28-18.5-18.5-18.5s-18.5,8.28-18.5,18.5c0,5.73,2.61,10.86,6.71,14.25-5.86,3.95-9.71,10.65-9.71,18.25,0,1.37.13,2.7.37,4h43.26c.24-1.3.37-2.63.37-4,0-7.85-4.11-14.73-10.29-18.62Z"/>
+        <circle class="st13" cx="1171.08" cy="24.63" r="13.83"/>
+      </g>
+    </g>
+    <rect id="_底部矩形条" class="st18" x="1" y="61" width="1322" height="6"/>
+    <g class="st11">
+      <path id="_左侧矩形条1" class="st2" d="M10,.5h0v66H1V9.03C1,4.06,5.03.5,10,.5Z"/>
+    </g>
+    <g id="_箭头">
+      <rect class="st17" x="1016.03" y="1" width="30.76" height="7.24"/>
+      <rect class="st17" x="1014.94" y="1" width="7.24" height="30.76"/>
+      <rect class="st17" x="1028.38" y="2.67" width="7.24" height="30.76" transform="translate(289.5 735.02) rotate(-45)"/>
+    </g>
+    <rect id="_左侧矩形条2" class="st2" x="15.81" y=".03" width="9" height="66"/>
+    <g id="_点阵图" class="st10">
+      <g>
+        <circle class="st13" cx="1055.43" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1072.23" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1089.02" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1105.82" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1122.61" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1139.4" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1139.4" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1156.2" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1172.99" cy="21.44" r="1.38"/>
+        <circle class="st13" cx="1189.79" cy="21.44" r="1.38"/>
+      </g>
+      <g>
+        <circle class="st13" cx="1055.43" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1072.23" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1089.02" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1105.82" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1122.61" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1139.4" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1139.4" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1156.2" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1172.99" cy="38.05" r="1.38"/>
+        <circle class="st13" cx="1189.79" cy="38.05" r="1.38"/>
+      </g>
+      <g>
+        <circle class="st13" cx="1054.05" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1070.85" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1087.64" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1104.43" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1121.23" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1138.02" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1138.02" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1154.82" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1171.61" cy="54.67" r="1.38"/>
+        <circle class="st13" cx="1188.4" cy="54.67" r="1.38"/>
+      </g>
+    </g>
+    <rect id="_蓝色块3" class="st2" x="890.41" y="44.37" width="19.46" height="22"/>
+    <g id="_边框">
+      <path id="_浅色边框" class="st8" d="M16.38.5h1291.25c8.76,0,15.88,7.11,15.88,15.88v50.12H.5V16.38C.5,7.61,7.61.5,16.38.5Z"/>
+      <path id="_深色边框" class="st6" d="M16.88,1.05h1290.25c8.76,0,15.88,7.11,15.88,15.88v49.32H1V16.93C1,8.17,8.11,1.05,16.88,1.05Z"/>
+    </g>
+    <g id="_右侧渐变条形块">
+      <rect class="st1" x="1268.16" y="17.66" width="18.97" height="2.74"/>
+      <rect class="st1" x="1268.16" y="50.88" width="18.97" height="2.74"/>
+      <rect class="st5" x="1270.18" y="21.19" width="14.94" height="1.41"/>
+      <rect class="st20" x="1270.19" y="28.36" width="14.94" height="1.82"/>
+      <rect class="st15" x="1270.19" y="31.26" width="14.94" height="2.24"/>
+      <rect class="st19" x="1270.19" y="25.81" width="14.94" height="1.76"/>
+      <rect class="st1" x="1270.19" y="23.4" width="14.94" height="1.71"/>
+      <rect class="st24" x="1270.19" y="35.64" width="14.94" height="2.15"/>
+      <rect class="st22" x="1270.19" y="38.65" width="14.94" height="1.72"/>
+      <rect class="st4" x="1270.18" y="41.16" width="14.94" height="1.82"/>
+      <rect class="st21" x="1270.19" y="49.05" width="14.94" height=".93"/>
+      <rect class="st14" x="1270.19" y="33.92" width="14.94" height=".86"/>
+      <rect class="st0" x="1270.19" y="46.85" width="14.94" height="1.41"/>
+      <rect class="st12" x="1270.18" y="44" width="14.94" height="1.82"/>
+    </g>
+</svg>

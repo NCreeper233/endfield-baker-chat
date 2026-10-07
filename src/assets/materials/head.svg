@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="_图层_1" data-name="图层 1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1324 67">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: #a7aaaa;
+      }
+
+      .cls-2 {
+        fill: #5b5c5c;
+      }
+
+      .cls-3, .cls-4 {
+        fill: #19cffd;
+      }
+
+      .cls-5 {
+        fill: #8f9292;
+      }
+
+      .cls-6 {
+        fill: #494949;
+      }
+
+      .cls-7 {
+        opacity: .78;
+      }
+
+      .cls-8 {
+        fill: #9fa2a2;
+      }
+
+      .cls-9 {
+        stroke: #5a5959;
+        stroke-width: .7px;
+      }
+
+      .cls-9, .cls-10, .cls-11, .cls-4 {
+        stroke-miterlimit: 10;
+      }
+
+      .cls-9, .cls-11 {
+        fill: none;
+      }
+
+      .cls-12 {
+        fill: #3a3a3a;
+      }
+
+      .cls-13 {
+        fill: #686868;
+      }
+
+      .cls-14 {
+        fill: #8c8c8c;
+      }
+
+      .cls-15 {
+        fill: #444;
+      }
+
+      .cls-16 {
+        fill: #198ffd;
+      }
+
+      .cls-17 {
+        fill: #1d1d1d;
+      }
+
+      .cls-10 {
+        fill: #3c3c3c;
+      }
+
+      .cls-10, .cls-11 {
+        stroke: #818080;
+      }
+
+      .cls-18 {
+        fill: #6b6b6b;
+      }
+
+      .cls-19 {
+        fill: #7f7f7f;
+      }
+
+      .cls-20 {
+        fill: #b8bcbc;
+      }
+
+      .cls-4 {
+        stroke: #3a3a3a;
+        stroke-width: 2.5px;
+      }
+
+      .cls-21 {
+        fill: #7a7a7a;
+      }
+
+      .cls-22 {
+        fill: #707070;
+      }
+
+      .cls-23 {
+        fill: #c5c9c9;
+      }
+    </style>
+    <clipPath id="borderClip">
+      <path d="M16.38.5h1291.25c8.76,0,15.88,7.11,15.88,15.88v50.12H.5V16.38C.5,7.61,7.61.5,16.38.5Z"/>
+    </clipPath>
+  </defs>
+  <path id="_背景" data-name="背景" class="cls-10" d="M16.38.5h1291.25c8.76,0,15.88,7.11,15.88,15.88v50.12H.5V16.38C.5,7.61,7.61.5,16.38.5Z"/>
+  <path id="_右侧灰色矩形" data-name="右侧灰色矩形" class="cls-23" d="M1200.82,1h106.31c8.76,0,15.87,7.11,15.87,15.87v44.13h-122.18V1h0Z"/>
+  <rect id="_蓝色背景" data-name="蓝色背景" class="cls-3" x="928.41" y=".49" width="279.38" height="62"/>
+  <rect id="_蓝色块2" data-name="蓝色块2" class="cls-3" x="907.37" y="21.46" width="22.22" height="23.64"/>
+  <rect id="_蓝色块1" data-name="蓝色块1" class="cls-3" x="889.83" y=".63" width="20.82" height="20.82"/>
+  <g id="_右侧蓝色条纹" data-name="右侧蓝色条纹">
+    <rect class="cls-3" x="1226.38" y="1" width="3.53" height="62"/>
+    <rect class="cls-3" x="1220.03" y="1" width="3.53" height="62"/>
+    <rect class="cls-3" x="1214.55" y="1" width="3.53" height="62"/>
+    <rect class="cls-3" x="1209.72" y=".76" width="3.53" height="62"/>
+    <rect class="cls-3" x="1205.57" y=".89" width="3.53" height="62"/>
+  </g>
+  <g id="_加号1" data-name="加号1">
+    <rect class="cls-15" x="1248.08" y="2.3" width="10.99" height="2.01" transform="translate(2507.1397 6.6173) rotate(-180)"/>
+    <rect class="cls-15" x="1249.6" y="4.3" width="7.93" height="2.01" transform="translate(1258.8822 -1248.2575) rotate(90)"/>
+  </g>
+  <g id="_加号2" data-name="加号2">
+    <rect class="cls-15" x="1248.02" y="58.03" width="10.99" height="2.01"/>
+    <rect class="cls-15" x="1249.54" y="56.03" width="7.93" height="2.01" transform="translate(1196.4779 1310.5441) rotate(-90)"/>
+  </g>
+  <g>
+    <g id="_左侧人物头像" data-name="左侧人物头像">
+      <path class="cls-12" d="M1149.9,50.9h-41.28c-.53,1.45-.92,2.97-1.14,4.54h43.57c-.22-1.57-.61-3.09-1.14-4.54Z"/>
+      <path class="cls-12" d="M1149.24,49.3c-.6-1.29-1.31-2.51-2.13-3.65h-35.7c-.82,1.14-1.54,2.36-2.13,3.65h39.97Z"/>
+      <path class="cls-12" d="M1107.28,57.61c-.01.3-.03.59-.03.89,0,1.37.13,2.7.37,4h43.26c.24-1.3.37-2.63.37-4,0-.3-.02-.59-.03-.89h-43.94Z"/>
+      <path class="cls-12" d="M1116.96,40.25c-1.82,1.23-3.45,2.72-4.82,4.43h34.22c-1.52-1.88-3.34-3.51-5.39-4.8,3.85-3.39,6.29-8.34,6.29-13.88,0-10.22-8.28-18.5-18.5-18.5s-18.5,8.28-18.5,18.5c0,5.73,2.61,10.86,6.71,14.25Z"/>
+    </g>
+    <g id="_右侧人物头像" data-name="右侧人物头像">
+      <path class="cls-4" d="M1183.32,38.53c3.85-3.39,6.29-8.34,6.29-13.88,0-10.22-8.28-18.5-18.5-18.5s-18.5,8.28-18.5,18.5c0,5.73,2.61,10.86,6.71,14.25-5.86,3.95-9.71,10.65-9.71,18.25,0,1.37.13,2.7.37,4h43.26c.24-1.3.37-2.63.37-4,0-7.85-4.11-14.73-10.29-18.62Z"/>
+      <circle class="cls-12" cx="1171.08" cy="24.63" r="13.83"/>
+    </g>
+  </g>
+  <rect id="_底部矩形条" data-name="底部矩形条" class="cls-17" x="1" y="61" width="1322" height="6"/>
+  <path id="_左侧矩形条1" data-name="左侧矩形条1" class="cls-3" clip-path="url(#borderClip)" d="M10,.5h0v66H1V9.03C1,4.06,5.03.5,10,.5Z"/>
+  <g id="_箭头" data-name="箭头">
+    <rect class="cls-16" x="1027.79" y="-10.76" width="7.24" height="30.76" transform="translate(1036.0294 -1026.7941) rotate(90)"/>
+    <rect class="cls-16" x="1014.94" y="1" width="7.24" height="30.76"/>
+    <rect class="cls-16" x="1028.38" y="2.67" width="7.24" height="30.76" transform="translate(289.5 735.02) rotate(-45)"/>
+  </g>
+  <rect id="_左侧矩形条2" data-name="左侧矩形条2" class="cls-3" x="15.81" y=".03" width="9" height="66"/>
+  <g id="_点阵图" data-name="点阵图" class="cls-7">
+    <g>
+      <circle class="cls-12" cx="1055.43" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1072.23" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1089.02" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1105.82" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1122.61" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1139.4" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1139.4" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1156.2" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1172.99" cy="21.44" r="1.38"/>
+      <circle class="cls-12" cx="1189.79" cy="21.44" r="1.38"/>
+    </g>
+    <g>
+      <circle class="cls-12" cx="1055.43" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1072.23" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1089.02" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1105.82" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1122.61" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1139.4" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1139.4" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1156.2" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1172.99" cy="38.05" r="1.38"/>
+      <circle class="cls-12" cx="1189.79" cy="38.05" r="1.38"/>
+    </g>
+    <g>
+      <circle class="cls-12" cx="1054.05" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1070.85" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1087.64" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1104.43" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1121.23" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1138.02" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1138.02" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1154.82" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1171.61" cy="54.67" r="1.38"/>
+      <circle class="cls-12" cx="1188.4" cy="54.67" r="1.38"/>
+    </g>
+  </g>
+  <rect id="_蓝色块3" data-name="蓝色块3" class="cls-3" x="890.41" y="44.37" width="19.46" height="22"/>
+  <g id="_边框" data-name="边框">
+    <path id="_浅色边框" data-name="浅色边框" class="cls-11" d="M16.38.5h1291.25c8.76,0,15.88,7.11,15.88,15.88v50.12H.5V16.38C.5,7.61,7.61.5,16.38.5Z"/>
+    <path id="_深色边框" data-name="深色边框" class="cls-9" d="M16.88,1.05h1290.25c8.76,0,15.88,7.11,15.88,15.88v49.32H1V16.93C1,8.17,8.11,1.05,16.88,1.05Z"/>
+  </g>
+  <g id="_右侧渐变条形块" data-name="右侧渐变条形块">
+    <rect class="cls-2" x="1268.16" y="17.66" width="18.97" height="2.74"/>
+    <rect class="cls-2" x="1268.16" y="50.88" width="18.97" height="2.74"/>
+    <rect class="cls-6" x="1270.18" y="21.19" width="14.94" height="1.41"/>
+    <rect class="cls-19" x="1270.19" y="28.36" width="14.94" height="1.82"/>
+    <rect class="cls-14" x="1270.19" y="31.26" width="14.94" height="2.24"/>
+    <rect class="cls-18" x="1270.19" y="25.81" width="14.94" height="1.76"/>
+    <rect class="cls-2" x="1270.19" y="23.4" width="14.94" height="1.71"/>
+    <rect class="cls-22" x="1270.19" y="35.64" width="14.94" height="2.15"/>
+    <rect class="cls-21" x="1270.19" y="38.65" width="14.94" height="1.72"/>
+    <rect class="cls-5" x="1270.18" y="41.16" width="14.94" height="1.82"/>
+    <rect class="cls-20" x="1270.19" y="49.05" width="14.94" height=".93"/>
+    <rect class="cls-13" x="1270.19" y="33.92" width="14.94" height=".86"/>
+    <rect class="cls-1" x="1270.19" y="46.85" width="14.94" height="1.41"/>
+    <rect class="cls-8" x="1270.18" y="44" width="14.94" height="1.82"/>
+  </g>
+</svg>

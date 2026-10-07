@@ -11,29 +11,17 @@ import headerDeco from '../assets/materials/achievement_main_deco05.webp'
 import cardTexture from '../assets/materials/deco_sns_hudentry_bg.webp'
 import cardFaint from '../assets/materials/deco_sns_tweet_decorate_02.webp'
 import subFaint from '../assets/materials/deco_sns_tweet_decorate_03.webp'
-import decoBadge from '../assets/materials/deco_sns_tweet_decorate_06.webp'
-import decoWing from '../assets/materials/deco_sns_tweet_decorate_42.webp'
+import decoWing from '../assets/materials/deco_sns_tweet_decorate_42.svg'
 import subArrow from '../assets/materials/deco_source_arrow.webp'
 import underline from '../assets/materials/deco_sns_tweet_decorate.webp'
 import cornerDeco from '../assets/materials/deco_sns_list_decorate.webp'
-import chatBadge from '../assets/materials/icon_sns_chat_01.webp'
-import circleBorder from '../assets/materials/line_common_circle_food.webp'
-import cardArrow from '../assets/materials/deco_common_arrow_p2.webp'
+import chatBadge from '../assets/materials/icon_sns_chat_01.svg'
 
-import avatarFrame from '../assets/materials/bg_snscharentry_head_Line.webp'
 import avatarBase from '../assets/materials/icon_virtualmouse_bg.webp'
 
-import chatStripV1 from '../assets/materials/chat_strip_v1.webp'
-import chatStripV2 from '../assets/materials/chat_strip_v2.webp'
-import chatStripV3 from '../assets/materials/chat_strip_v3.webp'
-// 移动端头图分段素材(ffmpeg 已由 png 转 webp:l = 左纹理段,r = 右图案段,c = 中间纯色条,均 66px 高)
-import chatStripV1L from '../assets/materials/chat_strip_v1_l.webp'
-import chatStripV1R from '../assets/materials/chat_strip_v1_r.webp'
-import chatStripV2L from '../assets/materials/chat_strip_v2_l.webp'
-import chatStripV2R from '../assets/materials/chat_strip_v2_r.webp'
-import chatStripV3L from '../assets/materials/chat_strip_v3_l.webp'
-import chatStripV3R from '../assets/materials/chat_strip_v3_r.webp'
-import chatStripC from '../assets/materials/chat_strip_c.webp'
+import headSvg from '../assets/materials/head.svg'
+import headLeftSvg from '../assets/materials/head_left.svg'
+import headRightSvg from '../assets/materials/head_right.svg'
 import chatBottomDeco from '../assets/materials/chat_bottom_deco.webp'
 import chatEndDeco from '../assets/materials/chat_end_deco.webp'
 import choiceTopDeco from '../assets/materials/choice_top_deco.webp'
@@ -41,20 +29,29 @@ import chatEmptyPlaceholder from '../assets/materials/chat_empty_placeholder.web
 import chatCornerDeco45 from '../assets/materials/deco_sns_tweet_decorate_45.webp'
 
 // 底部输入面板圆形按钮图标(从左到右)
-import editBtnPotential from '../assets/materials/potential_picture.webp'
-import editBtnEmoticon from '../assets/materials/icon_sns_chat_emoticon.webp'
-import editBtnChat from '../assets/materials/icon_sns_chat_04.webp'
-import editBtnChat09 from '../assets/materials/icon_sns_chat_09.webp'
-import editBtnDeleteIndeed from '../assets/materials/icon_tips_delete_indeed.webp'
+import editBtnPotential from '../assets/materials/potential_picture.svg'
+import editBtnEmoticon from '../assets/materials/icon_sns_chat_emoticon.svg'
+// 推荐选项面板开关(底部面板:表情与发送之间)
+import iconEventsOverview from '../assets/materials/icon_events_overview.svg'
+import editBtnChat from '../assets/materials/icon_sns_chat_04.svg'
+import editBtnDeleteIndeed from '../assets/materials/icon_tips_delete_indeed.svg'
 
-// 右侧工具栏按钮图标
-import editBtnShare from '../assets/materials/icon_friend_share.webp'
-import loginBtnSetting from '../assets/materials/login_btn_setting.webp'
+// 设置按钮图标
+import loginBtnSetting from '../assets/materials/login_btn_setting.svg'
+
+// Token 用量 / 缓存命中面板按钮图标(角色列表上方操作带,仅自定义 API 模式显示)
+import iconUsageStats from '../assets/materials/icon_usage_stats.svg'
+
+// 首次使用偏好弹窗的三张示意图(动作/神态描写的三种样式)
+//   源图:聊天截图 PNG → ffmpeg 转 webp(720 宽,q85),原图留档 temps/style_pref_src/
+import prefBracketColorOn from '../assets/materials/pref_bracket_color_on.webp'
+import prefBracketColorOff from '../assets/materials/pref_bracket_color_off.webp'
+import prefBracketCenterOff from '../assets/materials/pref_bracket_center_off.webp'
 
 /**
  * 内置素材 URL 表。
  *
- * 命名约定:`<区域><用途>` 驼峰,如 `cardTexture`(卡片纹理)、`chatStripV1`(聊天条)。
+ * 命名约定:`<区域><用途>` 驼峰,如 `cardTexture`(卡片纹理)、`headSvg`(头图)。
  * 通过 `MATERIALS.cardTexture` 访问,避免硬编码字符串路径。
  */
 export const MATERIALS = {
@@ -67,31 +64,22 @@ export const MATERIALS = {
   cardFaint,
   underline,
   cornerDeco,
-  circleBorder,
-  cardArrow,
+  // (折叠按钮的圆环与人字箭头已改为自绘,见 CharacterCardItem,不再走素材表)
   // 主卡徽章 / 子卡图标
   chatBadge,
   // 子卡素材
   subFaint,
-  decoBadge,
+  // 子卡右上的虚线装饰(矢量;原 42.webp 已弃用)
   decoWing,
   subArrow,
-  // 聊天区头像框/底
-  avatarFrame,
+  // 聊天区头像底图
+  // (头像外圈圆环已改为自绘,见 ChatAvatar.vue,不再走素材表)
   avatarBase,
   // 聊天区装饰
-  // 顶部聊天条(三图点击循环切换,默认 v1)
-  chatStripV1,
-  chatStripV2,
-  chatStripV3,
-  // 移动端头图分段素材(l/r/c)
-  chatStripV1L,
-  chatStripV1R,
-  chatStripV2L,
-  chatStripV2R,
-  chatStripV3L,
-  chatStripV3R,
-  chatStripC,
+  // 顶部头图: 桌面端 head.svg, 移动端 head_left + CSS center + head_right
+  headSvg,
+  headLeftSvg,
+  headRightSvg,
   chatBottomDeco,
   chatEndDeco,
   // 面板顶部装饰
@@ -103,13 +91,17 @@ export const MATERIALS = {
   // 底部输入面板圆形按钮图标(从左到右)
   editBtnPotential,
   editBtnEmoticon,
+  // 推荐选项面板开关按钮图标
+  iconEventsOverview,
   editBtnChat,
-  // 聊天(新建对话)按钮图标
-  editBtnChat09,
-  // 删除对话按钮图标
+  // 删除对话按钮图标(角色列表上方操作带)
   editBtnDeleteIndeed,
-  // 右侧工具栏按钮图标
-  editBtnShare,
   // 设置按钮图标
   loginBtnSetting,
+  // Token 用量 / 缓存命中面板入口按钮图标(同上操作带)
+  iconUsageStats,
+  // 首次使用偏好弹窗的三张示意图(一一对应三个选项)
+  prefBracketColorOn,
+  prefBracketColorOff,
+  prefBracketCenterOff,
 } as const

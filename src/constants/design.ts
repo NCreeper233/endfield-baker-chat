@@ -148,9 +148,9 @@ export const CHAT_IMAGE = {
 const RING_W = 76
 const RING_H = 75.24
 // 圆环为细环(内孔直径约为环宽的 0.85),portrait 圆心与 ring 槽位中心重合:
-// 两者都取 0.5,保证头像裁剪圆在 bg_snscharentry_head_Line.png 的正中间
-const RING_CX = 0.47 // ring 内圆心 x(略偏左,让头像稍微靠左一点)
-const RING_CY = 0.458 // ring 内圆心 y(略偏上,让头像稍微靠上一点)
+// ring 图片不再旋转 180 度,坐标对应翻转(1 - 原值)
+const RING_CX = 0.53 // ring 内圆心 x(略偏右)
+const RING_CY = 0.542 // ring 内圆心 y(略偏下)
 // 头像肖像相对 ring 的缩放比:比圆环内孔小一圈(留出约一个环宽的空隙)
 const PORTRAIT_SCALE = 0.8
 

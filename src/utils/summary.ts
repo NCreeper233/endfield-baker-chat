@@ -8,6 +8,11 @@
 // - 默认模式:内置 Agnes API(配置由 settings store 提供,界面不显示)
 // - 自定义模式:用户填写的 Base URL / Key / 模型名
 // - 请求失败(配置错误/超时/返回异常)时静默降级:不插入摘要,不阻断聊天
+//
+// ⚠ 审计结论(2026-10-04):本模块本身不写死后端地址,url 完全由调用方传入的
+//   baseUrl 决定,因此不存在"custom 模式打后端"的问题;真正的泄漏点在
+//   stores/settings.ts 的 getSummaryApi()(custom 模式下会去取后端 key),
+//   已在该处修复。
 // =============================================================================
 
 /** 智能总结固定 system 提示词(前端内置,用户无需配置) */
@@ -56,6 +61,13 @@ export async function requestSummary(
   model: string,
   history: Array<{ side: 'other' | 'mine'; text: string }>,
 ): Promise<string> {
+  // 配置缺失时直接抛错,由调用方降级 —— 避免拼出 "undefined/chat/completions"
+  // 这种注定失败、且报错难懂的请求。
+  // (custom 模式下 getSummaryApi 可能返回空配置:用户没填自定义 API,
+  //  而自定义模式又禁止回退到后端 key 接口,见 stores/settings.ts。)
+  if (!baseUrl || !apiKey || !model) {
+    throw new Error('总结 API 未配置（自定义模式下请先在设置中填写 Base URL / API Key / 模型名）')
+  }
   const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`
   const userContent = `以下是要总结的对话内容：\n\n${formatHistoryForSummary(history)}`
 

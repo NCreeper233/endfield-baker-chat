@@ -23,6 +23,19 @@ export const BUBBLE_TEXT_MINE = '#000'
 export const BUBBLE_TEXT_OTHER = '#fff'
 
 /**
+ * 括号描写居中行(设置项「括号描写居中」)的文本色
+ *
+ * 半透明白:居中行是"旁白 / 动作描写"性质,比气泡正文(#fff)弱一档,
+ * 但仍比群聊话题提示行(rgba(255,255,255,.38))清楚。
+ *
+ * ⚠️ 必须同时以 inline 形式写进 DOM(不能只靠 scoped CSS):
+ * html-to-image 克隆节点时会把计算样式整份内联,其中 `-webkit-text-fill-color`
+ * 会带上根节点的黑色并**继承**到子节点、优先级高于 color,导致导出图里的
+ * 居中文字变黑(深色背景上几乎不可见)。与 ChatBubble 的文字同理。
+ */
+export const CENTER_ACTION_COLOR = 'rgba(255, 255, 255, 0.5)'
+
+/**
  * 加载动画方形点颜色
  *
  * other 侧气泡深底,用浅色点;mine 侧气泡浅底,用深色点。

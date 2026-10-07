@@ -8,7 +8,7 @@
 
 @font-face {
   font-family: 'HarmonyOS Sans SC Medium';
-  src: url('../assets/fonts/HarmonyOS_Sans_SC_Medium.woff2') format('woff2');
+  src: url('/fonts/HarmonyOS_Sans_SC_Medium.woff2') format('woff2');
   font-weight: 500;
   font-style: normal;
   font-display: swap;
@@ -29,8 +29,77 @@ body,
   background: $color-bg-root;
 }
 
+// ---- 安全区（刘海 / 挖孔 / 圆角 / 手势条）------------------------------------
+// 说明：这些变量只是把 env() 归一到一个名字上，**默认值全部为 0** ——
+//   · 桌面浏览器、以及没有刘海/手势条的设备：env() 本来就算出 0，布局零变化
+//   · 手机浏览器（Android Chrome 边到边 / iOS Safari）+ APK：自动得到正确内边距
+// 需要 `viewport-fit=cover`（见 index.html）env() 才会反映真实安全区。
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
+html,
+body {
+  overscroll-behavior: none;
+}
+
 body {
   font-family: $font-harmony;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+// -----------------------------------------------------------------------------
+// 移动端点击反馈修正
+// -----------------------------------------------------------------------------
+// 移动端浏览器(Android Chrome / 各类 WebView)点按钮时会盖一层系统默认的
+// 蓝色高亮矩形,还会因长按触发文本选择 —— 在深色主题上非常突兀。
+// 本应用的按钮都有自绘的 hover / active 反馈,不需要系统那层,统一关掉。
+// 该属性可继承,放在 html 上即可覆盖全树;再对交互控件显式加固一层。
+html {
+  -webkit-tap-highlight-color: transparent;
+  // 消除移动端 300ms 点击延迟与双击缩放(按钮/开关都已处理自己的手势)
+  touch-action: manipulation;
+}
+
+button,
+[role='button'],
+a,
+label,
+select,
+summary {
+  -webkit-tap-highlight-color: transparent;
+}
+
+// 点击控件时不选中其文字、不长按弹出"复制/搜索"菜单。
+// 刻意不含 label:设置面板里的 <label class="sd__field"> 包着说明文字,
+// 禁用选择会让用户无法复制那些提示。
+button,
+[role='button'],
+a,
+select,
+summary {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+// 焦点框:鼠标/触摸点出来的不画(蓝色系统框),键盘 Tab 出来的仍然保留
+button:focus,
+[role='button']:focus,
+select:focus,
+a:focus,
+summary:focus {
+  outline: none;
+}
+
+button:focus-visible,
+[role='button']:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 1px solid $color-subcard-selected;
+  outline-offset: 1px;
 }

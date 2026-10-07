@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="_图层_3" data-name="图层 3" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 865.02 66">
+  <defs>
+    <style>
+      .cls-1 {
+        stroke: #5a5959;
+        stroke-width: .7px;
+      }
+
+      .cls-1, .cls-2, .cls-3 {
+        fill: none;
+      }
+
+      .cls-1, .cls-4, .cls-3 {
+        stroke-miterlimit: 10;
+      }
+
+      .cls-5 {
+        fill: #1d1d1d;
+      }
+
+      .cls-4 {
+        fill: #3c3c3c;
+      }
+
+      .cls-4, .cls-3 {
+        stroke: #818080;
+      }
+
+      .cls-6 {
+        clip-path: url(#clippath);
+      }
+    </style>
+    <clipPath id="clippath">
+      <rect class="cls-2" width="865.02" height="66"/>
+    </clipPath>
+  </defs>
+  <g class="cls-6">
+    <path id="_背景" data-name=" 背景" class="cls-4" d="M-8.43-.15h1291.25c8.76,0,15.88,7.11,15.88,15.88v50.12H-24.31V15.73C-24.31,6.96-17.2-.15-8.43-.15Z"/>
+    <rect id="_底部矩形条" data-name=" 底部矩形条" class="cls-5" x="-23.81" y="60.35" width="1322" height="6"/>
+    <g id="_边框" data-name=" 边框">
+      <path id="_浅色边框" data-name=" 浅色边框" class="cls-3" d="M-8.43-.15h1291.25c8.76,0,15.88,7.11,15.88,15.88v50.12H-24.31V15.73C-24.31,6.96-17.2-.15-8.43-.15Z"/>
+      <path id="_深色边框" data-name=" 深色边框" class="cls-1" d="M-7.93.4h1290.25c8.76,0,15.88,7.11,15.88,15.88v49.32H-23.81V16.28C-23.81,7.52-16.7.4-7.93.4Z"/>
+    </g>
+  </g>
+</svg>

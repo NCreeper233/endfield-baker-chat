@@ -1,15 +1,24 @@
-# Node Modules
+# 依赖与构建产物
 node_modules/
 dist/
+release/
 
-#备份
+# 备份 / 临时文件
 backup/
+_src_backups/
+*.bak
+*.bak_*
+*.zip
 
-# 本地模拟后端 LLM 
+# 本地模拟后端
 mock/
 
-#dsh-vision-router
+# 工具目录
 .dsh-vision-router/
 
-#bak
-.bak/
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+*.local
+.vscode/*
+!.vscode/settings.json

@@ -2,10 +2,18 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover：让页面铺到刘海/圆角区域，使 env(safe-area-inset-*) 生效。
+         没有它时 env() 恒为 0，安全区适配不会起作用。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <title>//BAKER/会话消息</title>
     <link rel="icon" type="image/webp" href="/favicon-black.webp" media="(prefers-color-scheme: light)" />
     <link rel="icon" type="image/webp" href="/favicon-white.webp" media="(prefers-color-scheme: dark)" />
+    <!-- 字体刻意**不 preload**：
+         · 全量中文 woff2 有 4.12 MB，preload 会把它提到最高优先级，
+           在手机浏览器（尤其移动网络）上严重挤占首屏加载；
+         · @font-face 已声明 `font-display: swap`（见 styles/_base.scss），
+           文字会先用系统字体立即渲染，字体就绪后自动替换 —— 不阻塞阅读。
+         去掉 preload 后由 CSS 按常规优先级加载，首屏更快、也不会白屏。 -->
   </head>
   <body>
     <div id="app"></div>

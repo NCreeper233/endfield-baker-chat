@@ -21,7 +21,7 @@
 // 关键交互:`:key="chatStore.activeSub"` 强制 chat-scroll 重新挂载,
 // 触发 chat-in 入场动画(必须保留)。重挂载时所有气泡首屏无 prevRect。
 // =============================================================================
-import { computed, inject, nextTick, onMounted, ref, toValue, watch, type Ref } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, toRef, toValue, watch, type Ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
 import { useBubbleMeasure } from '../../composables/useBubbleMeasure'
@@ -39,12 +39,13 @@ import {
   // speakerNameStyle, // 【已注释停用】角色名称显示功能整体停用
   type BoxStyle,
 } from '../../utils/chatPosition'
-import type { ChatRow } from '../../types/chat'
+import type { ChatMessage, ChatRow } from '../../types/chat'
 import ChatAvatar from './ChatAvatar.vue'
 import ChatMessageRow from './ChatMessageRow.vue'
 import LoadingBubble from './LoadingBubble.vue'
 import ChatInput from './ChatInput.vue'
-
+import { flowMetrics } from '../../constants/groupFlow'
+import GroupFlowControl from './GroupFlowControl.vue'
 const chatStore = useChatStore()
 
 /** 注入几何(默认全局:桌面 = 设计稿,移动端 = 视口;导出模式由 ChatExportStage 覆盖为桌面)。
@@ -62,11 +63,20 @@ const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
  */
 const props = defineProps<{
   exportMode?: boolean
+  /**
+   * 只渲染这几条消息(仅导出模式用;缺省 = 当前会话全部消息)
+   *
+   * 「导出选中消息」时由 ChatExportStage 传入子集:排版 / 分条 / 居中行 /
+   * 末尾装饰全部照旧走同一条 useChatRows 管线,换的只是数据源。
+   */
+  messages?: ChatMessage[]
 }>()
 
 const emit = defineEmits<{
   /** API 未配置时请求打开设置弹窗(上抛到 App) */
   (e: 'open-settings'): void
+  /** 群聊流程控制条的提示(如「请先设置话题」,上抛到 App 弹提示框) */
+  (e: 'hint', text: string): void
 }>()
 /** 导出模式下聊天框高度(px):由 ChatExportStage 测量注入,未注入时用几何层固定高 */
 const injectedFrameH = inject<Ref<number> | null>('exportFrameH', null)
@@ -75,68 +85,32 @@ const exportFrameH = computed(() => injectedFrameH?.value ?? geom.value.detailH)
 /** 聊天框三色装饰条(品红 / 黄 / 青,样式见 .chat-frame__bar--*) */
 const CHAT_FRAME_BARS = ['magenta', 'yellow', 'cyan'] as const
 
-/** 顶部聊天条三图点击循环切换(默认 v1) */
-const stripVariants = [
-  MATERIALS.chatStripV1,
-  MATERIALS.chatStripV2,
-  MATERIALS.chatStripV3,
-] as const
-/** 当前聊天条图片下标(存于 store:导出模式 ChatArea 实例共享同一状态) */
-const stripSource = computed(() => stripVariants[chatStore.stripVariantIndex % stripVariants.length])
-
-/** 点击聊天条:切换到下一张(导出模式不循环) */
-function cycleStrip(): void {
-  if (props.exportMode) return
-  chatStore.cycleStrip()
-}
-
 /**
- * 移动端头图分段素材表(变体 → 左/右段原尺寸,66px 高):
- * 用户切图 chat_strip_v{1,2,3}_{l,r}.png + 公共中段 chat_strip_c.png。
- * 布局:l 左端贴屏左缘、r 右端贴屏右缘、中间空隙用 c 图自适应裁剪(cover)填充,
- * 三张图均不拉伸不变形。
+ * 移动端头图: head_left + head_center + head_right 三片
+ * left: viewBox 24.81×66.97, 固定宽
+ * center: viewBox 865×66, flex:1 自适应拉伸
+ * right: viewBox 434.17×67, 固定宽
+ * 三片均高度50px,左右等比缩放,中间拉伸
  */
-const STRIP_SEGS = [
-  { lW: 25, rW: 440, l: MATERIALS.chatStripV1L, r: MATERIALS.chatStripV1R },
-  { lW: 19, rW: 458, l: MATERIALS.chatStripV2L, r: MATERIALS.chatStripV2R },
-  { lW: 21, rW: 451, l: MATERIALS.chatStripV3L, r: MATERIALS.chatStripV3R },
-] as const
+const MOBILE_STRIP_H = 50
 
-/** 当前变体的分段素材(随 stripVariantIndex 切换) */
-const stripSeg = computed(
-  () => STRIP_SEGS[chatStore.stripVariantIndex % STRIP_SEGS.length],
-)
+/** left 固定宽: viewBox 宽/高 × stripH */
+const LEFT_W = 24.81
+const LEFT_H = 66.97
+/** right 固定宽: viewBox 宽/高 × stripH */
+const RIGHT_W = 434.17
+const RIGHT_H = 67
 
-/** 左右段缩放系数:高度统一为几何 stripH(66k),宽度按原宽等比,无拉伸变形 */
-const segK = computed(() =>
-  geom.value.stripSegmented ? geom.value.stripH / geom.value.stripImgH : 1,
-)
-
-/** 左段样式:左端贴屏幕左缘 */
 const segLStyle = computed(() => ({
-  left: '0px',
-  top: '0px',
-  width: `${stripSeg.value.lW * segK.value}px`,
-  height: `${geom.value.stripH}px`,
+  width: `${(LEFT_W / LEFT_H) * MOBILE_STRIP_H}px`,
+  height: `${MOBILE_STRIP_H}px`,
+  flexShrink: '0',
 }))
 
-/** 右段样式:右端贴屏幕右缘 */
 const segRStyle = computed(() => ({
-  right: '0px',
-  top: '0px',
-  width: `${stripSeg.value.rW * segK.value}px`,
-  height: `${geom.value.stripH}px`,
-}))
-
-/**
- * 中段样式:l/r 之间的空隙,用 chat_strip_c.png 自适应裁剪填充。
- * object-fit: cover —— 保持原比例不变形,超出部分水平裁切(纯色条裁剪无感)。
- */
-const segCStyle = computed(() => ({
-  left: `${stripSeg.value.lW * segK.value}px`,
-  right: `${stripSeg.value.rW * segK.value}px`,
-  top: '0px',
-  height: `${geom.value.stripH}px`,
+  width: `${(RIGHT_W / RIGHT_H) * MOBILE_STRIP_H}px`,
+  height: `${MOBILE_STRIP_H}px`,
+  flexShrink: '0',
 }))
 
 const {
@@ -151,23 +125,95 @@ const { measure } = useBubbleMeasure()
  *
  * layoutContext.fresh 由下方 watcher 翻转(切换对话 → true;首条加载气泡 → false)。
  */
+// ---- 群聊流程控制条(指定发言)----------------------------------------------
+// 渲染在最后一条消息下方、随消息滚动;高度须计入布局,否则会压住末尾装饰。
+// 流程控制条的尺寸统一取自 constants/groupFlow(与 GroupFlowControl 共用同一份,
+// 按端取值)。此前两处各写一份字面量,改一端就会静默错位:少留被裁、多留空一块。
+const flow = computed(() => flowMetrics(geom.value.stripSegmented))
+
+/** 需要显示几颗胶囊(非群聊 / 无控件时为 0) */
+// 胶囊数量必须与 GroupFlowControl 实际渲染的一致,否则要么不渲染(之前
+// "按钮不显示"的根因)、要么预留高度对不上。判据统一取自 store。
+// 「开启 / 暂停 / 恢复对话」已不在聊天区渲染(它现在是底部输入面板里的圆形按钮,
+// 不占这里的滚动高度),故这里只剩「指定发言」一颗。
+const flowPillCount = computed(() => (chatStore.activeShowAssign ? 1 : 0))
+
+/** 「指定发言」下拉展开时额外占用的高度(展开前为 0) */
+const flowMenuH = computed(() => {
+  if (!chatStore.groupPickerOpen) return 0
+  const n = (chatStore.activeCard?.members ?? []).length
+  if (n === 0) return 0
+  const m = flow.value
+  return m.menuGap + Math.min(n * m.menuItemH + 8, m.menuMaxH)
+})
+
+/** 控制条占用的额外滚动高度(含展开中的下拉菜单,避免被 scroll 容器裁掉) */
+const flowExtraH = computed(() => {
+  const n = flowPillCount.value
+  if (n === 0) return 0
+  const m = flow.value
+  return n * m.pillH + (n - 1) * m.pillGap + m.pillBottomGap + flowMenuH.value
+})
+
+/** 控制条是否显示(导出模式不渲染:它是控件,不是聊天内容) */
+const showFlowControl = computed(() => !props.exportMode && flowPillCount.value > 0)
+
 const {
   layoutContext,
   rows,
   loadingLayout,
   showLoadingAvatar,
+  flowTop,
   endDecoTop,
   padTop,
   chatScrollHeight,
   resolveSpeakerAvatar,
+  /** 该行头像能否点击切换形象(决定聊天区头像是否显示手型光标) */
+  isAvatarSwitchable,
   // resolveSpeakerName, // 【已注释停用】角色名称显示功能整体停用
-} = useChatRows({ measure })
+} = useChatRows({
+  measure,
+  extraBottomHeight: () => flowExtraH.value,
+  // 导出选中消息:把子集交进去(props 变化即重排;普通模式为 undefined → 全量)
+  messages: props.messages ? toRef(props, 'messages') : undefined,
+})
 
-// ---- 头像点击:mine 侧切换管理员性别 ----------------------------------------
-function onMessageAvatarClick(row: ChatRow) {
-  if (row.msg.side === 'mine') {
-    chatStore.toggleMyGender()
+/**
+ * 控制条位置
+ *
+ * left:与 other 侧气泡左缘对齐(宽度自适应内容)
+ * top :紧贴最后一条消息下方;会话还空着时没有"最后一条",落到首条消息的
+ *       锚点高度,避免控件孤零零贴在滚动区顶端
+ */
+const flowStyle = computed(() => {
+  const empty = rows.value.length === 0 && !loadingLayout.value
+  const top = empty ? geom.value.anchorAvatarTop - geom.value.scrollY : flowTop.value
+  return {
+    left: `${geom.value.otherBubbleX - geom.value.scrollX}px`,
+    top: `${top}px`,
   }
+})
+
+/** 控制条上抛的提示 → 继续上抛给 App */
+function onFlowHint(text: string): void {
+  emit('hint', text)
+}
+
+// ---- 头像点击 ---------------------------------------------------------------
+/**
+ * mine 侧:切换我方(管理员)性别 —— 仅头像,AI 不感知
+ * 群聊中「扮演某角色」发出的消息,头像属于该角色,点击不再切换管理员性别
+ *
+ * other 侧:对方角色若有两张形象(目前只有「管理员」)就换一张 ——
+ * 与角色卡头像点的是同一份状态(settings.avatarAltOn),刷新后仍然是你选的那张。
+ */
+function onMessageAvatarClick(row: ChatRow) {
+  if (row.msg.side !== 'mine') {
+    chatStore.toggleCounterpartAvatarAlt()
+    return
+  }
+  if (chatStore.isRolePlayMessage(row.msg)) return
+  chatStore.toggleMyGender()
 }
 
 /** chat-scroll 容器 ref(用于自动滚动到底部) */
@@ -192,10 +238,13 @@ onMounted(() => {
 })
 
 /** 聊天条名字的绝对定位样式 */
-const stripNameStyle = computed(() => ({
-  left: geom.value.stripX + 48 + 'px',
-  top: geom.value.stripY + (geom.value.stripH - 24.12) / 2 + 'px',
-}))
+const stripNameStyle = computed(() => {
+  const isMobile = geom.value.stripSegmented
+  return {
+    left: geom.value.stripX + (isMobile ? 28 : 48) + 'px',
+    top: geom.value.stripY + (geom.value.stripH - 24.12) / 2 + (isMobile ? 3 : 0) + 'px',
+  }
+})
 
 // ---- 尺寸过渡链状态 -------------------------------------------------------
 // 文字气泡出现时,从加载气泡尺寸(100×单行高)过渡到真实尺寸。
@@ -292,27 +341,24 @@ const decoTop = computed(() => {
 </script>
 
 <template>
-  <section class="chat-area" :class="{ 'chat-area--export': exportMode }">
-    <!-- 顶部聊天条:chat_strip / chat_strip_detail 仅在选中对话时显示,遮罩始终渲染。
-         移动端(几何层 stripSegmented):l 贴屏左缘 + c 中段自适应裁剪 + r 贴屏右缘,
-         三图均不拉伸不变形;桌面端:单图原样显示 -->
+  <section class="chat-area" :class="{ 'chat-area--export': exportMode, 'chat-area--mobile': geom.stripSegmented }">
+    <!-- 顶部头图:移动端三片式,桌面端整张img -->
     <div
       v-if="chatStore.activeSub !== null && geom.stripSegmented"
-      class="chat-shot chat-shot--strip chat-shot--segmented"
-      :style="pos(geom.stripX, geom.stripY, geom.stripW, geom.stripH)"
-      @click="cycleStrip"
+      class="chat-shot chat-shot--strip chat-shot--strip-flex"
+      :style="pos(geom.stripX, geom.stripY, geom.stripW, MOBILE_STRIP_H)"
     >
-      <img class="chat-shot__seg chat-shot__seg--l" :style="segLStyle" :src="stripSeg.l" alt="" />
-      <img class="chat-shot__seg chat-shot__seg--c" :style="segCStyle" :src="MATERIALS.chatStripC" alt="" />
-      <img class="chat-shot__seg chat-shot__seg--r" :style="segRStyle" :src="stripSeg.r" alt="" />
+      <img class="chat-shot__seg-l" :style="segLStyle" :src="MATERIALS.headLeftSvg" alt="" />
+      <!-- center: 纯 CSS 还原暗色背景 + 底部深色条 + 双层边框 -->
+      <div class="chat-shot__seg-c" />
+      <img class="chat-shot__seg-r" :style="segRStyle" :src="MATERIALS.headRightSvg" alt="" />
     </div>
     <img
       v-else-if="chatStore.activeSub !== null"
       class="chat-shot chat-shot--strip"
       :style="pos(geom.stripX, geom.stripY, geom.stripW, geom.stripH)"
-      :src="stripSource"
+      :src="MATERIALS.headSvg"
       alt=""
-      @click="cycleStrip"
     />
     <!-- 聊天框(CSS 绘制,替代 chat_strip_detail.png):框线 + 顶部线缺口 + SVG 凹口 + 三色装饰条
          仅选中对话时显示,层级高于滚动内容(z3)/底部装饰(z4),低于输入面板(z10) -->
@@ -457,9 +503,10 @@ const decoTop = computed(() => {
       <!-- 角色名称悬浮功能已注释停用:原先的 :resolve-speaker-name / :show-character-names 属性绑定与加载气泡上方的名称 span 一并停用 -->
       <ChatMessageRow
         v-for="row in rows"
-        :key="row.msg.id"
+        :key="row.key"
         :row="row"
         :resolve-speaker-avatar="resolveSpeakerAvatar"
+        :is-avatar-switchable="isAvatarSwitchable"
         @avatar-click="onMessageAvatarClick"
       />
 
@@ -483,8 +530,18 @@ const decoTop = computed(() => {
           :side="loadingLayout.side"
           :left="loadingLayout.left"
           :top="loadingLayout.top"
+          :centered="loadingLayout.centered"
         />
       </template>
+
+      <!-- 群聊流程控制条:最后一条消息下方,随消息滚动 -->
+      <div
+        v-if="showFlowControl"
+        class="chat-flow"
+        :style="flowStyle"
+      >
+        <GroupFlowControl @hint="onFlowHint" @open-settings="emit('open-settings')" />
+      </div>
 
       <img
         v-if="endDecoVisible"
@@ -496,8 +553,9 @@ const decoTop = computed(() => {
       <div class="chat-pad chat-pad--bottom" :style="pos(0, padTop, 1, geom.scrollBottomPad)" />
     </div>
 
-    <!-- 固定底部装饰(在 .chat-area 内,非 .chat-scroll);导出模式跟随新帧底 -->
+    <!-- 固定底部装饰(在 .chat-area 内,非 .chat-scroll);导出模式跟随新帧底;移动端不显示 -->
     <img
+      v-if="!geom.stripSegmented"
       class="chat-bottom-deco"
       :style="pos(geom.bottomDecoX, decoTop, geom.bottomDecoW, geom.bottomDecoH)"
       :src="MATERIALS.chatBottomDeco"
@@ -505,7 +563,11 @@ const decoTop = computed(() => {
     />
 
     <!-- AI 聊天输入框(非导出模式且选中对话时显示) -->
-    <ChatInput v-if="!exportMode && chatStore.activeSub !== null" @open-settings="emit('open-settings')" />
+    <ChatInput
+      v-if="!exportMode && chatStore.activeSub !== null"
+      @open-settings="emit('open-settings')"
+      @hint="emit('hint', $event)"
+    />
   </section>
 </template>
 
@@ -549,6 +611,10 @@ const decoTop = computed(() => {
   font-weight: 500;
   z-index: 2;
   user-select: text;
+
+  .chat-area--mobile & {
+    font-size: 19px;
+  }
 }
 
 .chat-tint {
@@ -637,27 +703,41 @@ const decoTop = computed(() => {
 
   &--strip {
     z-index: 1;
-    // 始终可点击切换三张样式(导出模式由 cycleStrip 函数内守卫拦截)
     pointer-events: auto;
-    cursor: pointer;
     user-select: none;
   }
 
-  // 移动端 l/c/r 分段头图:l 贴左、r 贴右、c 中段 cover 自适应裁剪,均不变形。
-  // 三段都 pointer-events: none,点击落在容器上触发切换。
-  &--segmented {
-    overflow: hidden;
+  &--strip-flex {
+    display: flex;
+    align-items: stretch;
   }
 
-  &__seg {
-    position: absolute;
+  &__seg-l,
+  &__seg-r {
     display: block;
-    pointer-events: none;
+    flex-shrink: 0;
   }
 
-  // 中段:保持原比例、超出部分水平裁切(纯色条裁剪无感)
-  &__seg--c {
-    object-fit: cover;
+  &__seg-c {
+    flex: 1;
+    min-width: 0;
+    background: #3c3c3c;
+    position: relative;
+    // 顶部边框: 浅色#818080 0.7px + 深色#5a5959 0.7px
+    border-top: 0.7px solid #818080;
+    box-shadow: inset 0 0.7px 0 #5a5959;
+    // 底部边框
+    border-bottom: 0.7px solid #818080;
+
+    &::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: calc(6px * 50 / 67);
+      background: #1d1d1d;
+    }
   }
 }
 
@@ -676,6 +756,12 @@ const decoTop = computed(() => {
     border-right: $color-chat-frame solid 1.5px;
     border-bottom: $color-chat-frame solid 1.5px;
     border-radius: 0 0 12px 12px;
+
+    // 移动端:底部边框被输入面板遮挡,不渲染;去掉底部圆角
+    .chat-area--mobile & {
+      border-bottom-width: 0;
+      border-radius: 0;
+    }
   }
 
   &__tl,
@@ -696,7 +782,7 @@ const decoTop = computed(() => {
   &__notch {
     position: absolute;
     // 凹口上移 6px,悬于框顶线上方
-    top: -6px;
+    top: -5px;
 
     // 凹口折线描边颜色由内联 :stroke 注入(CHAT_FRAME.color),
     // 避免 scoped 样式在 html-to-image 导出时丢失
@@ -752,6 +838,13 @@ const decoTop = computed(() => {
   width: 150px;
   height: auto;
   opacity: 0.2;
+}
+
+// 群聊流程控制条:位于最后一条消息下方,随 .chat-scroll 一起滚动
+.chat-flow {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none; // 只有内部的胶囊可点,容器不挡消息
 }
 
 .chat-end-deco {
