@@ -6,7 +6,7 @@
 // 打开/关闭状态由父组件 App 持有
 // =============================================================================
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { useSettingsStore } from '../../stores/settings'
+import { useSettingsStore, type ApiConfig } from '../../stores/settings'
 import { testApiConnection } from '../../utils/llm'
 import { MIN_SEGMENT_CHARS } from '../../utils/aiText'
 import { testBackendConnection } from '../../utils/backend'
@@ -297,13 +297,15 @@ async function copyText(text: string): Promise<void> {
 }
 
 // ---- API 配置本地缓存(打开时同步,保存时写入 store) -------------------------
-const apiDraft = ref({
-  apiMode: 'custom' as 'custom' | 'backend' | 'legacy',
+const apiDraft = ref<ApiConfig>({
+  apiMode: 'custom',
+  apiProtocol: 'openai',
   baseUrl: '',
   apiKey: '',
   model: '',
   backendUrl: '',
   temperature: 1.0,
+  topP: 0.95,
   maxTokens: 2048,
   contextWindow: 0,
   autoCompact: true,
@@ -313,6 +315,20 @@ const apiDraft = ref({
 
 /** 是否为自定义 API 模式(需要显示 baseUrl/apiKey/model 输入框) */
 const isCustomMode = computed(() => apiDraft.value.apiMode === 'custom')
+
+function setApiProtocol(proto: 'openai' | 'gemini') {
+  apiDraft.value.apiProtocol = proto
+  if (proto === 'gemini') {
+    if (!apiDraft.value.model || !apiDraft.value.model.includes('gemini')) {
+      apiDraft.value.model = 'gemini-2.5-flash'
+    }
+  }
+}
+
+function selectGeminiPreset(gm: string) {
+  apiDraft.value.apiProtocol = 'gemini'
+  apiDraft.value.model = gm
+}
 
 /**
  * 各实验性开关"在当前配置下不生效"的判据
@@ -1151,8 +1167,47 @@ function resetAll() {
               <template v-if="isCustomMode">
 <div class="sd__divider"></div>
 
+              <!-- 接口协议切换 (OpenAI / Gemini) -->
+              <div class="sd__field">
+                <span class="sd__label">接口协议</span>
+                <div class="sd__route">
+                  <button
+                    type="button"
+                    class="sd__btn"
+                    :class="{ 'sd__btn--primary': apiDraft.apiProtocol !== 'gemini' }"
+                    @click="setApiProtocol('openai')"
+                  >OpenAI 兼容</button>
+                  <button
+                    type="button"
+                    class="sd__btn"
+                    :class="{ 'sd__btn--primary': apiDraft.apiProtocol === 'gemini' }"
+                    @click="setApiProtocol('gemini')"
+                  >Google GenAI (Gemini 原生)</button>
+                </div>
+                <p class="sd__hint" :class="apiDraft.apiProtocol === 'gemini' ? 'sd__hint--ok' : ''">
+                  {{ apiDraft.apiProtocol === 'gemini'
+                    ? '已启用 Google GenAI 原生 REST 协议：系统提示词独立为 systemInstruction；5 项安全过滤器全部 BLOCK_NONE 放行；核采样 topP 默认为 0.95。'
+                    : '标准 OpenAI /chat/completions 兼容格式（适用于 DeepSeek、OneAPI、vLLM 等端点）。' }}
+                </p>
+              </div>
+
+              <!-- Gemini 快捷预设模型 -->
+              <div v-if="apiDraft.apiProtocol === 'gemini'" class="sd__field">
+                <span class="sd__label">Gemini 快捷预设模型</span>
+                <div class="sd__route">
+                  <button
+                    v-for="gm in ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-pro']"
+                    :key="gm"
+                    type="button"
+                    class="sd__btn"
+                    :class="{ 'sd__btn--primary': apiDraft.model === gm }"
+                    @click="selectGeminiPreset(gm)"
+                  >{{ gm }}</button>
+                </div>
+              </div>
+
               <label class="sd__field">
-                <span class="sd__label">Base URL</span>
+                <span class="sd__label">Base URL{{ apiDraft.apiProtocol === 'gemini' ? '（选填，留空默认官方端点）' : '' }}</span>
                 <input
                   v-model="apiDraft.baseUrl"
                   class="sd__input"
@@ -1166,7 +1221,7 @@ function resetAll() {
                   v-model="apiDraft.apiKey"
                   class="sd__input"
                   type="password"
-                  placeholder="sk-..."
+                  :placeholder="apiDraft.apiProtocol === 'gemini' ? 'AIzaSy... 或 AQ... (Google API Key)' : 'sk-...'"
                 />
               </label>
               <label class="sd__field">
@@ -1591,6 +1646,51 @@ function resetAll() {
             <div class="sd__divider"></div>
 
             <div class="sd__field sd__field--row">
+              <span class="sd__label">二次元慢养成与反OOC状态机</span>
+              <button
+                type="button"
+                class="sd__switch"
+                :class="{ 'sd__switch--on': settingsStore.roleplayEngineEnabled }"
+                @click="settingsStore.roleplayEngineEnabled = !settingsStore.roleplayEngineEnabled"
+              >{{ settingsStore.roleplayEngineEnabled ? '开启 ✓' : '关闭' }}</button>
+              <p class="sd__hint">
+                {{ settingsStore.roleplayEngineEnabled
+                  ? '已开启：系统提示词自动封装为二次元互动小说与信赖度状态机规范（0%~200% 四阶段阶梯式防倒贴与反OOC）'
+                  : '已关闭：使用原始通用提示词' }}
+              </p>
+            </div>
+
+            <div v-if="settingsStore.roleplayEngineEnabled" class="sd__field">
+              <span class="sd__label">玩家身份称谓</span>
+              <input
+                v-model="settingsStore.userRoleName"
+                class="sd__input"
+                type="text"
+                placeholder="管理员 / 博士 / 旅行者"
+              />
+              <p class="sd__hint">在二次元角色扮演中代表玩家的称谓，用于人设状态机交互对象识别</p>
+            </div>
+
+            <div class="sd__divider"></div>
+
+            <div class="sd__field sd__field--row">
+              <span class="sd__label">群聊同步单聊记忆</span>
+              <button
+                type="button"
+                class="sd__switch"
+                :class="{ 'sd__switch--on': settingsStore.groupInheritMemory }"
+                @click="settingsStore.groupInheritMemory = !settingsStore.groupInheritMemory"
+              >{{ settingsStore.groupInheritMemory ? '开启 ✓' : '关闭' }}</button>
+              <p class="sd__hint">
+                {{ settingsStore.groupInheritMemory
+                  ? '已开启：群聊中各干员发言时，自动注入其与管理员在单聊中的独家记忆与近期互动印象，保持角色关系连贯'
+                  : '已关闭：群聊中各干员仅依据通用设定与本群记录发言，不继承单聊私密记忆' }}
+              </p>
+            </div>
+
+            <div class="sd__divider"></div>
+
+            <div class="sd__field sd__field--row">
               <span class="sd__label">智能总结</span>
               <button
                 type="button"
@@ -1660,7 +1760,7 @@ function resetAll() {
                     v-model="summaryDraft.apiKey"
                     class="sd__input"
                     type="password"
-                    placeholder="sk-..."
+                    placeholder="sk-... / AIzaSy... / AQ..."
                     autocomplete="off"
                   />
                 </label>

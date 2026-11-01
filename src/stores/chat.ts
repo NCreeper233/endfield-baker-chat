@@ -732,6 +732,7 @@ export const useChatStore = defineStore('chat', () => {
     speakMode: GroupSpeakMode
     assignTarget: string
     lockedMember: string | null
+    inheritSingleChatMemory: boolean
   } | null {
     const card = cards.value[cardIndex]
     if (!card || !isGroupCardAt(cardIndex)) return null
@@ -746,7 +747,94 @@ export const useChatStore = defineStore('chat', () => {
       speakMode: card.speakMode ?? 'smart',
       assignTarget: card.assignTarget ?? members[0] ?? '',
       lockedMember: locked,
+      inheritSingleChatMemory: card.inheritSingleChatMemory !== false,
     }
+  }
+
+  /** 获取干员信赖度/好感度数值 (0 ~ 200, 缺省 25) */
+  function getCharacterTrustLevel(cardIndexOrName?: number | string | null): number {
+    let card: Card | undefined
+    if (typeof cardIndexOrName === 'number') {
+      card = cards.value[cardIndexOrName]
+    } else if (typeof cardIndexOrName === 'string') {
+      card = cards.value.find(
+        (c) => (!c.members || c.members.length < GROUP_MIN_MEMBERS) &&
+          c.conversations.some((sub) => sub.name === cardIndexOrName),
+      )
+    } else {
+      card = activeCard.value ?? undefined
+    }
+    return card?.trustLevel ?? 25
+  }
+
+  /** 更新干员信赖度/好感度数值 */
+  function updateCharacterTrustLevel(cardIndexOrName: number | string, level: number): boolean {
+    let card: Card | undefined
+    if (typeof cardIndexOrName === 'number') {
+      card = cards.value[cardIndexOrName]
+    } else if (typeof cardIndexOrName === 'string') {
+      card = cards.value.find(
+        (c) => (!c.members || c.members.length < GROUP_MIN_MEMBERS) &&
+          c.conversations.some((sub) => sub.name === cardIndexOrName),
+      )
+    }
+    if (!card) return false
+    card.trustLevel = Math.max(0, Math.min(200, Math.round(level)))
+    return true
+  }
+
+  /** 更新群聊是否继承单聊记忆 */
+  function updateGroupInheritMemory(cardIndex: number, enabled: boolean): boolean {
+    const card = cards.value[cardIndex]
+    if (!card || !isGroupCardAt(cardIndex)) return false
+    card.inheritSingleChatMemory = enabled
+    return true
+  }
+
+  /**
+   * 获取指定角色与管理员在单聊中的近期独家记忆（用于群聊私有上下文注入）
+   *
+   * @param characterName 角色名（如 '佩莉卡'）
+   * @returns 格式化后的私聊记忆提示词，若无历史单聊则返回 null
+   */
+  function getCharacterPrivateMemory(characterName: string): string | null {
+    // 查找该角色的单聊卡片（排除群聊主卡）
+    const singleCard = cards.value.find(
+      (c) => (!c.members || c.members.length < GROUP_MIN_MEMBERS) &&
+        c.conversations.some((sub) => sub.name === characterName),
+    )
+    if (!singleCard) return null
+
+    // 找到属于该角色的对话
+    const conv = singleCard.conversations.find((sub) => sub.name === characterName) || singleCard.conversations[0]
+    if (!conv || !conv.messages || conv.messages.length === 0) return null
+
+    // 过滤有效消息（排除错误气泡和话题系统消息）
+    const validMsgs = conv.messages.filter(
+      (m) => !(m as { error?: boolean }).error && !(m as { topic?: boolean }).topic && ((m.text ?? '').trim() || m.image),
+    )
+    if (validMsgs.length === 0) return null
+
+    // 取最近 6~8 条记录作为记忆切片（控制 token 消耗在 150 tokens 以内）
+    const recent = validMsgs.slice(-8)
+    const lines: string[] = []
+
+    for (const m of recent) {
+      const text = (m.text ?? '').trim() || (m.image ? '[图片]' : '')
+      if (!text) continue
+      const speaker = m.side === 'mine' ? '管理员' : characterName
+      const truncated = text.length > 120 ? text.slice(0, 120) + '...' : text
+      lines.push(`- ${speaker}：${truncated}`)
+    }
+
+    if (lines.length === 0) return null
+
+    return [
+      `【你（${characterName}）与管理员私下的近期独家交流记忆】`,
+      `这是你此前与管理员一对一私聊中的真实经历与印象（只有你自己知道，切勿在群聊中突兀宣读为系统公报）：`,
+      lines.join('\n'),
+      `要求：在群聊中面对管理员时，自然地保持与上述记忆一致的态度、信任度、默契与称呼习惯；如果涉及未结清的话题或约定，可在群里适度呼应。`,
+    ].join('\n')
   }
 
   /**
@@ -1531,7 +1619,7 @@ export const useChatStore = defineStore('chat', () => {
    * @returns 是否发生了改变;旁观模式下"未设置话题"时返回 false 且不改变状态
    */
   function setGroupRunning(running: boolean): boolean {
-    const card = activeCard.value
+    const card = activeCard.value ?? undefined
     if (!card || (card.members ?? []).length < GROUP_MIN_MEMBERS) return false
     // 旁观模式:必须先用「给出话题」设定话题,否则不允许开启
     if (running && card.myRole === 'observer' && !(card.groupTopic ?? '').trim()) {
@@ -1583,7 +1671,7 @@ export const useChatStore = defineStore('chat', () => {
    */
   const activeGroupCharCount = computed(() => {
     const sub = activeSub.value
-    const card = activeCard.value
+    const card = activeCard.value ?? undefined
     if (sub === null || !card || (card.members ?? []).length < GROUP_MIN_MEMBERS) return 0
     return countGroupMessages(sub)
   })
@@ -1609,7 +1697,7 @@ export const useChatStore = defineStore('chat', () => {
 
   /** 记录旁观模式下给出的话题 */
   function setGroupTopic(topic: string): void {
-    const card = activeCard.value
+    const card = activeCard.value ?? undefined
     if (!card) return
     card.groupTopic = topic
   }
@@ -1621,7 +1709,7 @@ export const useChatStore = defineStore('chat', () => {
    * "我在用指定模式")。
    */
   function setActiveAssignTarget(name: string): boolean {
-    const card = activeCard.value
+    const card = activeCard.value ?? undefined
     if (!card || !name) return false
     if ((card.members ?? []).indexOf(name) === -1) return false
     card.speakMode = 'assign'
@@ -2578,6 +2666,10 @@ export const useChatStore = defineStore('chat', () => {
     updateGroupMembers,
     updateGroupSpeakMode,
     getGroupSettings,
+    updateGroupInheritMemory,
+    getCharacterTrustLevel,
+    updateCharacterTrustLevel,
+    getCharacterPrivateMemory,
     // 侧边栏模式(单聊 / 群聊)
     chatMode,
     setChatMode,

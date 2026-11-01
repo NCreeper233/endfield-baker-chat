@@ -24,6 +24,11 @@ import type { ApiConfig } from '../stores/settings'
 import { normalizeUsage } from './usage'
 import type { NormalizedUsage } from './usage'
 import { isOReasoningModel, usesMaxCompletionTokens } from './llm'
+import {
+  isGeminiProtocol,
+  convertToGeminiContents,
+  geminiChatCompletion,
+} from './geminiApi'
 
 /** OpenAI 兼容消息(仅文本;群聊/推荐都不需要多模态) */
 export interface CustomChatMessage {
@@ -60,6 +65,9 @@ export function customChatUrl(config: ApiConfig): string {
 
 /** custom 模式是否已配置完整(baseUrl / apiKey / model 三件套) */
 export function isCustomApiConfigured(config: ApiConfig): boolean {
+  if (isGeminiProtocol(config)) {
+    return !!config.apiKey && !!config.model
+  }
   return !!config.baseUrl && !!config.apiKey && !!config.model
 }
 
@@ -87,6 +95,45 @@ export async function customChatCompletion(
 ): Promise<CustomChatResult> {
   if (!isCustomApiConfigured(config)) {
     throw new Error('API 未配置：请先在设置中填写 Base URL、API Key 和模型名')
+  }
+
+  // Google GenAI (Gemini) 原生非流式分流
+  if (isGeminiProtocol(config)) {
+    const controller = new AbortController()
+    const onAbort = () => controller.abort()
+    if (opts.signal) {
+      if (opts.signal.aborted) controller.abort()
+      else opts.signal.addEventListener('abort', onAbort)
+    }
+    const timer = window.setTimeout(() => controller.abort(), opts.timeoutMs ?? 60_000)
+
+    try {
+      const systemParts: string[] = []
+      const chatItems: typeof messages = []
+
+      for (const msg of messages) {
+        if (msg.role === 'system') {
+          if (msg.content) systemParts.push(msg.content)
+        } else {
+          chatItems.push(msg)
+        }
+      }
+
+      const contents = convertToGeminiContents(chatItems)
+      const systemInstruction = systemParts.join('\n\n')
+
+      const res = await geminiChatCompletion(config, contents, systemInstruction, {
+        temperature: opts.temperature,
+        topP: config.topP ?? 0.95,
+        maxTokens: opts.maxTokens,
+        signal: controller.signal,
+      })
+
+      return { text: res.text.trim(), usage: res.usage }
+    } finally {
+      window.clearTimeout(timer)
+      if (opts.signal) opts.signal.removeEventListener('abort', onAbort)
+    }
   }
 
   const model = config.model

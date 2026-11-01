@@ -47,6 +47,37 @@ import ChatInput from './ChatInput.vue'
 import { flowMetrics } from '../../constants/groupFlow'
 import GroupFlowControl from './GroupFlowControl.vue'
 const chatStore = useChatStore()
+import { getTrustStageInfo } from '../../utils/roleplayPrompt'
+import { useSettingsStore } from '../../stores/settings'
+
+const settingsStore = useSettingsStore()
+
+const isGroupCard = computed(() => {
+  const card = chatStore.activeCard
+  return !!card && (card.members ?? []).length >= 2
+})
+
+const currentTrustLevel = computed(() => {
+  if (chatStore.activeSub === null) return 25
+  return chatStore.getCharacterTrustLevel(chatStore.activeCardIndex)
+})
+
+const trustStage = computed(() => getTrustStageInfo(currentTrustLevel.value))
+
+const trustPopoverOpen = ref(false)
+
+function onTrustSliderInput(e: Event) {
+  const val = Number((e.target as HTMLInputElement).value)
+  if (chatStore.activeCardIndex !== null) {
+    chatStore.updateCharacterTrustLevel(chatStore.activeCardIndex, val)
+  }
+}
+
+function setTrustLevel(val: number) {
+  if (chatStore.activeCardIndex !== null) {
+    chatStore.updateCharacterTrustLevel(chatStore.activeCardIndex, val)
+  }
+}
 
 /** 注入几何(默认全局:桌面 = 设计稿,移动端 = 视口;导出模式由 ChatExportStage 覆盖为桌面)。
  * 注意:inject 必须在 setup 期间立即调用;在 computed getter 内惰性调用会在
@@ -360,6 +391,51 @@ const decoTop = computed(() => {
       :src="MATERIALS.headSvg"
       alt=""
     />
+    <!-- 慢养成信赖度状态胶囊 (单人对话时展示) -->
+    <div
+      v-if="chatStore.activeSub !== null && !isGroupCard && settingsStore.roleplayEngineEnabled"
+      class="chat-trust-pill"
+      :style="{ top: (geom.detailY + 8) + 'px', right: (geom.detailX > 0 ? 30 : 16) + 'px' }"
+    >
+      <button
+        type="button"
+        class="chat-trust-pill__btn"
+        :style="{ borderColor: trustStage.color, color: trustStage.color }"
+        @click="trustPopoverOpen = !trustPopoverOpen"
+      >
+        <span class="chat-trust-pill__icon">♥</span>
+        <span class="chat-trust-pill__num">{{ currentTrustLevel }}%</span>
+        <span class="chat-trust-pill__stage">{{ trustStage.name }}</span>
+      </button>
+
+      <!-- 快速调节信赖度浮层 -->
+      <div v-if="trustPopoverOpen" class="chat-trust-popover">
+        <div class="chat-trust-popover__header">
+          <span>信赖度 · {{ trustStage.name }}</span>
+          <button type="button" class="chat-trust-popover__close" @click="trustPopoverOpen = false">×</button>
+        </div>
+        <p class="chat-trust-popover__desc">{{ trustStage.desc }}</p>
+        <div class="chat-trust-popover__slider-row">
+          <input
+            type="range"
+            min="0"
+            max="200"
+            step="1"
+            :value="currentTrustLevel"
+            class="chat-trust-popover__slider"
+            @input="onTrustSliderInput"
+          />
+          <span class="chat-trust-popover__val">{{ currentTrustLevel }}%</span>
+        </div>
+        <div class="chat-trust-popover__presets">
+          <button type="button" @click="setTrustLevel(15)">15% 戒备</button>
+          <button type="button" @click="setTrustLevel(50)">50% 认知</button>
+          <button type="button" @click="setTrustLevel(85)">85% 交心</button>
+          <button type="button" @click="setTrustLevel(150)">150% 羁绊</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 聊天框(CSS 绘制,替代 chat_strip_detail.png):框线 + 顶部线缺口 + SVG 凹口 + 三色装饰条
          仅选中对话时显示,层级高于滚动内容(z3)/底部装饰(z4),低于输入面板(z10) -->
     <div
@@ -743,6 +819,132 @@ const decoTop = computed(() => {
 
 // 聊天框(CSS 绘制边框,替代 chat_strip_detail.png):
 // 框本体几何由 CHAT_FRAME / CHAT_SHOTS.detail 经内联样式注入,此处只处理视觉
+.chat-trust-pill {
+  position: absolute;
+  z-index: 15;
+  user-select: none;
+
+  &__btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 12px;
+    background: rgba(15, 20, 25, 0.85);
+    backdrop-filter: blur(8px);
+    font-family: $font-harmony;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+
+    &:hover {
+      filter: brightness(1.2);
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+    }
+  }
+
+  &__icon {
+    font-size: 12px;
+  }
+
+  &__num {
+    font-weight: bold;
+    letter-spacing: 0.05em;
+  }
+
+  &__stage {
+    opacity: 0.85;
+    font-size: 10px;
+  }
+}
+
+.chat-trust-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 250px;
+  padding: 12px 14px;
+  background: #141b22;
+  border: 1px solid rgba(247, 255, 72, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  color: #e8e8e3;
+  font-family: $font-harmony;
+  font-size: 12px;
+  z-index: 20;
+
+  &__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    color: #f7ff48;
+    margin-bottom: 6px;
+  }
+
+  &__close {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0;
+
+    &:hover {
+      color: #fff;
+    }
+  }
+
+  &__desc {
+    margin: 0 0 10px 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  &__slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  &__slider {
+    flex: 1;
+    accent-color: #f7ff48;
+    cursor: pointer;
+  }
+
+  &__val {
+    font-weight: bold;
+    color: #f7ff48;
+    width: 36px;
+    text-align: right;
+  }
+
+  &__presets {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+
+    button {
+      padding: 5px 6px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: rgba(255, 255, 255, 0.85);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+
+      &:hover {
+        background: rgba(247, 255, 72, 0.15);
+        border-color: #f7ff48;
+        color: #f7ff48;
+      }
+    }
+  }
+}
+
 .chat-frame {
   position: absolute;
   pointer-events: none;

@@ -16,6 +16,12 @@ import {
   normalizeUsage,
 } from './usage'
 import type { NormalizedUsage } from './usage'
+import {
+  isGeminiProtocol,
+  convertToGeminiContents,
+  streamGeminiChat,
+  testGeminiConnection,
+} from './geminiApi'
 
 // ---- Legacy API Key 运行时获取(不再硬编码到前端源码) ------------------------
 let _cachedLegacyKey = ''
@@ -150,9 +156,40 @@ export function usesMaxCompletionTokens(model: string): boolean {
  */
 export async function streamChat(params: StreamChatParams): Promise<string> {
   const { config, messages, onChunk, onDone, onError, signal, onUsage } = params
+  const isLegacy = config.apiMode === 'legacy'
+
+  // ---- Google GenAI (Gemini) 原生 REST 协议分流 --------------------------
+  if (!isLegacy && isGeminiProtocol(config)) {
+    const systemParts: string[] = []
+    const chatItems: typeof messages = []
+
+    for (const msg of messages) {
+      if (msg.role === 'system') {
+        const text = typeof msg.content === 'string' ? msg.content : ''
+        if (text) systemParts.push(text)
+      } else {
+        chatItems.push(msg)
+      }
+    }
+
+    const contents = convertToGeminiContents(chatItems)
+    const systemInstruction = systemParts.join('\n\n')
+
+    return await streamGeminiChat({
+      config,
+      systemInstruction,
+      contents,
+      signal,
+      temperature: config.temperature,
+      topP: config.topP ?? 0.95,
+      maxTokens: config.maxTokens,
+      onChunk,
+      onDone,
+      onUsage,
+    })
+  }
 
   // ---- 根据模式确定 URL / 请求头 / 模型名 ---------------------------------
-  const isLegacy = config.apiMode === 'legacy'
 
   if (!isLegacy && (!config.baseUrl || !config.apiKey || !config.model)) {
     throw new Error('API 未配置：请先在设置中填写 Base URL、API Key 和模型名')
@@ -407,6 +444,14 @@ export async function testApiConnection(
   config: ApiConfig,
 ): Promise<{ ok: boolean; message: string }> {
   const isLegacy = config.apiMode === 'legacy'
+
+  if (!isLegacy && isGeminiProtocol(config)) {
+    if (!config.apiKey || !config.model) {
+      return { ok: false, message: '请先填写 API Key 和模型名（Gemini 端点可使用默认）' }
+    }
+    const res = await testGeminiConnection(config)
+    return { ok: res.ok, message: res.message }
+  }
 
   if (!isLegacy && (!config.baseUrl || !config.apiKey || !config.model)) {
     return { ok: false, message: '请先填写 Base URL、API Key 和模型名' }

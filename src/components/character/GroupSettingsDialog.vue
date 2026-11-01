@@ -141,6 +141,18 @@ function setSpeakMode(mode: GroupSpeakMode): void {
   refresh()
 }
 
+// ═══ 4. 单聊记忆继承 ═════════════════════════════════════════════════════════
+
+const inheritMemory = computed(() => info.value?.inheritSingleChatMemory ?? true)
+
+function toggleInheritMemory(): void {
+  hint.value = ''
+  if (props.cardIndex === null) return
+  const next = !inheritMemory.value
+  chatStore.updateGroupInheritMemory(props.cardIndex, next)
+  refresh()
+}
+
 // ═══ 5. 删除群聊 ═══════════════════════════════════════════════════════════
 // 已从此弹窗移除:删除入口收敛到操作带的删除按钮(DeleteConfirmDialog 群聊模式)。
 
@@ -262,6 +274,22 @@ function onClose(): void {
           <section class="gs__field">
             <span class="gs__label">我的身份</span>
             <p class="gs__readonly">{{ info.myRoleLabel }}</p>
+          </section>
+
+          <!-- ═══ 5. 单聊记忆继承 ═══ -->
+          <section class="gs__field">
+            <div class="gs__row-label">
+              <span class="gs__label">单聊记忆继承</span>
+              <button
+                type="button"
+                class="gs__switch-btn"
+                :class="{ 'is-active': inheritMemory }"
+                @click="toggleInheritMemory"
+              >
+                {{ inheritMemory ? '开启 ✓' : '关闭' }}
+              </button>
+            </div>
+            <p class="gs__hint-text">干员发言时自动注入其与管理员在私聊中的独家记忆与近期互动印象</p>
           </section>
 
           <!-- 操作提示 -->
@@ -550,6 +578,34 @@ function onClose(): void {
     font-family: $font-harmony;
     font-size: 14px;
     color: $color-subcard-text;
+  }
+
+  &__row-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  &__switch-btn {
+    padding: 3px 10px;
+    border: 1px solid rgba(134, 134, 133, 0.45);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.6);
+    font-family: $font-harmony;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+
+    &:hover {
+      border-color: $color-subcard-selected;
+      color: #fff;
+    }
+
+    &.is-active {
+      border-color: $color-subcard-selected;
+      background: rgba(247, 255, 72, 0.15);
+      color: $color-subcard-selected;
+    }
   }
 
   // ---- 5. 删除群聊 -------------------------------------------------------

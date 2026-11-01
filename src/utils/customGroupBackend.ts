@@ -33,9 +33,11 @@
 // =============================================================================
 
 import { useSettingsStore } from '../stores/settings'
+import { useChatStore } from '../stores/chat'
 import { customChatCompletion, parseSuggestionList } from './customApi'
 import type { CustomChatMessage } from './customApi'
 import { applyImmersiveToCharacterPrompt, stripImmersive } from './immersive'
+import { getTrustStageInfo } from './roleplayPrompt'
 import { devInfo, devWarn } from './logger'
 import type {
   CreateGroupSessionInput,
@@ -323,6 +325,30 @@ async function generateReply(
   const character = applyImmersiveToCharacterPrompt(
     store.getCharacterPrompt(speaker), opts.immersive)
   if (character) messages.push({ role: 'system', content: character })
+
+  // 第 2.4 段: 慢养成信赖度状态机
+  if (store.roleplayEngineEnabled) {
+    const chatStore = useChatStore()
+    const trust = chatStore.getCharacterTrustLevel(speaker)
+    const stage = getTrustStageInfo(trust)
+    messages.push({
+      role: 'system',
+      content: `【对管理员的当前信赖度：${trust}% (${stage.name})】\n${stage.desc}。在群聊面对管理员发言时，自然体现此亲密度边界。`,
+    })
+  }
+
+  // 第 2.5 段: 注入该干员与管理员在单聊中的独家私密记忆
+  if (store.groupInheritMemory) {
+    const chatStore = useChatStore()
+    const card = chatStore.activeCard
+    const cardAllowed = !card || card.inheritSingleChatMemory !== false
+    if (cardAllowed) {
+      const privateMemory = chatStore.getCharacterPrivateMemory(speaker)
+      if (privateMemory) {
+        messages.push({ role: 'system', content: privateMemory })
+      }
+    }
+  }
 
   for (const h of history.slice(-HISTORY_LIMIT)) {
     let text = (h.text ?? '').trim()

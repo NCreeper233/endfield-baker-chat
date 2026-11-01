@@ -49,16 +49,22 @@ const FIXED_SYSTEM_PROMPT = `你是一个基于明日方舟：终末地世界观
 /** API 模式:custom=用户自填密钥(OpenAI 兼容接口) / backend=默认 API(角色固定后端,地址内置) / legacy=旧版直连模式(不推荐,直连 Agnes API) */
 export type ApiMode = 'custom' | 'backend' | 'legacy'
 
+export type ApiProtocol = 'openai' | 'gemini'
+
 /** API 配置结构 */
 export interface ApiConfig {
   /** API 模式 */
   apiMode: ApiMode
-  /** API Base URL（如 https://api.openai.com/v1） */
+  /** 接口协议: 'openai' (OpenAI 兼容) | 'gemini' (Google GenAI 原生) */
+  apiProtocol?: ApiProtocol
+  /** API Base URL（如 https://api.openai.com/v1，Gemini 留空默认官方端点） */
   baseUrl: string
   /** API Key */
   apiKey: string
-  /** 模型名（如 gpt-4o、deepseek-chat） */
+  /** 模型名（如 gpt-4o、gemini-2.5-flash） */
   model: string
+  /** 核采样 topP (默认 0.95) */
+  topP?: number
   /** 后端模式完整接口地址(含路径,如 http://localhost:8000/chat) */
   backendUrl: string
   /** 温度（0-2，默认 1.0） */
@@ -111,9 +117,11 @@ export const LEGACY_API_MODEL = 'agnes-2.5-flash'
 /** 默认 API 配置(默认 API = 后端模式,地址内置无需填写;custom 模式需用户填写;legacy 模式直连 Agnes API) */
 const DEFAULT_API_CONFIG: ApiConfig = {
   apiMode: 'backend',
+  apiProtocol: 'openai',
   baseUrl: '',
   apiKey: '',
   model: '',
+  topP: 0.95,
   backendUrl: '',
   temperature: 1.0,
   maxTokens: 2048,
@@ -183,12 +191,23 @@ export const useSettingsStore = defineStore('settings', () => {
   const apiConfig = ref<ApiConfig>(readApiConfig())
 
   /** API 是否已配置(custom 模式需 baseUrl+apiKey+model / 默认 API 地址内置,始终可用 / legacy 模式直连 Agnes API,始终可用) */
-  const isApiConfigured = ref(
-    (apiConfig.value.apiMode === 'custom' &&
-      !!apiConfig.value.baseUrl && !!apiConfig.value.apiKey && !!apiConfig.value.model) ||
-    apiConfig.value.apiMode === 'backend' ||
-    apiConfig.value.apiMode === 'legacy',
-  )
+  function checkApiConfigured(cfg: ApiConfig): boolean {
+    if (cfg.apiMode === 'backend' || cfg.apiMode === 'legacy') return true
+    if (cfg.apiMode === 'custom') {
+      const isGemini =
+        cfg.apiProtocol === 'gemini' ||
+        (!cfg.baseUrl &&
+          (cfg.model?.toLowerCase().includes('gemini') ||
+            /^(AIzaSy|AQ)/.test((cfg.apiKey || '').trim())))
+      if (isGemini) {
+        return !!cfg.apiKey && !!cfg.model
+      }
+      return !!cfg.baseUrl && !!cfg.apiKey && !!cfg.model
+    }
+    return false
+  }
+
+  const isApiConfigured = ref(checkApiConfigured(apiConfig.value))
 
   // ---- 角色头像的"第二张形象"开关 ------------------------------------------
   /**
@@ -216,11 +235,7 @@ export const useSettingsStore = defineStore('settings', () => {
     apiConfig,
     (cfg) => {
       writeJSON(API_CONFIG_KEY, cfg)
-      isApiConfigured.value =
-        (cfg.apiMode === 'custom' &&
-          !!cfg.baseUrl && !!cfg.apiKey && !!cfg.model) ||
-        cfg.apiMode === 'backend' ||
-        cfg.apiMode === 'legacy'
+      isApiConfigured.value = checkApiConfigured(cfg)
     },
     { deep: true },
   )
@@ -385,6 +400,38 @@ export const useSettingsStore = defineStore('settings', () => {
   watch(useNewPrompt, (val) => {
     try {
       localStorage.setItem(USE_NEW_PROMPT_KEY, val ? '1' : '0')
+    } catch {
+      // 静默失败
+    }
+  })
+
+
+
+  // ---- 二次元慢养成与反 OOC 状态机 ----------------------------------------
+  const ROLEPLAY_ENGINE_KEY = `${STORAGE_PREFIX}-roleplay-engine`
+  const roleplayEngineEnabled = ref<boolean>(localStorage.getItem(ROLEPLAY_ENGINE_KEY) !== '0')
+  watch(roleplayEngineEnabled, (val) => {
+    try {
+      localStorage.setItem(ROLEPLAY_ENGINE_KEY, val ? '1' : '0')
+    } catch {}
+  })
+
+  const USER_ROLE_NAME_KEY = `${STORAGE_PREFIX}-user-role-name`
+  const userRoleName = ref<string>(localStorage.getItem(USER_ROLE_NAME_KEY) || '管理员')
+  watch(userRoleName, (val) => {
+    try {
+      localStorage.setItem(USER_ROLE_NAME_KEY, val)
+    } catch {}
+  })
+
+  // ---- 实验性功能：群聊同步单聊记忆（全局,持久化,默认开启） ----------------
+  const GROUP_INHERIT_MEMORY_KEY = `${STORAGE_PREFIX}-group-inherit-memory`
+  /** 开启后,群聊各干员发言时自动注入其与管理员的私聊印象与记忆（默认开启） */
+  const groupInheritMemory = ref<boolean>(localStorage.getItem(GROUP_INHERIT_MEMORY_KEY) !== '0')
+
+  watch(groupInheritMemory, (val) => {
+    try {
+      localStorage.setItem(GROUP_INHERIT_MEMORY_KEY, val ? '1' : '0')
     } catch {
       // 静默失败
     }
@@ -744,6 +791,9 @@ export const useSettingsStore = defineStore('settings', () => {
       newInputPanel: newInputPanel.value,
       // 实验性:AI 推荐回复(默认开启;单聊/群聊一体)
       choicesEnabled: choicesEnabled.value,
+      groupInheritMemory: groupInheritMemory.value,
+      roleplayEngineEnabled: roleplayEngineEnabled.value,
+      userRoleName: userRoleName.value,
       // 实验性:SSE 流式回复(默认关闭)
       sseStreaming: sseStreaming.value,
       summaryConfig: { ...summaryConfig.value },
@@ -776,6 +826,9 @@ export const useSettingsStore = defineStore('settings', () => {
     if (typeof s.bracketCenter === 'boolean') bracketCenter.value = s.bracketCenter
     if (typeof s.newInputPanel === 'boolean') newInputPanel.value = s.newInputPanel
     if (typeof s.choicesEnabled === 'boolean') choicesEnabled.value = s.choicesEnabled
+    if (typeof s.groupInheritMemory === 'boolean') groupInheritMemory.value = s.groupInheritMemory
+    if (typeof s.roleplayEngineEnabled === 'boolean') roleplayEngineEnabled.value = s.roleplayEngineEnabled
+    if (typeof s.userRoleName === 'string') userRoleName.value = s.userRoleName
     if (typeof s.sseStreaming === 'boolean') sseStreaming.value = s.sseStreaming
     if (s.summaryConfig && typeof s.summaryConfig === 'object') {
       summaryConfig.value = { ...summaryConfig.value, ...(s.summaryConfig as Partial<SummaryConfig>) }
@@ -803,6 +856,9 @@ export const useSettingsStore = defineStore('settings', () => {
     apiRoute,
     setApiRoute,
     choicesEnabled,
+    groupInheritMemory,
+    roleplayEngineEnabled,
+    userRoleName,
     // 实验性:SSE 流式回复(默认关闭)
     sseStreaming,
     useNewPrompt,

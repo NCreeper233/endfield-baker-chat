@@ -206,7 +206,10 @@ async function requestModels(url: string, apiKey: string): Promise<ModelListResu
   try {
     const headers: Record<string, string> = {}
     // 部分端点(本地 Ollama / 内网网关)不需要 Key,带了也不冲突
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`
+      headers['x-goog-api-key'] = apiKey
+    }
 
     const response = await fetch(url, { method: 'GET', headers, signal: controller.signal })
 

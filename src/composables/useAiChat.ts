@@ -22,6 +22,7 @@
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import { streamChat, buildMessages } from '../utils/llm'
+import { buildRoleplaySystemPrompt } from '../utils/roleplayPrompt'
 import {
   buildBackendRequest,
   fetchBackendReply,
@@ -578,8 +579,22 @@ export function useAiChat() {
       } else {
         // 原有模式:系统提示词 + 全局世界观 + 角色提示词 + 历史消息,SSE 流式调用
         // 两条 system 消息统一由 settings store 产出,保证与用量面板的统计口径一致
-        const systemMessage = settingsStore.getSystemMessage()
-        const characterMessage = settingsStore.getCharacterMessage(characterName)
+        let systemMessage = settingsStore.getSystemMessage()
+        let characterMessage = settingsStore.getCharacterMessage(characterName)
+
+        if (settingsStore.roleplayEngineEnabled) {
+          const trustLevel = chatStore.getCharacterTrustLevel(characterName)
+          const userName = settingsStore.userRoleName || '管理员'
+          const worldSetting = settingsStore.worldView.trim() || '明日方舟：终末地 / 塔卫二'
+          systemMessage = buildRoleplaySystemPrompt({
+            charName: characterName,
+            worldSetting,
+            userName,
+            charPersona: characterMessage,
+            trustLevel,
+          })
+          characterMessage = ''
+        }
 
         const isCustom = settingsStore.apiConfig.apiMode === 'custom'
 

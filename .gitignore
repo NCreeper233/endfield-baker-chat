@@ -22,3 +22,8 @@ Thumbs.db
 *.local
 .vscode/*
 !.vscode/settings.json
+
+
+# Gemini Desktop Pet Subproject
+gemini_desktop_pet/
+Run_Ha-Gemi_EXE.bat

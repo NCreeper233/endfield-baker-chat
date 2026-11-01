@@ -230,6 +230,18 @@ export interface Card {
    * 历史仍由前端维护并随每次请求上传。
    */
   groupSessionId?: string
+  /**
+   * 是否带入干员单聊私密记忆
+   *
+   * 开启后(默认)，群内各干员发言时将结合其与管理员在私聊中的最近对话记忆。
+   */
+  inheritSingleChatMemory?: boolean
+  /**
+   * 角色好感度/信赖度数值 (0 ~ 200, 缺省 25)
+   *
+   * 用于驱动二次元慢养成与反 OOC 状态机 (Progressive Relationship Engine)
+   */
+  trustLevel?: number
 }
 
 /** 过渡起始尺寸(px):文字气泡从加载气泡尺寸平滑过渡到自身尺寸 */
