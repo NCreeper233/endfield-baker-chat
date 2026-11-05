@@ -5,10 +5,9 @@
 // AI API 配置 + 提示词编辑,全部持久化到 localStorage(settings store)
 // 打开/关闭状态由父组件 App 持有
 // =============================================================================
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
 import { testApiConnection } from '../../utils/llm'
-import { MIN_SEGMENT_CHARS } from '../../utils/aiText'
 import { testBackendConnection } from '../../utils/backend'
 import { useModelPicker } from '../../composables/useModelPicker'
 import { guessContextWindow } from '../../utils/modelContext'
@@ -22,6 +21,7 @@ import {
 } from '../../utils/contextBudget'
 import { lookupModelContext } from '../../utils/modelsDev'
 import type { LibraryHit } from '../../utils/modelsDev'
+import { RAG_MAX_TOP_K } from '../../utils/rag'
 import { useChatStore } from '../../stores/chat'
 import { CHARACTER_PROMPTS } from '../../constants/prompts'
 import {
@@ -31,10 +31,12 @@ import {
 } from '../../constants/apiRoutes'
 import { SETTINGS_NAV } from '../../constants/settingsNav'
 import type { SettingsTabKey } from '../../constants/settingsNav'
-import { isMobileView } from '../../composables/useMobile'
-// ⛔ 临时彩蛋(可删):中秋兑换码的状态与文案 —— 删法见 src/easteregg/moon/README.md
-import { MOON_HINT, moonRedeemed, redeemMoon } from '../../easteregg/moon/redeem'
 import DataManagerDialog from './DataManagerDialog.vue'
+// 面板设计系统的三个小组件(分组标题 / 设置行 / 分段控件)
+import SetSection from './ui/SetSection.vue'
+import SetRow from './ui/SetRow.vue'
+import SegControl from './ui/SegControl.vue'
+import { MATERIALS } from '../../constants/materials'
 
 const props = defineProps<{
   /** 是否展开 */
@@ -56,244 +58,49 @@ const activeLabel = computed(
   () => SETTINGS_NAV.find(t => t.key === activeTab.value)?.label ?? '设置',
 )
 
+/** 提示行语气(与 SetRow 的 tone 一一对应:成功 / 警示 / 中性) */
+type HintTone = 'ok' | 'warn' | 'keep'
+
 /**
- * 切换标签页
+ * 布尔开关的分段控件选项
  *
- * 桌面:常驻一列,换页即可。
- * 窄屏(抽屉形态):选完顺手把浮层收起 —— 不收的话它会一直压着刚选中的那半屏内容。
+ * 设置页里绝大多数开关都只有两档,统一用这一份选项表:
+ * 分段控件只认字符串值,布尔状态由调用方映射成 'on' / 'off'。
  */
-function onSelectTab(key: SettingsTabKey) {
-  activeTab.value = key
-  if (isMobileView.value) navOpen.value = false
+const BOOL_SEG = [
+  { value: 'on', label: '开启' },
+  { value: 'off', label: '关闭' },
+]
+
+/** 接口模式三选一 → switchApiMode(值来自分段控件的字符串) */
+function onApiModeChange(value: string): void {
+  if (value === 'backend' || value === 'custom' || value === 'legacy') switchApiMode(value)
 }
 
-// ⛔ 临时彩蛋(可删):关于页的兑换码输入 —— 状态与文案都在 easteregg/moon/redeem
-/** 输入框里的兑换码草稿 */
-const eggCode = ref('')
-/** 上一次兑换是否失败(只在输入框下方提示,不改任何状态) */
-const eggWrong = ref(false)
-
-/** 点「兑换」/ 回车:对了才置位(= 月亮从这一刻起才会被渲染、才会开始下载) */
-function onRedeemEgg(): void {
-  if (redeemMoon(eggCode.value)) {
-    eggWrong.value = false
-    eggCode.value = ''
-  } else {
-    eggWrong.value = true
-  }
+/** 后端路线(默认 / 备用两条域名) */
+function onApiRouteChange(value: string): void {
+  const hit = API_ROUTE_OPTIONS.find(o => o.value === value)
+  if (hit) settingsStore.setApiRoute(hit.value)
 }
 
-/**
- * 页签栏(窄屏抽屉)是否展开
- *
- * 两端的形态不一样,所以两端的默认值也不一样:
- *   · 桌面:常驻一列「图标 + 文字」,没有收起态 —— 这个值在桌面端不参与样式
- *   · 窄屏:平时是一条只露图标的窄栏($nav-rail-w-sm),点箭头展开成一栏完整菜单,
- *          压在内容之上并弹出遮罩(见媒体查询与 &__nav-scrim)
- *
- * 初始值按设备给,跨断点时回到该端的默认值(手机旋屏、桌面窗口拖到 768 以下
- * 都不会留下"窄屏上还硬撑着展开的抽屉")。
- */
-const navOpen = ref(!isMobileView.value)
-
-watch(isMobileView, (mobile) => {
-  navOpen.value = !mobile
-})
-
-// ---- 页签栏选中指示条(两端都是最左侧的竖黄条) ------------------------------
-// 窄屏抽屉与桌面竖列同为竖排,黄条方向一致 —— 不再需要横竖两套样式。
-/** 页签行容器(ref) */
-const navListEl = ref<HTMLElement | null>(null)
-/** 各页签项 DOM(按键名缓存,供指示条测量) */
-const navItemEls = new Map<string, HTMLElement>()
-/** 就绪信号:递增即强制指示条重算(打开面板、跨断点重排时各一次) */
-const navReady = ref(0)
-
-/**
- * 指示条是否已完成首次定位
- *
- * 首帧定位必须**不带过渡** —— 否则打开设置面板时,黄条会从列表起点一路滑到
- * 激活项上。定位落位后再打开过渡,后续切页才是平滑滑动(见 &__nav-indicator)。
- */
-const indicatorReady = ref(false)
-
-/**
- * 窄屏横向页签行的滚动状态
- *
- * 页签行两侧那层渐隐(见媒体查询里的 &__nav::before / ::after)只在
- * "那一侧确实还有页签藏着"时才显示:
- *   滚到最左端 → 左渐隐消失;滚到最右端 → 右渐隐消失;
- *   页签全放得下(scrollWidth == clientWidth)→ 两侧都不显示。
- * 否则会让人误以为还有内容没露出来。
- */
-const navScrollable = ref(false)
-const navAtStart = ref(true)
-const navAtEnd = ref(true)
-
-/** 重新量一次页签行的滚动状态(scroll 事件、开面板、跨断点、窗口尺寸变化时调用) */
-function updateNavScrollState(): void {
-  const el = navListEl.value
-  if (!el) return
-  const max = el.scrollWidth - el.clientWidth
-  // 误差 1px:缩放 / 小数宽度下 scrollWidth 常比 clientWidth 大零点几
-  navScrollable.value = max > 1
-  navAtStart.value = el.scrollLeft <= 1
-  navAtEnd.value = el.scrollLeft >= max - 1
+/** 总结 API 模式(默认 / 自定义) */
+function onSummaryModeChange(value: string): void {
+  if (value === 'default' || value === 'custom') switchSummaryApiMode(value)
 }
-
-// 旋屏(手机横竖屏)时页签宽度不变但可视宽变了,需要重新量一次。
-// 面板本身是 v-if,挂不上元素级的 ResizeObserver,所以监听窗口。
-onMounted(() => window.addEventListener('resize', updateNavScrollState))
-onBeforeUnmount(() => window.removeEventListener('resize', updateNavScrollState))
-
-/** 记录页签项 DOM(Vue ref 回调:卸载时传 null) */
-function setNavItemEl(key: string, el: unknown) {
-  if (el) navItemEls.set(key, el as HTMLElement)
-}
-
-/**
- * 把当前页签滚进视野
- *
- * 窄屏的页签行是横向可滑动的:上次停在靠后的页签(如「关于」)时重开设置,
- * 激活项可能停在屏幕外 —— 看上去就像"一项都没选中"。桌面是竖列、六项一次看全,
- * 这个调用在那边是空操作(nearest 判定已经在视野内就不动)。
- */
-function revealActiveTab(): void {
-  navItemEls.get(activeTab.value)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-}
-
-/**
- * 指示条几何:一次算出四项,由样式按断点各取所需。
- *
- * 桌面页签栏是竖列 → 取 height + translateY;
- * 窄屏页签栏是横排 → 取 width + translateX(见媒体查询里的 &__nav-indicator)。
- *
- * 为什么用 offset* 而不是 getBoundingClientRect:窄屏列表要横向滚动,
- * 后者量出来的是"相对视口"的位置(含 scrollLeft),列表一滚黄条就跑偏;
- * offset* 是相对列表内边距边缘的距离,与滚动位置无关。
- * navReady 必须无条件读取(在提前返回之前),否则首帧时还没建立依赖,
- * 页签项进 DOM 后无法触发重算。
- */
-const navIndicatorStyle = computed((): Record<string, string> => {
-  void navReady.value
-  const el = navItemEls.get(activeTab.value)
-  if (!el) return {}
-  return {
-    '--ind-w': `${el.offsetWidth}px`,
-    '--ind-h': `${el.offsetHeight}px`,
-    '--ind-x': `${el.offsetLeft}px`,
-    '--ind-y': `${el.offsetTop}px`,
-  }
-})
-
-/**
- * 每次打开面板:重新定位指示条,并遵循"先落位、后开过渡"
- *
- * 为什么挂在 open 上而不是 onMounted —— 面板内容是 v-if="open" 的:
- * 组件 mount 时面板还没开、页签项根本不存在(navItemEls 为空),
- * 那一刻做定位只会得到空样式;必须等 open 翻真、页签项进 DOM 才谈得上定位。
- * (早期实现就是挂在 onMounted 上,于是打开面板时黄条会从起点滑到激活项。)
- *
- * 三步缺一不可:
- *   1. await nextTick()  —— 等面板与页签项真正进 DOM,模板 ref 就绪
- *   2. navReady++        —— 触发指示条重算,完成首帧定位(此时过渡仍是关的)
- *   3. 空一帧后再开过渡   —— 让浏览器先把上一步的位置应用上去
- */
-watch(
-  () => props.open,
-  async (open) => {
-    if (!open) {
-      // 关闭即复位,下次打开重新走一遍完整流程
-      indicatorReady.value = false
-      return
-    }
-    await nextTick()
-    navReady.value++
-    revealActiveTab()
-    updateNavScrollState()
-    await new Promise<void>(r => requestAnimationFrame(() => r()))
-    indicatorReady.value = true
-  },
-  { immediate: true },
-)
-
-/**
- * 跨断点重排(mobile ↔ 桌面):黄条方向由纵向变横向,测量值必须重算。
- * 交接瞬间把过渡关掉,免得横竖两套数值之间做一次奇怪的滑动。
- */
-watch(isMobileView, async () => {
-  indicatorReady.value = false
-  await nextTick()
-  navReady.value++
-  revealActiveTab()
-  updateNavScrollState()
-  await new Promise<void>(r => requestAnimationFrame(() => r()))
-  indicatorReady.value = true
-})
 
 /** 内容滚动容器(切页时回到顶部用) */
 const bodyEl = ref<HTMLElement | null>(null)
 
 /**
- * 切页回到顶部
+ * 切换标签页
  *
- * 各页高度差很大(关于页很短、API 页很长),沿用上一页的滚动位置会落在半空中 ——
- * 换页时又看不见"滚动条"(面板本来就隐藏了滚动条),很容易以为内容丢了。
+ * 换页后把内容区滚回顶部:各页高度差很大(API 页很长、关于页很短),
+ * 沿用上一页的滚动位置会落在半空中。
  */
-watch(activeTab, () => {
+function onSelectTab(key: SettingsTabKey) {
+  if (activeTab.value === key) return
+  activeTab.value = key
   if (bodyEl.value) bodyEl.value.scrollTop = 0
-})
-
-/**
- * QQ 群入口(关于页:标题下方、相关链接上方)
- *
- * 点击链接会新开加群页,同时把群号复制到剪贴板 ——
- * 跳转后若用户没登录 QQ 或想手动搜索,群号已经躺在剪贴板里了。
- */
-const QQ_GROUPS = [
-  {
-    label: 'BAKER AI 公告群',
-    code: '1056020027',
-    url: 'https://qun.qq.com/universal-share/share?ac=1&authKey=DPFveNVF1Z52nYKN7Y5hkQpiyePOyZO1tM%2B5HC3RMwbdBIfllYsZnHlF2JiSOuob&busi_data=eyJncm91cENvZGUiOiIxMDU2MDIwMDI3IiwidG9rZW4iOiJiVWRLVFpsUjZvNWN3NUdoajZJS290aWg5M1lleEJuemc2dnBWUUlsNmhSZFZYN3JySE9xRy9XUUh0dXY1cmpEIiwidWluIjoiMTc2MjQ1NTE3In0%3D&data=kxqHAM5MIP1o9MYhyyAWOUWFZtR-xuKw_s0zbIlz-qz0Jh1KUYK6kpQVwWE5AiG4S4yrUU_hloIJ8m9b4eihTw&svctype=4&tempid=h5_group_info',
-  },
-  {
-    label: 'BAKER AI 交流群',
-    code: '926147159',
-    url: 'https://qun.qq.com/universal-share/share?ac=1&authKey=VuPGuN9ZJgrnDk1yAYhNa1ttQMgjzWtLq3Dy4zFLeySkCrgZw9XGMAdEkyqwqLuG&busi_data=eyJncm91cENvZGUiOiI5MjYxNDcxNTkiLCJ0b2tlbiI6IjdOY1c3K1B2NnRmR2QrYTJKSklqUVZnNHRxNnBlUytLVlErYm1WdWU1bW5JQjlnQyszam1LLzFuVGlzVjMxNjIiLCJ1aW4iOiIxNzYyNDU1MTcifQ%3D%3D&data=ImB81MsUWZyM0CGFfQegtwvYV4fSFCwpojz2Bjv4-r5Ha_O8_Q8nsfO8vqvWYdVFl_WwpAFVHkfVv4PtQrmSXg&svctype=4&tempid=h5_group_info',
-  },
-] as const
-
-/**
- * 复制文本到剪贴板
- *
- * 优先用 Clipboard API —— 它只在**安全上下文**(https / localhost)可用,
- * 而本应用既可能跑在 http 页面、也可能在 Electron / 安卓 WebView 里,
- * 所以保留 textarea + execCommand 的兜底。
- * 复制失败不影响链接跳转,故整体静默。
- */
-async function copyText(text: string): Promise<void> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      return
-    }
-  } catch {
-    // 落到下面的兜底方案
-  }
-  try {
-    const el = document.createElement('textarea')
-    el.value = text
-    el.setAttribute('readonly', '')
-    el.style.position = 'fixed'
-    el.style.top = '0'
-    el.style.opacity = '0'
-    document.body.appendChild(el)
-    el.select()
-    document.execCommand('copy')
-    document.body.removeChild(el)
-  } catch {
-    // 忽略:跳转仍会正常进行
-  }
 }
 
 // ---- API 配置本地缓存(打开时同步,保存时写入 store) -------------------------
@@ -339,11 +146,11 @@ const summaryBlocked = computed(
 )
 
 /** 思考模式禁用时的说明 */
-const THINK_BLOCKED_NOTE = '旧版直连不支持思考开关（仅默认 API / 自定义 API / 群聊生效）'
+const THINK_BLOCKED_NOTE = '旧版模式不支持思考开关'
 /** 新版提示词禁用时的说明 */
-const NEW_PROMPT_BLOCKED_NOTE = '仅「默认 API」模式生效（后端按 characters_v2/ 加载）'
+const NEW_PROMPT_BLOCKED_NOTE = '仅「默认 API」模式可用'
 /** 智能总结开关禁用时的说明 */
-const SUMMARY_BLOCKED_NOTE = '仅默认 API 模式 / 群聊生效，当前模式下不生效'
+const SUMMARY_BLOCKED_NOTE = '当前模式下不生效'
 
 /** 受限开关的悬浮提示(禁用时说明原因,可用时不给多余提示) */
 const thinkTitle = computed(() => (thinkBlocked.value ? THINK_BLOCKED_NOTE : undefined))
@@ -361,9 +168,9 @@ function blockedHint(
   on: boolean,
   onText: string,
   offText: string,
-) {
-  if (blocked) return { text: note, level: 'sd__hint--warn' }
-  return { text: on ? onText : offText, level: on ? 'sd__hint--ok' : 'sd__hint--warn' }
+): { text: string; level: HintTone } {
+  if (blocked) return { text: note, level: 'warn' }
+  return { text: on ? onText : offText, level: on ? 'ok' : 'warn' }
 }
 
 const thinkHint = computed(() =>
@@ -371,7 +178,7 @@ const thinkHint = computed(() =>
     thinkBlocked.value,
     THINK_BLOCKED_NOTE,
     settingsStore.thinkEnabled,
-    '已开启：角色会先深度思考再回答',
+    '已开启：角色先思考再回答（更慢，但更稳）',
     '已关闭：角色直接回答',
   ),
 )
@@ -383,9 +190,9 @@ const thinkHint = computed(() =>
  */
 const forceSearchHint = computed(() => {
   if (settingsStore.forceSearch) {
-    return { level: 'sd__hint--warn' as const, text: '已开启：每条消息都强制联网搜索（跳过智能判断，上游消耗更高）' }
+    return { level: 'warn' as const, text: '已开启：每条消息都联网搜索，消耗更高' }
   }
-  return { level: 'sd__hint--ok' as const, text: '已关闭（推荐）：由后端智能判断这条消息是否需要联网搜索' }
+  return { level: 'ok' as const, text: '已关闭（推荐）：由系统判断是否需要联网' }
 })
 /**
  * 知识源提示（RAG 语料库 / 联网搜索）
@@ -395,9 +202,9 @@ const forceSearchHint = computed(() => {
  */
 const knowledgeSourceHint = computed(() => {
   if (settingsStore.webSearchEnabled) {
-    return { level: 'sd__hint--ok' as const, text: '已开启：改用联网搜索（每次按需联网检索最新信息）' }
+    return { level: 'ok' as const, text: '已开启：需要时联网查最新资料' }
   }
-  return { level: 'sd__hint--keep' as const, text: '已关闭（默认）：使用 RAG 语料库（本地知识库检索，速度更快）' }
+  return { level: 'keep' as const, text: '已关闭：用后端 RAG 语料库检索，速度更快' }
 })
 /**
  * 「沉浸式对话模式」提示行
@@ -405,13 +212,13 @@ const knowledgeSourceHint = computed(() => {
  * 三种模式 + 单聊/群聊都已落实(后端过滤或前端本地过滤)→ 永不置灰,
  * 因此不再走 blockedHint,只按开关状态给描述。
  */
-const immersiveHint = computed(() => {
+const immersiveHint = computed<{ text: string; level: HintTone }>(() => {
   const on = settingsStore.immersiveMode
   return {
-    level: on ? 'sd__hint--ok' : 'sd__hint--warn',
+    level: on ? 'ok' : 'warn',
     text: on
-      ? '已开启：角色只输出对话语句，不显示括号动作描写'
-      : '已关闭：角色保留括号内动作/神态/情景描写',
+      ? '已开启：角色只说话，不写动作描写'
+      : '已关闭：角色会写括号里的动作与神态',
   }
 })
 const useNewPromptHint = computed(() =>
@@ -419,8 +226,8 @@ const useNewPromptHint = computed(() =>
     newPromptBlocked.value,
     NEW_PROMPT_BLOCKED_NOTE,
     settingsStore.useNewPrompt,
-    '已开启：加载 characters_v2 新版角色提示词',
-    '已关闭：使用默认旧版角色提示词',
+    '已开启：使用新版角色设定',
+    '已关闭：使用默认角色设定',
   ),
 )
 
@@ -438,7 +245,7 @@ const useNewPromptHint = computed(() =>
 const bracketStyleLocked = computed(() => settingsStore.immersiveMode)
 
 /** 被沉浸式锁住时的统一说明(悬浮提示与提示行共用同一句) */
-const IMMERSIVE_LOCK_NOTE = '「沉浸式对话模式」开启时，角色不写括号动作 / 神态描写'
+const IMMERSIVE_LOCK_NOTE = '「沉浸式对话模式」开着时，角色不写括号描写'
 
 /**
  * 「括号描写居中」提示行
@@ -449,18 +256,18 @@ const IMMERSIVE_LOCK_NOTE = '「沉浸式对话模式」开启时，角色不写
 const bracketCenterHint = computed(() => {
   if (bracketStyleLocked.value) {
     return {
-      level: 'sd__hint--keep' as const,
-      text: `${IMMERSIVE_LOCK_NOTE}，没有可居中的内容；关掉它即可恢复本项（本项设置不会被改动）`,
+      level: 'keep' as const,
+      text: '沉浸式模式下没有括号描写，关掉它才能设置这一项',
     }
   }
   return settingsStore.bracketCenter
     ? {
-        level: 'sd__hint--ok' as const,
-        text: '已开启：() 内的动作 / 神态描写从气泡中取出，单独渲染为一条居中文本（不含括号）',
+        level: 'ok' as const,
+        text: '已开启：括号里的动作与神态单独成行、居中显示',
       }
     : {
-        level: 'sd__hint--warn' as const,
-        text: '已关闭：括号描写留在气泡里（默认，旧版行为）',
+        level: 'warn' as const,
+        text: '已关闭：括号描写留在气泡里',
       }
 })
 
@@ -475,24 +282,24 @@ const bracketCenterHint = computed(() => {
 const bracketColorHint = computed(() => {
   if (bracketStyleLocked.value) {
     return {
-      level: 'sd__hint--keep' as const,
-      text: `${IMMERSIVE_LOCK_NOTE}，没有可上色的内容；关掉它即可恢复本项（本项设置不会被改动）`,
+      level: 'keep' as const,
+      text: '沉浸式模式下没有可上色的内容',
     }
   }
   if (!settingsStore.bracketCenter) {
     return {
-      level: 'sd__hint--keep' as const,
-      text: '需先开启上方「括号描写居中」—— 那条决定有没有居中行，本条只决定居中行的颜色',
+      level: 'keep' as const,
+      text: '需先开启上方「括号描写居中」',
     }
   }
   return settingsStore.bracketColor
     ? {
-        level: 'sd__hint--ok' as const,
-        text: '已开启：居中描写按说话人的属性上色（物理 灰 / 灼热 红 / 电磁 黄 / 寒冷 青 / 自然 绿 / 超域 紫）',
+        level: 'ok' as const,
+        text: '已开启：居中描写按角色属性上色（灰 / 红 / 黄 / 青 / 绿 / 紫）',
       }
     : {
-        level: 'sd__hint--warn' as const,
-        text: '已关闭（默认）：所有居中描写都用统一的半透明白',
+        level: 'warn' as const,
+        text: '已关闭：所有居中描写统一用半透明白',
       }
 })
 
@@ -505,12 +312,12 @@ const bracketColorHint = computed(() => {
 const centerMyBracketHint = computed(() =>
   settingsStore.centerMyBracket
     ? {
-        level: 'sd__hint--ok' as const,
-        text: '已开启：我发出的消息里最前面那对（）会抽成居中文本，颜色按我的身份属性（单人 = 管理员，群聊里扮演某角色 = 该角色）；后面的括号不动',
+        level: 'ok' as const,
+        text: '已开启：我方消息开头的括号单独居中，颜色随我的身份',
       }
     : {
-        level: 'sd__hint--warn' as const,
-        text: '已关闭（默认）：我方消息整条一个气泡，括号留在正文里',
+        level: 'warn' as const,
+        text: '已关闭：我方消息整条一个气泡',
       },
 )
 
@@ -783,23 +590,41 @@ const currentCharName = computed(() =>
 /** 所有可编辑提示词的角色名列表(内置角色) */
 const characterNames = computed(() => Object.keys(CHARACTER_PROMPTS))
 
-/**
- * 当前提示词绑定的角色(跟随当前对话,不可手动切换)
- *
- * 无选中对话 / 角色不在内置表 → 空串(草稿为空,编辑区禁用)。
- */
+/** 当前对话的角色名是否在内置表里(用于默认选中) */
 const selectedCharacter = computed<string>(() =>
   currentCharName.value && characterNames.value.includes(currentCharName.value)
     ? currentCharName.value
     : '',
 )
-/** 当前角色的提示词草稿 */
+
+/**
+ * 「提示词」页当前编辑的角色
+ *
+ * 与旧实现不同:这里**不跟随当前对话**,而是由用户在下拉里自己选 ——
+ * 想改谁就选谁,不必先切对话。
+ */
+const promptChar = ref<string>('')
+
+/** 提示词草稿(对应 promptChar 的角色) */
 const characterPromptDraft = ref('')
 
-/** 当前角色是否为内置角色(有默认提示词可恢复) */
-const isBuiltinCharacter = computed(() =>
-  selectedCharacter.value ? selectedCharacter.value in CHARACTER_PROMPTS : false,
+/** 只有自定义 API 模式下提示词才生效,所以也只有那时可编辑 */
+const promptsEditable = computed(() => isCustomMode.value)
+
+/** 当前角色是否已经用了自定义提示词(决定「恢复默认」是否出现) */
+const promptOverridden = computed(
+  () => !!promptChar.value && promptChar.value in settingsStore.promptOverrides,
 )
+
+/** 把 promptChar 对应的提示词读进草稿 */
+function loadPromptDraft(): void {
+  characterPromptDraft.value = promptChar.value
+    ? settingsStore.getCharacterPrompt(promptChar.value)
+    : ''
+}
+
+// 切换角色时同步草稿
+watch(promptChar, () => loadPromptDraft())
 
 // 打开弹窗时同步本地缓存
 watch(
@@ -809,8 +634,11 @@ watch(
       apiDraft.value = { ...settingsStore.apiConfig }
       // 智能总结草稿(打开时从 store 同步)
       summaryDraft.value = { ...settingsStore.summaryConfig }
-      // 提示词草稿跟随当前对话角色(角色由 currentCharName 派生,无需手动同步)
-      characterPromptDraft.value = settingsStore.getCharacterPrompt(selectedCharacter.value)
+      // 提示词页:默认选中当前对话的角色,没有就取第一个
+      if (!promptChar.value || !characterNames.value.includes(promptChar.value)) {
+        promptChar.value = selectedCharacter.value || characterNames.value[0] || ''
+      }
+      loadPromptDraft()
       // 自动填上下文窗口(被动模式:仅当用户没设置过,绝不覆盖手改过的值)
       applyContextGuess()
       // 再查一次在线模型库(内部有 24h 缓存与失败冷却,重复打开不会重复下载)
@@ -846,8 +674,8 @@ const summaryHint = computed(() =>
     summaryBlocked.value,
     SUMMARY_BLOCKED_NOTE,
     summaryDraft.value.enabled,
-    '已开启：不看条数；用量达到上下文窗口 80% 时自动总结 80% 以外的历史（留 20% 给 RAG）',
-    '已关闭：固定截断最近 50 条消息',
+    '已开启：对话快满时自动把早期内容总结成摘要',
+    '已关闭：只保留最近 50 条消息',
   ),
 )
 
@@ -864,15 +692,6 @@ watch(
   },
   { deep: true },
 )
-
-// 当前对话角色变化时同步提示词草稿(空角色 → 空提示词)
-watch(selectedCharacter, (name) => {
-  if (name) {
-    characterPromptDraft.value = settingsStore.getCharacterPrompt(name)
-  } else {
-    characterPromptDraft.value = ''
-  }
-})
 
 /**
  * API 配置草稿 → store 的即时写穿
@@ -926,109 +745,62 @@ async function onTestConnection() {
   }
 }
 
-/** 保存角色提示词 */
+/** 保存角色提示词(保存到「提示词」页当前选中的角色) */
 function saveCharacterPrompt() {
-  if (!selectedCharacter.value) return
-  settingsStore.setPromptOverride(selectedCharacter.value, characterPromptDraft.value)
+  if (!promptChar.value) return
+  settingsStore.setPromptOverride(promptChar.value, characterPromptDraft.value)
 }
 
 /** 重置角色提示词为内置默认 */
 function resetCharacterPrompt() {
-  if (!selectedCharacter.value) return
-  settingsStore.resetPromptOverride(selectedCharacter.value)
-  characterPromptDraft.value = settingsStore.getCharacterPrompt(selectedCharacter.value)
+  if (!promptChar.value) return
+  settingsStore.resetPromptOverride(promptChar.value)
+  loadPromptDraft()
 }
 
 /** 重置全部设置 */
 function resetAll() {
   settingsStore.resetAll()
   apiDraft.value = { ...settingsStore.apiConfig }
-  if (selectedCharacter.value) {
-    characterPromptDraft.value = settingsStore.getCharacterPrompt(selectedCharacter.value)
-  }
+  loadPromptDraft()
 }
 
 </script>
 
 <template>
-  <Transition name="ab">
-    <!-- 设置面板:居中窗口。左侧为页签栏(手机版改为顶部横向可滑动),右侧为当前页内容。
-         点面板外的半透明黑遮罩即关闭(回到对话主界面),与左上角「退出」按钮等价。
-         用 @click.self 精确判定"点的是遮罩本身",面板内部的点击不会冒泡到这里。 -->
-    <div v-if="open" class="sd" @click.self="emit('close')">
-      <div class="sd__panel">
-        <!-- 关闭(×):窄屏全屏时唯一的退出入口(桌面端由页签栏头部的箭头承担,这里隐藏) -->
-        <button class="sd__close" type="button" aria-label="关闭设置" @click="emit('close')">×</button>
-        <!-- ============ 页签栏 ============
-             桌面:常驻一列(左侧竖直,图标 + 文字,没有收起态);
-             窄屏:浮层抽屉 —— 收起时只剩一条图标窄栏($nav-rail-w-sm),
-                   点箭头展开成一栏完整菜单并压住内容、弹出遮罩(见媒体查询) -->
-        <aside
-          class="sd__nav"
-          :class="{
-            'sd__nav--open': navOpen,
-            'sd__nav--scrollable': navScrollable,
-            'sd__nav--at-start': navAtStart,
-            'sd__nav--at-end': navAtEnd,
-          }"
-        >
-          <div class="sd__nav-head">
-            <!-- 收起 / 展开按钮(仅窄屏渲染):单个箭头,展开时旋转 180°(向左 = 收起)。
-                 桌面端页签栏常驻一列,不需要它。 -->
-            <button
-              class="sd__nav-toggle"
-              type="button"
-              :aria-expanded="navOpen"
-              :aria-label="navOpen ? '收起页签栏' : '展开页签栏'"
-              @click="navOpen = !navOpen"
-            >
-              <svg viewBox="0 0 48 48" aria-hidden="true">
-                <path
-                  d="M20 10 L33 24 L20 38"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="4"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </button>
-            <!-- 退出按钮:关闭整个设置窗口,回到对话主界面。
-                 两端统一(左向箭头图标)。窄屏抽屉收起时它被窄栏裁掉,
-                 展开后回到头部右端;点面板外的黑遮罩同样能退出。 -->
-            <button
-              class="sd__nav-exit"
-              type="button"
-              aria-label="退出设置"
-              @click="emit('close')"
-            >
-              <svg viewBox="0 0 48 48" aria-hidden="true">
-                <path
-                  d="M28 10 L15 24 L28 38"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="4"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </button>
-            <span class="sd__nav-text sd__nav-title">设置</span>
+  <Transition name="pn-fade">
+    <div v-if="open" class="st">
+      <div class="pn-scrim" aria-hidden="true"></div>
+
+      <!-- 全屏面板:顶部分类页签 + 内容滚动区 -->
+      <div class="pn-win st__win" role="dialog" aria-modal="true" :aria-label="`设置 · ${activeLabel}`">
+        <div class="st__top">
+          <!-- 左上角:与主界面同款的小图 + 标题 -->
+          <div class="st__brand" aria-hidden="true">
+            <img class="st__brand-deco" :src="MATERIALS.headerDeco" alt="" />
+            <p class="st__brand-title">//设置</p>
           </div>
 
-          <div class="sd__nav-list" ref="navListEl" @scroll.passive="updateNavScrollState">
+          <!-- 分类页签 -->
+          <nav class="pn-tabs" role="tablist" aria-label="设置分类">
+            <span class="pn-tabs__backdrop" aria-hidden="true"></span>
             <button
               v-for="t in SETTINGS_NAV"
               :key="t.key"
-              class="sd__nav-item"
-              :class="{ 'sd__nav-item--active': activeTab === t.key }"
-              :ref="(el) => setNavItemEl(t.key, el)"
+              class="pn-tab"
+              :class="{ 'is-active': activeTab === t.key }"
               type="button"
+              role="tab"
+              :aria-selected="activeTab === t.key"
               :title="t.label"
               @click="onSelectTab(t.key)"
             >
-              <!-- 图标:实心片段用 currentColor 填充,其余一律描边(见 constants/settingsNav) -->
-              <span class="sd__nav-icon">
+              <span
+                class="pn-tab__block"
+                aria-hidden="true"
+                :style="activeTab === t.key ? { backgroundImage: `url(${MATERIALS.panelTabTexture})` } : undefined"
+              ></span>
+              <span class="pn-tab__icon">
                 <svg viewBox="0 0 48 48" aria-hidden="true">
                   <path
                     v-for="(p, i) in t.icon"
@@ -1036,777 +808,778 @@ function resetAll() {
                     :d="p.d"
                     :fill="p.filled ? 'currentColor' : 'none'"
                     :stroke="p.filled ? 'none' : 'currentColor'"
-                    stroke-width="4"
+                    stroke-width="3.4"
                     stroke-linecap="round"
                     stroke-linejoin="round"
                   />
                 </svg>
               </span>
-              <span class="sd__nav-text">{{ t.label }}</span>
+              <span class="pn-tab__label">{{ t.short }}</span>
             </button>
+          </nav>
 
-            <!-- 选中项最左侧的竖黄条(跟随激活项;首次定位后才开动画,见 indicatorReady) -->
-            <div
-              class="sd__nav-indicator"
-              :class="{ 'is-ready': indicatorReady }"
-              :style="navIndicatorStyle"
-            ></div>
-          </div>
-        </aside>
+          <button class="pn-close" type="button" aria-label="关闭设置" @click="emit('close')">
+            <svg viewBox="0 0 205 205" fill="currentColor" fill-rule="evenodd" aria-hidden="true">
+              <path d="M0 25L25 0L205 180L180 205ZM25 205L0 180L180 0L205 25Z"></path>
+            </svg>
+          </button>
+        </div>
 
-        <!-- 窄屏抽屉展开时的遮罩:点它收起(桌面端页签栏是常驻列,不需要) -->
-        <div
-          v-if="isMobileView"
-          class="sd__nav-scrim"
-          :class="{ 'sd__nav-scrim--on': navOpen }"
-          @click="navOpen = false"
-        ></div>
-
-        <!-- 当前页标题:主区第一行(两端都在页签栏右侧;抽屉收起时只露图标,
-             全靠这一行知道当前在哪一页,所以窄屏不再隐藏它) -->
-        <h2 class="sd__title">{{ activeLabel }}</h2>
-
-        <div class="sd__body" ref="bodyEl">
-          <!-- API 配置:顶部是模式开关,下面按模式分支;页面末尾是连接测试 / 重置全部 -->
-          <div v-if="activeTab === 'connection'" class="sd__section">
-            <!-- 模式切换:三列(默认 / 自定义 / 旧版),黄块跟随当前模式 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">API 模式</span>
-              <div class="sd__mode-toggle">
-                <!-- 黄色滑动指示条(跟随当前模式)。三列时一格 = 1/3,
-                     步进仍是 100% / 200%(位移基准是指示条自身宽度):
-                     第 2 格 = 自定义 API、第 3 格 = 旧版模式。 -->
-                <div
-                  class="sd__mode-indicator sd__mode-indicator--three"
-                  :class="{
-                    'sd__mode-indicator--step-1': isCustomMode,
-                    'sd__mode-indicator--step-2': isLegacyMode,
-                  }"
-                ></div>
-                <button
-                  class="sd__mode-btn"
-                  :class="{ 'sd__mode-btn--active': isBackendMode }"
-                  type="button"
-                  @click="switchApiMode('backend')"
-                >默认模式</button>
-                <button
-                  class="sd__mode-btn"
-                  :class="{ 'sd__mode-btn--active': isCustomMode }"
-                  type="button"
-                  @click="switchApiMode('custom')"
-                >自定义API</button>
-                <button
-                  class="sd__mode-btn"
-                  :class="{ 'sd__mode-btn--active': isLegacyMode }"
-                  type="button"
-                  @click="switchApiMode('legacy')"
-                >旧版模式</button>
-              </div>
-              <p v-if="isLegacyMode" class="sd__hint sd__hint--warn">旧版模式（不推荐）：直连API，功能受限，建议使用默认模式</p>
-            </div>
-
-            <template v-if="isBackendMode">
-              <p class="sd__desc sd__desc--keep">当前干员：{{ currentCharName || '未选中' }}</p>
-              <p class="sd__desc">服务方免费 API 模式下无法自定义提示词与世界观背景，请切换到「自定义 API」以启用。</p>
-
-              <!-- 后端路线(默认 / 备用两个域名,指向同一套后端)。
-                   部分网络环境连不上默认域名,切到备用即可 —— 上游完全相同,只是域名不同。 -->
-              <div class="sd__field">
-                <span class="sd__label">后端路线</span>
-                <div class="sd__route">
-                  <button
-                    v-for="opt in API_ROUTE_OPTIONS"
-                    :key="opt.value"
-                    type="button"
-                    class="sd__btn"
-                    :class="{ 'sd__btn--primary': settingsStore.apiRoute === opt.value }"
-                    @click="settingsStore.setApiRoute(opt.value)"
-                  >{{ opt.label }}</button>
-                </div>
-                <p class="sd__hint sd__hint--ok sd__hint--keep">
-                  当前：{{ currentRouteHost }}<span class="sd__pc-only">　两条路线指向同一套测试后端，连不上默认域名时切「备用」</span>
-                </p>
-              </div>
-            </template>
-
-            <template v-if="isLegacyMode">
-              <p class="sd__desc sd__desc--keep">当前干员：{{ currentCharName || '未选中' }}</p>
-              <p class="sd__desc">此模式功能受限，建议使用「默认 API」。</p>
-              <p class="sd__desc">服务方免费 API 模式下无法自定义提示词与世界观背景，请切换到「自定义 API」以启用。</p>
-              <div class="sd__field sd__field--row">
-                <span class="sd__label">完整历史模式</span>
-                <button
-                  type="button"
-                  class="sd__switch"
-                  :class="{ 'sd__switch--on': settingsStore.legacyUnlimitedHistory }"
-                  @click="settingsStore.legacyUnlimitedHistory = !settingsStore.legacyUnlimitedHistory"
-                >{{ settingsStore.legacyUnlimitedHistory ? '开启 ✓' : '关闭' }}</button>
-                <p class="sd__hint" :class="settingsStore.legacyUnlimitedHistory ? 'sd__hint--ok' : 'sd__hint--warn'">
-                  {{ settingsStore.legacyUnlimitedHistory ? '已开启：不限制历史条数，不触发智能总结，与旧版项目行为一致' : '已关闭：限制 50 条历史，可配合智能总结使用' }}
-                </p>
-              </div>
-            </template>
-
-              <!-- 自定义 API 分支:端点配置 + 提示词 + 世界观背景(仅自定义模式下可见/生效) -->
-              <template v-if="isCustomMode">
-<div class="sd__divider"></div>
-
-              <label class="sd__field">
-                <span class="sd__label">Base URL</span>
-                <input
-                  v-model="apiDraft.baseUrl"
-                  class="sd__input"
-                  type="text"
-                  placeholder="https://api.openai.com/v1"
+        <!-- ==================== 内容区 ==================== -->
+        <div ref="bodyEl" class="pn-body st__body">
+          <!-- ============ 1. API 配置 ============ -->
+          <template v-if="activeTab === 'connection'">
+            <SetSection title="接口模式">
+              <SetRow label="API 模式" desc="选择聊天使用哪套接口">
+                <SegControl
+                  :model-value="apiDraft.apiMode"
+                  :options="[
+                    { value: 'backend', label: '默认模式' },
+                    { value: 'custom', label: '自定义API' },
+                    { value: 'legacy', label: '旧版模式' },
+                  ]"
+                  aria-label="API 模式"
+                  @update:model-value="onApiModeChange"
                 />
-              </label>
-              <label class="sd__field">
-                <span class="sd__label">API Key</span>
-                <input
-                  v-model="apiDraft.apiKey"
-                  class="sd__input"
-                  type="password"
-                  placeholder="sk-..."
-                />
-              </label>
-              <label class="sd__field">
-                <span class="sd__label">模型名</span>
-                <input
-                  v-model="apiDraft.model"
-                  class="sd__input"
-                  type="text"
-                  placeholder="deepseek-v4-flash / glm-5.2 / kimi-k3 / ..."
-                  @change="applyContextGuess('change')"
-                />
-              </label>
+              </SetRow>
 
-              <!-- 模型列表:从 Base URL 的 /models 拉取,下拉直接选(免手敲模型名) -->
-              <div class="sd__field">
-                <div class="sd__actions">
-                  <button
-                    class="sd__btn sd__btn--preset"
-                    type="button"
-                    :disabled="modelListLoading"
-                    @click="onFetchModels"
-                  >{{ modelListLoading ? '获取中…' : '获取模型列表' }}</button>
-                </div>
-                <p v-if="modelListError" class="sd__hint sd__hint--warn sd__hint--keep">{{ modelListError }}</p>
-                <p v-else-if="modelOptions.length" class="sd__hint sd__hint--ok sd__hint--keep">
-                  已获取 {{ modelOptions.length }} 个模型，可从下方选择
-                </p>
-                <select
-                  v-if="modelOptions.length"
-                  v-model="apiDraft.model"
-                  class="sd__input sd__select"
-                  @change="applyContextGuess('change')"
-                >
-                  <option value="">— 从列表选择 —</option>
-                  <option v-for="m in modelOptions" :key="m.id" :value="m.id">{{ m.id }}</option>
-                </select>
-              </div>
+              <!-- 默认 API:后端地址由服务端下发,这里只选线路 -->
+              <SetRow
+                v-if="isBackendMode"
+                label="当前干员"
+                desc="默认接口免费提供，提示词由官方维护"
+              >
+                <span class="st__ro">{{ currentCharName || '未选中' }}</span>
+              </SetRow>
 
-              <!-- 温度 + 最大 Token -->
-              <label class="sd__field">
-                <span class="sd__label">温度 ({{ apiDraft.temperature.toFixed(1) }})</span>
-                <input
-                  v-model.number="apiDraft.temperature"
-                  class="sd__slider"
-                  type="range"
-                  min="0"
-                  max="2"
-                  step="0.1"
-                />
-              </label>
-              <label class="sd__field">
-                <span class="sd__label">最大 Token 数</span>
-                <input
-                  v-model.number="apiDraft.maxTokens"
-                  class="sd__input"
-                  type="number"
-                  min="1"
-                  max="32768"
-                />
-              </label>
-
-              <!-- 上下文窗口:输入预算与"上下文已用"百分比的分母。
-                   无法从 API 探测,只能由用户按所用模型填写 —— 填错会让
-                   用量面板的占用率与自动压缩时机都不准。 -->
-              <div class="sd__field">
-                <span class="sd__label">上下文窗口 (Token)</span>
-                <!-- 这里**不能**挂 @change="applyContextGuess('change')" ——
-                     那个"无条件覆盖"是给"模型名变了"用的;挂在这个框自己身上,
-                     会导致用户手改(或清空)窗口值、一失焦就被重新填回去 -->
-                <input
-                  v-model="contextWindowInput"
-                  class="sd__input"
-                  type="number"
-                  min="1024"
-                  step="1024"
-                  placeholder="留空则自动获取，获取不到请手动填写"
-                />
-                <!-- 只有"已获取到、且与当前填写值不同"时才给一键应用 -->
-                <div v-if="contextGuessApplicable" class="sd__actions">
-                  <button
-                    class="sd__btn sd__btn--preset"
-                    type="button"
-                    @click="applyContextGuess('change')"
-                  >应用 {{ contextGuess.contextWindow }}</button>
-                </div>
-                <p v-if="contextGuess.contextWindow > 0" class="sd__hint sd__hint--ok sd__hint--keep">
-                  自动获取上下文长度成功：{{ contextGuess.contextWindow }}
-                </p>
-                <p v-else-if="libraryFetching" class="sd__hint sd__hint--keep">正在自动获取上下文长度…</p>
-              </div>
-
-              <!-- 触发压缩的占比:占用达到"窗口 × 该占比"就压缩,不等塞满 -->
-              <div class="sd__field">
-                <span class="sd__label">触发压缩的上下文占比 (%)</span>
-                <input
-                  :value="apiDraft.compactTriggerPercent"
-                  class="sd__input"
-                  type="number"
-                  :min="MIN_COMPACT_TRIGGER_PERCENT"
-                  :max="MAX_COMPACT_TRIGGER_PERCENT"
-                  step="5"
-                  @change="onTriggerPercentChange"
-                />
-                <p class="sd__hint sd__hint--keep">
-                  达到 {{ triggerTokens.toLocaleString('en-US') }} Token 触发压缩<span class="sd__pc-only">（占窗口的 {{ apiDraft.compactTriggerPercent }}%，默认 {{ DEFAULT_COMPACT_TRIGGER_PERCENT }}%）</span>
-                </p>
-              </div>
-
-              <!-- 自动压缩:只控制自动路径是否调用总结 API,手动压缩不受它影响 -->
-              <div class="sd__field sd__field--row">
-                <span class="sd__label">自动压缩上下文</span>
-                <button
-                  type="button"
-                  class="sd__switch"
-                  :class="{ 'sd__switch--on': apiDraft.autoCompact }"
-                  @click="apiDraft.autoCompact = !apiDraft.autoCompact"
-                >{{ apiDraft.autoCompact ? '开启 ✓' : '关闭' }}</button>
-                <p class="sd__hint" :class="apiDraft.autoCompact ? 'sd__hint--ok' : 'sd__hint--warn'">
-                  {{ apiDraft.autoCompact
-                    ? '接近预算时：早期对话总结成冻结摘要后再丢弃，剧情记忆保留在摘要里'
-                    : '接近预算时：直接丢弃早期对话，不调用总结 API（省费用，但会丢掉细节）' }}
-                </p>
-              </div>
-
-              <!-- 流式 usage:缓存命中数唯一的来源,关掉后面板只剩本地估算 -->
-              <div class="sd__field sd__field--row">
-                <span class="sd__label">请求流式用量 (usage)</span>
-                <button
-                  type="button"
-                  class="sd__switch"
-                  :class="{ 'sd__switch--on': apiDraft.requestUsage }"
-                  @click="apiDraft.requestUsage = !apiDraft.requestUsage"
-                >{{ apiDraft.requestUsage ? '开启 ✓' : '关闭' }}</button>
-                <p class="sd__hint" :class="apiDraft.requestUsage ? 'sd__hint--ok' : 'sd__hint--warn'">
-                  {{ apiDraft.requestUsage
-                    ? '发送 stream_options.include_usage，可拿到输入/输出/缓存命中 token 数（不支持的端点会自动降级并记住）'
-                    : '不请求 usage：用量面板只能显示本地估算值，缓存命中情况不可知' }}
-                </p>
-              </div>
-
-              <!-- 自定义提示词(仅自定义 API 模式) —— 恢复正式版位置：
-                   本轮之前它被错放到「实验性功能」页，这里补回「自定义 API」目录下。 -->
-              <div class="sd__divider"></div>
-              <p class="sd__desc sd__desc--keep">自定义提示词（当前干员：{{ selectedCharacter || '未选中' }}）</p>
-              <div class="sd__char-textarea-wrap">
-                <textarea
-                  v-model="characterPromptDraft"
-                  class="sd__textarea sd__textarea--tall"
-                  rows="10"
-                  :placeholder="selectedCharacter ? '输入提示词…' : '请先选择一个对话'"
-                  :disabled="!selectedCharacter"
-                ></textarea>
-              </div>
-              <div class="sd__actions">
-                <button class="sd__btn sd__btn--primary" type="button" :disabled="!selectedCharacter" @click="saveCharacterPrompt">保存</button>
-                <button v-if="isBuiltinCharacter" class="sd__btn" type="button" @click="resetCharacterPrompt">恢复默认</button>
-              </div>
-
-              <!-- 全局世界观背景(文本,仅自定义 API 模式) -->
-              <div class="sd__divider"></div>
-              <p class="sd__desc sd__desc--keep">世界观背景<span class="sd__pc-only">（全局世界观设定，将注入角色对话上下文）</span></p>
-              <textarea
-                v-model="settingsStore.worldView"
-                class="sd__textarea sd__textarea--tall"
-                rows="6"
-                placeholder="输入全局世界观，例如：这是终末地工业时代，源石技艺与科技并存…"
-              ></textarea>
-
-            </template>
-
-
-<!-- 本页所有配置都已即时写穿(见 apiDraft 的 watch),故不再有「保存」按钮 -->
-            <div class="sd__actions">
-              <button
-                class="sd__btn"
-                type="button"
-                :disabled="testState === 'testing'"
-                @click="onTestConnection"
-              >{{ testState === 'testing' ? '测试中...' : '连接测试' }}</button>
-              <button class="sd__btn" type="button" @click="resetAll">重置全部</button>
-            </div>
-            <p v-if="testState === 'success'" class="sd__hint sd__hint--ok sd__hint--keep">{{ testMessage }}</p>
-            <p v-else-if="testState === 'fail'" class="sd__hint sd__hint--warn sd__hint--keep">{{ testMessage }}</p>
-            <p v-else-if="settingsStore.isApiConfigured" class="sd__hint sd__hint--ok sd__hint--keep">API 已配置</p>
-            <p v-else class="sd__hint sd__hint--warn sd__hint--keep">API 未配置</p>
-            </div>
-
-            <!-- 显示和内容输出:渲染层开关(本地怎么画) + 角色输出行为开关(随请求体发出) -->
-            <div v-if="activeTab === 'display'" class="sd__section">
-<!-- 智能消息分条(全局,实时持久化,默认开启)。
-                 它只决定"本地怎么把一段回复切成几条气泡",
-                 三种模式与群聊都走同一条分段链路,故不随后端模式置灰。 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">智能消息分条</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.smartSplit }"
-                @click="settingsStore.smartSplit = !settingsStore.smartSplit"
-              >{{ settingsStore.smartSplit ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="settingsStore.smartSplit ? 'sd__hint--ok' : 'sd__hint--warn'">
-                {{ settingsStore.smartSplit
-                  ? `已开启：括号描写与每句台词各自成条（换行 / 左括号前 / 句末标点后三处切；成对的括号描写整体不拆开）；不足 ${MIN_SEGMENT_CHARS} 字的短句不单独成条，并入下一条`
-                  : `已关闭：只按换行分条，括号与句子都留在原段落中（旧版行为）；不足 ${MIN_SEGMENT_CHARS} 字的短句仍会并入下一条` }}
-              </p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <!-- 括号描写居中(全局,实时持久化,默认关闭)。
-                 同样是纯渲染层开关:只决定 `()` 内的动作/神态描写是留在气泡里,
-                 还是抽出来单独渲染成一条居中文本(去掉括号)。不碰任何落库数据。 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">括号描写居中</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.bracketCenter && !bracketStyleLocked }"
-                :disabled="bracketStyleLocked"
-                :title="bracketStyleLocked ? IMMERSIVE_LOCK_NOTE : undefined"
-                @click="settingsStore.bracketCenter = !settingsStore.bracketCenter"
-              >{{ settingsStore.bracketCenter ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="bracketCenterHint.level">{{ bracketCenterHint.text }}</p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <!-- 彩色括号描写(全局,实时持久化,默认关闭)。
-                 两层依赖:
-                   1. 「括号描写居中」—— 那条决定"有没有居中行",这条只决定居中行什么颜色
-                   2. 「沉浸式对话模式」—— 开着时后端不写括号描写,没有可上色的内容
-                 任一不满足即置灰并说明原因(渲染层同样按
-                 bracketCenter && bracketColor 双重判定,见 useChatRows)。 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">彩色括号描写</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.bracketColor && settingsStore.bracketCenter && !bracketStyleLocked }"
-                :disabled="!settingsStore.bracketCenter || bracketStyleLocked"
-                :title="bracketStyleLocked ? IMMERSIVE_LOCK_NOTE : (settingsStore.bracketCenter ? undefined : '需先开启上方「括号描写居中」')"
-                @click="settingsStore.bracketColor = !settingsStore.bracketColor"
-              >{{ settingsStore.bracketColor ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="bracketColorHint.level">{{ bracketColorHint.text }}</p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <!-- 居中我方括号内容(全局,实时持久化,默认关闭)。
-                 与我方消息排版有关:识别我发出的消息**最前面**那一对括号,抽成居中文本,
-                 颜色按我的身份属性(单人 = 管理员;群聊里扮演某角色 = 该角色)。
-                 后面再出现的括号不动 —— 玩家自己写的正文不切碎。 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">居中我方括号内容</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.centerMyBracket }"
-                @click="settingsStore.centerMyBracket = !settingsStore.centerMyBracket"
-              >{{ settingsStore.centerMyBracket ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="centerMyBracketHint.level">{{ centerMyBracketHint.text }}</p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <!-- 新版输入面板(全局,实时持久化,默认关闭)。
-                 只控制移动端面板是否分两行 —— 群聊「暂停 / 恢复」按钮已固定
-                 在底部面板里,与本开关无关(见 stores/settings 的说明)。 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">新版输入面板</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.newInputPanel }"
-                @click="settingsStore.newInputPanel = !settingsStore.newInputPanel"
-              >{{ settingsStore.newInputPanel ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="settingsStore.newInputPanel ? 'sd__hint--ok' : 'sd__hint--warn'">
-                {{ settingsStore.newInputPanel
-                  ? '已开启：输入框最多两行，超过两行时出现扩大按钮，可展开成 2/3 屏大输入框（仅移动端）'
-                  : '已关闭：输入框最多两行（超出部分框内滚动），没有扩大按钮' }}
-              </p>
-            </div>
-
-              <div class="sd__divider"></div>
-
-<!-- 思考模式开关(原 API 页移入;全局,实时持久化,随请求体传给后端)
-                 仅"默认 API 模式 / 群聊"生效 → 其余情况置灰并说明原因 -->
-
-            <!-- 强制每条搜索开关(全局,实时持久化,随请求体传 force_search) -->
-
-            <!-- AI 推荐回复开关(全局,实时持久化,默认开启)
-                 关闭后输入面板不再显示「推荐选项」按钮 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">推荐回复</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.choicesEnabled }"
-                @click="settingsStore.choicesEnabled = !settingsStore.choicesEnabled"
-              >{{ settingsStore.choicesEnabled ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="settingsStore.choicesEnabled ? 'sd__hint--ok' : 'sd__hint--warn'">
-                {{ settingsStore.choicesEnabled ? '已开启：输入框显示推荐选项按钮（单聊 / 群聊通用）' : '已关闭：完全隐藏推荐选项按钮' }}
-              </p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <!-- SSE 流式回复开关(全局,实时持久化,**默认关闭**)。
-                 开启后单聊「默认 API」模式改走 /chat/stream:后端每吐一个增量,
-                 前端就追加到正在生成的那条助手消息上,最后用 done 帧的权威全文覆盖。
-                 属于实验性功能:关闭(默认)时行为与改动前完全一致。 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">SSE 流式回复</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.sseStreaming }"
-                @click="settingsStore.sseStreaming = !settingsStore.sseStreaming"
-              >{{ settingsStore.sseStreaming ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="settingsStore.sseStreaming ? 'sd__hint--ok' : 'sd__hint--warn'">
-                {{ settingsStore.sseStreaming
-                  ? '已开启：单聊逐字流式输出（实验性，仅「默认 API」模式生效；流式不可用时自动回退）'
-                  : '已关闭（默认）：等完整回复到达后按分段规则显示，与旧版行为一致' }}
-              </p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <!-- 沉浸式对话模式开关(全局,实时持久化)
-                 后端模式:随请求体传 immersive_mode,由后端过滤;
-                 自定义 / 旧版直连:前端自己截提示词 + 文本层过滤(见 utils/immersive.ts)。
-                 三种模式 + 单聊/群聊都已落实 → 本开关永不置灰。 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">沉浸式对话模式</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.immersiveMode }"
-                @click="settingsStore.immersiveMode = !settingsStore.immersiveMode"
-              >{{ settingsStore.immersiveMode ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="immersiveHint.level">{{ immersiveHint.text }}</p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <!-- 智能总结
-                 开关本身只管"历史超 50 条时总结前段",只被 applySmartSummary 读取;
-                 自定义模式不走那条路径(由 token 预算压缩接管)→ 同样置灰 -->
-            </div>
-
-            <div v-if="activeTab === 'experimental'" class="sd__section">
-
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">思考模式</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.thinkEnabled && !thinkBlocked }"
-                :disabled="thinkBlocked"
-                :title="thinkTitle"
-                @click="settingsStore.thinkEnabled = !settingsStore.thinkEnabled"
-              >{{ settingsStore.thinkEnabled ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="thinkHint.level">{{ thinkHint.text }}</p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <!-- 知识源切换：RAG 语料库(默认) / 联网搜索。
-                 请求体契约：关闭时**不带 use_rag**（后端默认走 RAG）；
-                 开启时带 use_rag: false + force_search: true（走联网搜索）。 -->
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">联网搜索（替代 RAG）</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.webSearchEnabled }"
-                @click="settingsStore.webSearchEnabled = !settingsStore.webSearchEnabled"
-              >{{ settingsStore.webSearchEnabled ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="knowledgeSourceHint.level">{{ knowledgeSourceHint.text }}</p>
-
-              <!-- 子选项：强制每条搜索。
-                   只在「联网搜索」打开时出现 —— 因为只走 RAG 时后端根本不会联网，
-                   这个开关切了也没有任何效果（避免给用户"切了却在空转"的错觉）。 -->
-              <div v-if="settingsStore.webSearchEnabled" class="sd__subfield">
-                <span class="sd__label">└ 强制每条搜索</span>
-                <button
-                  type="button"
-                  class="sd__switch"
-                  :class="{ 'sd__switch--on': settingsStore.forceSearch }"
-                  @click="settingsStore.forceSearch = !settingsStore.forceSearch"
-                >{{ settingsStore.forceSearch ? '开启 ✓' : '关闭' }}</button>
-                <p class="sd__hint" :class="forceSearchHint.level">
-                  {{ settingsStore.forceSearch
-                    ? '已开启：每条消息都强制联网搜索，不再做智能判断'
-                    : '已关闭（推荐）：由后端智能判断这条消息是否需要联网搜索' }}
-                </p>
-              </div>
-
-              <!-- 非默认 API 模式下的明确降级说明(审计要求:不能悄悄失效)。
-                   检索(联网 / RAG 语料库)由后端提供;自定义与旧版直连没有检索服务,
-                   前端也**不会**为了这个功能偷偷回退到后端网关。 -->
-              <p v-if="apiDraft.apiMode !== 'backend'" class="sd__hint sd__hint--keep">
-                当前 API 模式下本组开关不生效：联网搜索 / RAG 语料库由后端提供，自定义 / 旧版直连没有检索服务（不会回退到后端）。
-              </p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">使用新版提示词</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': settingsStore.useNewPrompt && !newPromptBlocked }"
-                :disabled="newPromptBlocked"
-                :title="newPromptTitle"
-                @click="settingsStore.useNewPrompt = !settingsStore.useNewPrompt"
-              >{{ settingsStore.useNewPrompt ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="useNewPromptHint.level">{{ useNewPromptHint.text }}</p>
-            </div>
-
-            <div class="sd__divider"></div>
-
-            <div class="sd__field sd__field--row">
-              <span class="sd__label">智能总结</span>
-              <button
-                type="button"
-                class="sd__switch"
-                :class="{ 'sd__switch--on': summaryDraft.enabled && !summaryBlocked }"
-                :disabled="summaryBlocked"
-                :title="summaryTitle"
-                @click="summaryDraft.enabled = !summaryDraft.enabled"
-              >{{ summaryDraft.enabled ? '开启 ✓' : '关闭' }}</button>
-              <p class="sd__hint" :class="summaryHint.level">{{ summaryHint.text }}</p>
-              <!-- 自定义模式下开关失效,但总结 API 仍被压缩流程使用 —— 必须说清楚 -->
-              <p v-if="summaryBlocked" class="sd__hint sd__hint--keep">
-                「总结 API」在左侧「自定义 API」页配置<span class="sd__pc-only">；自定义模式下由压缩流程使用（自动压缩 / 面板里的手动压缩），与上方开关无关</span>
-              </p>
-            </div>
-
-            <!-- 总结 API 配置:仅在「智能总结」开启时显示(它就是这个开关用的端点)。
-                 与主 API 相互独立 —— 主 API 用默认/旧版模式时,这里照样可以自定义。 -->
-            <template v-if="summaryDraft.enabled">
-              <div class="sd__divider"></div>
-              <div class="sd__divider"></div>
-
-              <!-- 总结 API:压缩流程(自动压缩 / 用量面板的手动压缩)与「智能总结」开关都用它。
-                   与上面的主 API 相互独立 —— 主 API 用默认/旧版模式时,这里照样可以自定义。 -->
-              <p class="sd__desc">总结 API（把早期对话压成冻结摘要，自动压缩与用量面板的手动压缩都用它）</p>
-              <div class="sd__field sd__field--row">
-                <span class="sd__label">总结 API 模式</span>
-                <div class="sd__mode-toggle">
-                  <!-- 两列:第二列只需前进一格(--step-1)。
-                       早先误用了三列语义的 --right(前进两格),黄条会滑出容器。 -->
-                  <div
-                    class="sd__mode-indicator"
-                    :class="{ 'sd__mode-indicator--step-1': isSummaryCustomMode }"
-                  ></div>
-                  <button
-                    class="sd__mode-btn"
-                    :class="{ 'sd__mode-btn--active': isSummaryDefaultMode }"
-                    type="button"
-                    @click="switchSummaryApiMode('default')"
-                  >默认 API</button>
-                  <button
-                    class="sd__mode-btn"
-                    :class="{ 'sd__mode-btn--active': isSummaryCustomMode }"
-                    type="button"
-                    @click="switchSummaryApiMode('custom')"
-                  >自定义 API</button>
-                </div>
-                <p class="sd__hint sd__hint--keep" v-if="isSummaryDefaultMode">
-                  使用默认内置API(无需填写密钥)。
-                </p>
-              </div>
-
-              <!-- 自定义总结 API 配置(与主 API 同一套:填地址 → 拉模型 → 下拉选) -->
-              <template v-if="isSummaryCustomMode">
-                <label class="sd__field">
-                  <span class="sd__label">Base URL</span>
-                  <input
-                    v-model="summaryDraft.baseUrl"
-                    class="sd__input"
-                    type="text"
-                    placeholder="https://api.agnes-ai.cn/v1"
+              <SetRow
+                v-if="isBackendMode"
+                label="后端路线"
+                :hint="`当前：${currentRouteHost}　默认线路不通时可切到「备用」`"
+                tone="ok"
+                stack
+              >
+                <div class="st__stack">
+                  <SegControl
+                    :model-value="settingsStore.apiRoute"
+                    :options="API_ROUTE_OPTIONS.map(o => ({ value: o.value, label: o.label }))"
+                    aria-label="后端路线"
+                    auto
+                    @update:model-value="onApiRouteChange"
                   />
-                </label>
-                <label class="sd__field">
-                  <span class="sd__label">API Key</span>
-                  <input
-                    v-model="summaryDraft.apiKey"
-                    class="sd__input"
-                    type="password"
-                    placeholder="sk-..."
-                    autocomplete="off"
-                  />
-                </label>
-                <label class="sd__field">
-                  <span class="sd__label">模型名</span>
-                  <input
-                    v-model="summaryDraft.model"
-                    class="sd__input"
-                    type="text"
-                    placeholder="agnes-2.5-flash"
-                  />
-                </label>
+                </div>
+              </SetRow>
 
-                <div class="sd__field">
-                  <div class="sd__actions">
-                    <button
-                      class="sd__btn sd__btn--preset"
-                      type="button"
-                      :disabled="summaryModelListLoading"
-                      @click="onFetchSummaryModels"
-                    >{{ summaryModelListLoading ? '获取中…' : '获取模型列表' }}</button>
+              <!-- 旧版模式 -->
+              <SetRow
+                v-if="isLegacyMode"
+                label="完整历史模式"
+                :hint="settingsStore.legacyUnlimitedHistory
+                  ? '已开启：保留全部历史，不做总结'
+                  : '已关闭：只保留最近 50 条'"
+                :tone="settingsStore.legacyUnlimitedHistory ? 'ok' : 'warn'"
+              >
+                <SegControl
+                  :model-value="settingsStore.legacyUnlimitedHistory ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  aria-label="完整历史模式"
+                  @update:model-value="(v) => (settingsStore.legacyUnlimitedHistory = v === 'on')"
+                />
+              </SetRow>
+
+              <SetRow
+                v-if="isLegacyMode"
+                label="当前干员"
+                desc="旧版 API 功能有限，建议改用默认模式"
+              >
+                <span class="st__ro">{{ currentCharName || '未选中' }}</span>
+              </SetRow>
+            </SetSection>
+
+            <template v-if="isCustomMode">
+              <SetSection title="自定义接口">
+                <SetRow label="Base URL" stack>
+                  <div class="st__stack">
+                    <input
+                      v-model="apiDraft.baseUrl"
+                      class="pn-input"
+                      type="text"
+                      placeholder="https://api.openai.com/v1"
+                    />
                   </div>
-                  <p v-if="summaryModelListError" class="sd__hint sd__hint--warn sd__hint--keep">{{ summaryModelListError }}</p>
-                  <p v-else-if="summaryModelOptions.length" class="sd__hint sd__hint--ok sd__hint--keep">
-                    已获取 {{ summaryModelOptions.length }} 个模型，可从下方选择
-                  </p>
-                  <select
-                    v-if="summaryModelOptions.length"
-                    v-model="summaryDraft.model"
-                    class="sd__input sd__select"
-                  >
-                    <option value="">— 从列表选择 —</option>
-                    <option v-for="m in summaryModelOptions" :key="m.id" :value="m.id">{{ m.id }}</option>
-                  </select>
-                </div>
+                </SetRow>
 
-                <!-- 上下文总长：智能总结的触发分母。
-                     前端累计后端上报的 usage，达到「窗口 × 75%」就主动总结前段历史再上传。 -->
-                <label class="sd__field">
-                  <span class="sd__label">上下文总长 (Token)</span>
-                  <input
-                    v-model.number="summaryDraft.contextWindow"
-                    class="sd__input"
-                    type="number"
-                    min="1000"
-                    step="1000"
-                    placeholder="512000"
+                <SetRow label="API Key" stack>
+                  <div class="st__stack">
+                    <input
+                      v-model="apiDraft.apiKey"
+                      class="pn-input"
+                      type="password"
+                      placeholder="sk-..."
+                      autocomplete="off"
+                    />
+                  </div>
+                </SetRow>
+
+                <SetRow label="模型名" stack>
+                  <div class="st__stack">
+                    <input
+                      v-model="apiDraft.model"
+                      class="pn-input"
+                      type="text"
+                      placeholder="deepseek-v4-flash / glm-5.2 / kimi-k3 / ..."
+                      @change="applyContextGuess('change')"
+                    />
+                  </div>
+                </SetRow>
+
+                <!-- 从 Base URL 的 /models 拉取,下拉直接选(免手敲模型名) -->
+                <SetRow
+                  label="模型列表"
+                  :hint="modelListError
+                    ? modelListError
+                    : (modelOptions.length ? `已获取 ${modelOptions.length} 个，可在下方选择` : '')"
+                  :tone="modelListError ? 'warn' : 'ok'"
+                  stack
+                >
+                  <div class="st__stack">
+                    <div class="st__btnrow">
+                      <button
+                        class="pn-pill"
+                        type="button"
+                        :disabled="modelListLoading"
+                        @click="onFetchModels"
+                      >{{ modelListLoading ? '获取中…' : '获取模型列表' }}</button>
+                    </div>
+                    <select
+                      v-if="modelOptions.length"
+                      v-model="apiDraft.model"
+                      class="pn-select"
+                      @change="applyContextGuess('change')"
+                    >
+                      <option value="">— 从列表选择 —</option>
+                      <option v-for="m in modelOptions" :key="m.id" :value="m.id">{{ m.id }}</option>
+                    </select>
+                  </div>
+                </SetRow>
+              </SetSection>
+
+              <SetSection title="生成参数">
+                <SetRow label="温度" :desc="`当前 ${apiDraft.temperature.toFixed(1)}，越高越发散`" stack>
+                  <div class="st__stack">
+                    <input
+                      v-model.number="apiDraft.temperature"
+                      class="st__range"
+                      type="range"
+                      min="0"
+                      max="2"
+                      step="0.1"
+                    />
+                  </div>
+                </SetRow>
+
+                <SetRow label="最大 Token 数" stack>
+                  <div class="st__stack">
+                    <input
+                      v-model.number="apiDraft.maxTokens"
+                      class="pn-input"
+                      type="number"
+                      min="1"
+                      max="32768"
+                    />
+                  </div>
+                </SetRow>
+
+                <!-- 上下文窗口:输入预算与"上下文已用"百分比的分母,无法从 API 探测 -->
+                <SetRow
+                  label="上下文窗口 (Token)"
+                  :hint="contextGuess.contextWindow > 0
+                    ? `已自动识别：${contextGuess.contextWindow}`
+                    : (libraryFetching ? '正在识别模型上下文…' : '留空会自动识别，识别不到再手动填')"
+                  :tone="contextGuess.contextWindow > 0 ? 'ok' : 'keep'"
+                  stack
+                >
+                  <div class="st__stack">
+                    <!-- 不能挂 @change="applyContextGuess('change')" ——
+                         那个"无条件覆盖"是给"模型名变了"用的,挂在这里会让手改的值被填回去 -->
+                    <input
+                      v-model="contextWindowInput"
+                      class="pn-input"
+                      type="number"
+                      min="1024"
+                      step="1024"
+                      placeholder="留空会自动识别，识别不到再手动填"
+                    />
+                    <div v-if="contextGuessApplicable" class="st__btnrow">
+                      <button class="pn-pill" type="button" @click="applyContextGuess('change')">
+                        应用 {{ contextGuess.contextWindow }}
+                      </button>
+                    </div>
+                  </div>
+                </SetRow>
+
+                <SetRow
+                  label="触发压缩的上下文占比 (%)"
+                  :hint="`约 ${triggerTokens.toLocaleString('en-US')} Token 时开始压缩（占窗口 ${apiDraft.compactTriggerPercent}%）`"
+                  stack
+                >
+                  <div class="st__stack">
+                    <input
+                      :value="apiDraft.compactTriggerPercent"
+                      class="pn-input"
+                      type="number"
+                      :min="MIN_COMPACT_TRIGGER_PERCENT"
+                      :max="MAX_COMPACT_TRIGGER_PERCENT"
+                      step="5"
+                      @change="onTriggerPercentChange"
+                    />
+                  </div>
+                </SetRow>
+
+                <SetRow
+                  label="自动压缩上下文"
+                  :hint="apiDraft.autoCompact
+                    ? '已开启：快满时先把早期对话总结成摘要，再丢掉原文'
+                    : '已关闭：快满时直接丢掉最早的对话'"
+                  :tone="apiDraft.autoCompact ? 'ok' : 'warn'"
+                >
+                  <SegControl
+                    :model-value="apiDraft.autoCompact ? 'on' : 'off'"
+                    :options="BOOL_SEG"
+                    aria-label="自动压缩上下文"
+                    @update:model-value="(v) => (apiDraft.autoCompact = v === 'on')"
                   />
-                  <p class="sd__hint sd__hint--keep">
-                    固定提示词长度 + 累计输出 token 达到该值的 80% 时，把 80% 以外的历史全部总结；
-                    剩下 20% 留给 RAG 语料库（默认 512000 = Agnes 2.5 Flash 上下文窗口）
-                  </p>
-                </label>
+                </SetRow>
 
-                </template>
+                <SetRow
+                  label="请求流式用量 (usage)"
+                  :hint="apiDraft.requestUsage
+                    ? '已开启：能读到真实的输入 / 输出 / 缓存用量'
+                    : '已关闭：用量面板只显示估算值'"
+                  :tone="apiDraft.requestUsage ? 'ok' : 'warn'"
+                >
+                  <SegControl
+                    :model-value="apiDraft.requestUsage ? 'on' : 'off'"
+                    :options="BOOL_SEG"
+                    aria-label="请求流式用量"
+                    @update:model-value="(v) => (apiDraft.requestUsage = v === 'on')"
+                  />
+                </SetRow>
+              </SetSection>
             </template>
-            
-            </div>
 
-          <!-- 数据管理(内嵌 DataManagerDialog 功能:统计/导出/导入/清空) -->
-          <div v-if="activeTab === 'data'" class="sd__section">
+            <SetSection title="连接">
+              <SetRow
+                label="连接测试"
+                :desc="settingsStore.isApiConfigured ? 'API 已配置' : 'API 未配置'"
+                :hint="testState === 'success' || testState === 'fail' ? testMessage : ''"
+                :tone="testState === 'success' ? 'ok' : (testState === 'fail' ? 'warn' : '')"
+                stack
+              >
+                <div class="st__stack">
+                  <div class="st__btnrow">
+                    <button
+                      class="pn-pill"
+                      type="button"
+                      :disabled="testState === 'testing'"
+                      @click="onTestConnection"
+                    >{{ testState === 'testing' ? '测试中…' : '连接测试' }}</button>
+                    <button class="pn-pill st__danger" type="button" @click="resetAll">重置全部</button>
+                  </div>
+                </div>
+              </SetRow>
+            </SetSection>
+          </template>
+
+          <!-- ============ 2. 提示词 ============ -->
+          <template v-if="activeTab === 'prompts'">
+            <!-- 非自定义 API 模式:提示词不参与请求,整页置为只读说明 -->
+            <SetSection v-if="!promptsEditable" title="当前模式不可编辑">
+              <SetRow
+                label="提示词只在「自定义 API」模式下生效"
+                desc="默认 API 和旧版模式的提示词是固定的；切到「自定义 API」后，就能在这里逐个角色修改"
+              >
+                <span class="st__ro">只读</span>
+              </SetRow>
+            </SetSection>
+
+            <SetSection title="选择角色">
+              <SetRow
+                label="编辑对象"
+                :hint="`带「已修改」的角色用的是你写的版本（共 ${Object.keys(settingsStore.promptOverrides).length} 个）`"
+                tone="keep"
+              >
+                <select
+                  v-model="promptChar"
+                  class="pn-select"
+                  :disabled="!promptsEditable"
+                  aria-label="选择要修改提示词的角色"
+                >
+                  <option v-for="name in characterNames" :key="name" :value="name">
+                    {{ name }}{{ name in settingsStore.promptOverrides ? '（已修改）' : '' }}
+                  </option>
+                </select>
+              </SetRow>
+            </SetSection>
+
+            <SetSection title="角色提示词">
+              <SetRow
+                :label="`${promptChar || '未选择角色'} 的提示词`"
+                :desc="promptOverridden ? '正在使用你写的版本，可随时恢复默认' : '当前是内置版本，保存后改用你的版本'"
+                stack
+              >
+                <div class="st__stack">
+                  <textarea
+                    v-model="characterPromptDraft"
+                    class="pn-area"
+                    rows="14"
+                    :placeholder="promptsEditable ? '输入这个角色的提示词…' : '切换到自定义 API 模式后可编辑'"
+                    :disabled="!promptsEditable || !promptChar"
+                  ></textarea>
+                  <div class="st__btnrow">
+                    <button
+                      class="pn-pill pn-pill--primary"
+                      type="button"
+                      :disabled="!promptsEditable || !promptChar"
+                      @click="saveCharacterPrompt"
+                    >保存</button>
+                    <button
+                      v-if="promptOverridden"
+                      class="pn-pill pn-pill--ghost"
+                      type="button"
+                      :disabled="!promptsEditable"
+                      @click="resetCharacterPrompt"
+                    >恢复默认</button>
+                  </div>
+                </div>
+              </SetRow>
+            </SetSection>
+
+            <SetSection title="世界观背景">
+              <SetRow
+                label="全局世界观"
+                desc="会附加给所有角色，影响整体氛围与设定"
+                stack
+              >
+                <div class="st__stack">
+                  <textarea
+                    v-model="settingsStore.worldView"
+                    class="pn-area"
+                    rows="8"
+                    placeholder="输入全局世界观，例如：这是终末地工业时代，源石技艺与科技并存…"
+                    :disabled="!promptsEditable"
+                  ></textarea>
+                </div>
+              </SetRow>
+            </SetSection>
+          </template>
+
+          <!-- ============ 3. 显示和内容输出 ============ -->
+          <template v-if="activeTab === 'display'">
+            <SetSection title="消息分条">
+              <SetRow
+                label="智能消息分条"
+                :hint="settingsStore.smartSplit
+                  ? '已开启：动作描写和每句台词各自成行；太短的句子会并到下一行'
+                  : '已关闭：只按换行分行，动作描写留在原段落里'"
+                :tone="settingsStore.smartSplit ? 'ok' : 'warn'"
+              >
+                <SegControl
+                  :model-value="settingsStore.smartSplit ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  aria-label="智能消息分条"
+                  @update:model-value="(v) => (settingsStore.smartSplit = v === 'on')"
+                />
+              </SetRow>
+            </SetSection>
+
+            <SetSection title="括号描写">
+              <SetRow
+                label="括号描写居中"
+                :hint="bracketCenterHint.text"
+                :tone="bracketCenterHint.level"
+              >
+                <SegControl
+                  :model-value="settingsStore.bracketCenter ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  :disabled="bracketStyleLocked"
+                  :title="bracketStyleLocked ? IMMERSIVE_LOCK_NOTE : ''"
+                  aria-label="括号描写居中"
+                  @update:model-value="(v) => (settingsStore.bracketCenter = v === 'on')"
+                />
+              </SetRow>
+
+              <SetRow
+                label="彩色括号描写"
+                :hint="bracketColorHint.text"
+                :tone="bracketColorHint.level"
+              >
+                <SegControl
+                  :model-value="settingsStore.bracketColor ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  :disabled="!settingsStore.bracketCenter || bracketStyleLocked"
+                  :title="bracketStyleLocked
+                    ? IMMERSIVE_LOCK_NOTE
+                    : (settingsStore.bracketCenter ? '' : '需先开启上方「括号描写居中」')"
+                  aria-label="彩色括号描写"
+                  @update:model-value="(v) => (settingsStore.bracketColor = v === 'on')"
+                />
+              </SetRow>
+
+              <SetRow
+                label="居中我方括号内容"
+                :hint="centerMyBracketHint.text"
+                :tone="centerMyBracketHint.level"
+              >
+                <SegControl
+                  :model-value="settingsStore.centerMyBracket ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  aria-label="居中我方括号内容"
+                  @update:model-value="(v) => (settingsStore.centerMyBracket = v === 'on')"
+                />
+              </SetRow>
+            </SetSection>
+
+            <SetSection title="输入面板">
+              <SetRow
+                label="新版输入面板"
+                :hint="settingsStore.newInputPanel
+                  ? '已开启：输入框超过两行会出现放大按钮，可展开成大半屏（手机端）'
+                  : '已关闭：输入框固定两行高，超出部分在框内滚动'"
+                :tone="settingsStore.newInputPanel ? 'ok' : 'warn'"
+              >
+                <SegControl
+                  :model-value="settingsStore.newInputPanel ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  aria-label="新版输入面板"
+                  @update:model-value="(v) => (settingsStore.newInputPanel = v === 'on')"
+                />
+              </SetRow>
+
+              <SetRow
+                label="推荐回复"
+                :hint="settingsStore.choicesEnabled
+                  ? '已开启：输入框旁显示推荐回复按钮'
+                  : '已关闭：不显示推荐回复按钮'"
+                :tone="settingsStore.choicesEnabled ? 'ok' : 'warn'"
+              >
+                <SegControl
+                  :model-value="settingsStore.choicesEnabled ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  aria-label="推荐回复"
+                  @update:model-value="(v) => (settingsStore.choicesEnabled = v === 'on')"
+                />
+              </SetRow>
+            </SetSection>
+
+            <SetSection title="回复行为">
+              <SetRow
+                label="SSE 流式回复"
+                :hint="settingsStore.sseStreaming
+                  ? '已开启：单聊里回复逐字出现（仅默认 API 生效，不支持时会自动改回整段显示）'
+                  : '已关闭：等整段回复生成完再显示'"
+                :tone="settingsStore.sseStreaming ? 'ok' : 'warn'"
+              >
+                <SegControl
+                  :model-value="settingsStore.sseStreaming ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  aria-label="SSE 流式回复"
+                  @update:model-value="(v) => (settingsStore.sseStreaming = v === 'on')"
+                />
+              </SetRow>
+
+              <SetRow
+                label="沉浸式对话模式"
+                :hint="immersiveHint.text"
+                :tone="immersiveHint.level"
+              >
+                <SegControl
+                  :model-value="settingsStore.immersiveMode ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  aria-label="沉浸式对话模式"
+                  @update:model-value="(v) => (settingsStore.immersiveMode = v === 'on')"
+                />
+              </SetRow>
+            </SetSection>
+          </template>
+
+          <!-- ============ 3. 实验性功能 ============ -->
+          <template v-if="activeTab === 'experimental'">
+            <SetSection title="模型能力">
+              <SetRow
+                label="思考模式"
+                :hint="thinkHint.text"
+                :tone="thinkHint.level"
+                :off="thinkBlocked"
+              >
+                <SegControl
+                  :model-value="settingsStore.thinkEnabled ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  :disabled="thinkBlocked"
+                  :title="thinkTitle || ''"
+                  aria-label="思考模式"
+                  @update:model-value="(v) => (settingsStore.thinkEnabled = v === 'on')"
+                />
+              </SetRow>
+
+              <SetRow
+                label="使用新版提示词"
+                :hint="useNewPromptHint.text"
+                :tone="useNewPromptHint.level"
+                :off="newPromptBlocked"
+              >
+                <SegControl
+                  :model-value="settingsStore.useNewPrompt ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  :disabled="newPromptBlocked"
+                  :title="newPromptTitle || ''"
+                  aria-label="使用新版提示词"
+                  @update:model-value="(v) => (settingsStore.useNewPrompt = v === 'on')"
+                />
+              </SetRow>
+            </SetSection>
+
+            <SetSection title="知识源">
+              <!-- 默认 API:知识源由后端二选一 -->
+              <template v-if="apiDraft.apiMode === 'backend'">
+                <SetRow
+                  label="联网搜索（替代 RAG）"
+                  desc="效果极差，除特殊需求极其不推荐开启"
+                  :hint="knowledgeSourceHint.text"
+                  :tone="knowledgeSourceHint.level"
+                >
+                  <SegControl
+                    :model-value="settingsStore.webSearchEnabled ? 'on' : 'off'"
+                    :options="BOOL_SEG"
+                    aria-label="联网搜索"
+                    @update:model-value="(v) => (settingsStore.webSearchEnabled = v === 'on')"
+                  />
+                </SetRow>
+
+                <SetRow
+                  v-if="settingsStore.webSearchEnabled"
+                  label="强制每条搜索"
+                  :hint="settingsStore.forceSearch
+                    ? '已开启：每条都联网，不再判断'
+                    : '已关闭（推荐）：自动判断要不要联网'"
+                  :tone="forceSearchHint.level"
+                >
+                  <SegControl
+                    :model-value="settingsStore.forceSearch ? 'on' : 'off'"
+                    :options="BOOL_SEG"
+                    aria-label="强制每条搜索"
+                    @update:model-value="(v) => (settingsStore.forceSearch = v === 'on')"
+                  />
+                </SetRow>
+              </template>
+
+              <!-- 自定义 API:没有联网能力(那是后端网关的功能),只有语料库开关 -->
+              <template v-else-if="apiDraft.apiMode === 'custom'">
+                <SetRow
+                  label="RAG 语料库"
+                  :hint="settingsStore.ragEnabled
+                    ? '已开启：回复前先检索一次设定资料，与默认 API 用的是同一套语料'
+                    : '已关闭：不检索设定资料，回复只依赖提示词与对话历史'"
+                  :tone="settingsStore.ragEnabled ? 'ok' : 'warn'"
+                >
+                  <SegControl
+                    :model-value="settingsStore.ragEnabled ? 'on' : 'off'"
+                    :options="BOOL_SEG"
+                    aria-label="RAG 语料库"
+                    @update:model-value="(v) => (settingsStore.ragEnabled = v === 'on')"
+                  />
+                </SetRow>
+
+                <!-- 检索条数:服务端固定返回 5 条,这里决定实际带几条进请求 -->
+                <SetRow
+                  label="每次检索条数"
+                  :hint="settingsStore.ragEnabled
+                    ? `每轮最多带 ${settingsStore.ragTopK} 条语料进请求；带得越多越占 token，也越容易混进无关内容`
+                    : '语料库已关闭，本项暂不生效'"
+                  :tone="settingsStore.ragEnabled ? 'keep' : 'keep'"
+                >
+                  <select
+                    v-model.number="settingsStore.ragTopK"
+                    class="pn-select st__topk"
+                    :disabled="!settingsStore.ragEnabled"
+                    aria-label="每次检索条数"
+                  >
+                    <option v-for="n in RAG_MAX_TOP_K" :key="n" :value="n">{{ n }} 条</option>
+                  </select>
+                </SetRow>
+              </template>
+
+              <!-- 旧版模式:不接检索 -->
+              <SetRow
+                v-else
+                label="旧版模式不接检索"
+                desc="旧版走内置端点，既没有语料库也不支持联网"
+              >
+                <span class="st__ro">—</span>
+              </SetRow>
+            </SetSection>
+
+            <SetSection title="智能总结">
+              <SetRow
+                label="智能总结"
+                :hint="summaryHint.text"
+                :tone="summaryHint.level"
+                :off="summaryBlocked"
+              >
+                <SegControl
+                  :model-value="summaryDraft.enabled ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  :disabled="summaryBlocked"
+                  :title="summaryTitle || ''"
+                  aria-label="智能总结"
+                  @update:model-value="(v) => (summaryDraft.enabled = v === 'on')"
+                />
+              </SetRow>
+
+              <SetRow
+                v-if="summaryBlocked"
+                label="总结 API 的用途"
+                desc="总结 API 在「API 配置」页填写；压缩历史时会用到它"
+              >
+                <span class="st__ro">—</span>
+              </SetRow>
+
+              <!-- 总结 API:仅在「智能总结」开启时显示(它就是这个开关用的端点) -->
+              <template v-if="summaryDraft.enabled">
+                <SetRow label="总结 API 模式" desc="把早期对话压缩成摘要，自动和手动压缩都用它">
+                  <SegControl
+                    :model-value="summaryDraft.apiMode"
+                    :options="[{ value: 'default', label: '默认 API' }, { value: 'custom', label: '自定义 API' }]"
+                    aria-label="总结 API 模式"
+                    @update:model-value="onSummaryModeChange"
+                  />
+                </SetRow>
+
+                <SetRow
+                  v-if="isSummaryDefaultMode"
+                  label="内置总结端点"
+                  desc="使用内置 API，不用填密钥"
+                >
+                  <span class="st__ro">Agnes 2.5 Flash</span>
+                </SetRow>
+
+                <template v-if="isSummaryCustomMode">
+                  <SetRow label="Base URL" stack>
+                    <div class="st__stack">
+                      <input
+                        v-model="summaryDraft.baseUrl"
+                        class="pn-input"
+                        type="text"
+                        placeholder="https://api.agnes-ai.cn/v1"
+                      />
+                    </div>
+                  </SetRow>
+
+                  <SetRow label="API Key" stack>
+                    <div class="st__stack">
+                      <input
+                        v-model="summaryDraft.apiKey"
+                        class="pn-input"
+                        type="password"
+                        placeholder="sk-..."
+                        autocomplete="off"
+                      />
+                    </div>
+                  </SetRow>
+
+                  <SetRow label="模型名" stack>
+                    <div class="st__stack">
+                      <input
+                        v-model="summaryDraft.model"
+                        class="pn-input"
+                        type="text"
+                        placeholder="agnes-2.5-flash"
+                      />
+                    </div>
+                  </SetRow>
+
+                  <SetRow
+                    label="模型列表"
+                    :hint="summaryModelListError
+                      ? summaryModelListError
+                      : (summaryModelOptions.length ? `已获取 ${summaryModelOptions.length} 个，可在下方选择` : '')"
+                    :tone="summaryModelListError ? 'warn' : 'ok'"
+                    stack
+                  >
+                    <div class="st__stack">
+                      <div class="st__btnrow">
+                        <button
+                          class="pn-pill"
+                          type="button"
+                          :disabled="summaryModelListLoading"
+                          @click="onFetchSummaryModels"
+                        >{{ summaryModelListLoading ? '获取中…' : '获取模型列表' }}</button>
+                      </div>
+                      <select v-if="summaryModelOptions.length" v-model="summaryDraft.model" class="pn-select">
+                        <option value="">— 从列表选择 —</option>
+                        <option v-for="m in summaryModelOptions" :key="m.id" :value="m.id">{{ m.id }}</option>
+                      </select>
+                    </div>
+                  </SetRow>
+
+                  <SetRow
+                    label="上下文总长 (Token)"
+                    hint="对话累计到该长度的 80% 时，把更早的内容总结成摘要（默认 512000）"
+                    tone="keep"
+                    stack
+                  >
+                    <div class="st__stack">
+                      <input
+                        v-model.number="summaryDraft.contextWindow"
+                        class="pn-input"
+                        type="number"
+                        min="1000"
+                        step="1000"
+                        placeholder="512000"
+                      />
+                    </div>
+                  </SetRow>
+                </template>
+              </template>
+            </SetSection>
+          </template>
+
+          <!-- ============ 4. 数据管理 ============ -->
+          <div v-if="activeTab === 'data'" class="st__data">
             <DataManagerDialog :open="open" embedded />
           </div>
 
-          <!-- 关于 -->
-          <div v-if="activeTab === 'about'" class="sd__section sd__about">
-            <h3 class="sd__about-title">明日方舟：终末地 Baker AI</h3>
-
-            <!-- QQ 群入口:两行居中。群名白色,只有群号是超链接(强调黄);
-                 点群号既跳转加群页,又把群号复制到剪贴板 -->
-            <div class="sd__about-groups">
-              <p v-for="g in QQ_GROUPS" :key="g.code" class="sd__about-group">
-                {{ g.label }}：<a
-                  class="sd__about-group-link"
-                  :href="g.url"
-                  target="_blank"
-                  rel="noopener"
-                  @click="copyText(g.code)"
-                >{{ g.code }}</a>
-              </p>
-              <!-- 操作说明:白字,字号比上面两行小一档 -->
-              <p class="sd__about-group-tip">点击相应群号可复制并跳转到群聊页面</p>
-            </div>
-
-            <div class="sd__about-block">
-              <h4 class="sd__about-heading">相关链接</h4>
-              <ul class="sd__about-links">
-                <li><a href="https://github.com/NCreeper233/endfield-baker-chat" target="_blank" rel="noopener">GitHub</a></li>
-                <li><a href="https://space.bilibili.com/1143315127" target="_blank" rel="noopener">哔哩哔哩</a></li>
-              </ul>
-            </div>
-
-            <div class="sd__about-block">
-              <h4 class="sd__about-heading">相关项目</h4>
-              <ul class="sd__about-links">
-                <li><a href="https://ark.ncreeper.top/" target="_blank" rel="noopener">明日方舟：终末地风格LOGO生成器</a></li>
-                <li><a href="https://baker.ncreeper.top/" target="_blank" rel="noopener">明日方舟：终末地 Baker 模拟器</a></li>
-              </ul>
-            </div>
-
-            <!-- ⛔ 临时彩蛋(可删):中秋兑换码。
-                 兑换成功才显示下面那行绿色小字,并**从那一刻起**才开始下载月亮资源
-                 (在月亮被渲染之前,three / cannon-es / glb / draco 一个字节都不请求)。
-                 状态只在内存里,刷新即失效。删法见 src/easteregg/moon/README.md -->
-            <div class="sd__about-block">
-              <h4 class="sd__about-heading">兑换码</h4>
-              <div class="egg-redeem">
-                <input
-                  v-model="eggCode"
-                  class="sd__input egg-redeem__input"
-                  type="text"
-                  placeholder="输入兑换码"
-                  @keyup.enter="onRedeemEgg"
-                />
-                <button class="sd__btn" type="button" @click="onRedeemEgg">兑换</button>
-              </div>
-              <p v-if="eggWrong" class="egg-redeem__err">兑换码不正确</p>
-              <p v-else-if="moonRedeemed" class="egg-redeem__ok">{{ MOON_HINT }}</p>
-            </div>
-            <!-- /⛔ 临时彩蛋 -->
-          </div>
-
-          <div v-if="activeTab === 'disclaimer'" class="sd__section sd__disclaimer">
-            <h3 class="sd__disclaimer-title">免责声明</h3>
-            <div class="sd__disclaimer-content">
-              <p><strong>一、用户责任与合规使用</strong></p>
+          <!-- ============ 5. 免责声明 ============ -->
+          <div v-if="activeTab === 'disclaimer'" class="st__doc">
+            <section class="st__doc-sec">
+              <h3 class="st__doc-h">一、用户责任与合规使用</h3>
               <p>您明确知晓并同意，您是使用本工具生成内容的唯一责任人。您承诺：</p>
-              <p>1. 严格遵守您所使用AI模型服务商的所有使用政策与安全准则。</p>
-              <p>2. 遵守您所在地及服务商所在地的现行法律法规，绝不利用本工具生成任何涉及政治敏感、淫秽色情、暴力恐怖、仇恨歧视、侵犯他人合法权益以及其他一切违法和不良信息。</p>
-              <p>3. 理解并接受本工具仅用于合法的《明日方舟：终末地》同人角色扮演娱乐，任何超出此用途的使用风险自担。</p>
+              <ol class="st__doc-list">
+                <li>严格遵守您所使用 AI 模型服务商的所有使用政策与安全准则。</li>
+                <li>遵守您所在地及服务商所在地的现行法律法规，绝不利用本工具生成任何涉及政治敏感、淫秽色情、暴力恐怖、仇恨歧视、侵犯他人合法权益以及其他一切违法和不良信息。</li>
+                <li>理解并接受本工具仅用于合法的《明日方舟：终末地》同人角色扮演娱乐，任何超出此用途的使用风险自担。</li>
+              </ol>
+            </section>
 
-              <p><strong>二、知识产权与同人声明</strong></p>
+            <section class="st__doc-sec">
+              <h3 class="st__doc-h">二、知识产权与同人声明</h3>
               <p>《明日方舟：终末地》是上海鹰角网络科技有限公司的游戏产品。本工具为第三方同人作品，无任何盈利性质，与上海鹰角网络科技有限公司及《明日方舟：终末地》官方开发商、运营商无任何关联。</p>
               <p>本工具中使用的所有与《明日方舟：终末地》相关的角色形象、世界观设定、剧情元素、图片资源等知识产权，均归上海鹰角网络科技有限公司所有。本工具仅供爱好者学习与交流，严禁用于任何商业用途。</p>
+            </section>
 
-              <p><strong>三、免责条款</strong></p>
+            <section class="st__doc-sec">
+              <h3 class="st__doc-h">三、免责条款</h3>
               <p>在法律允许的最大范围内，本工具开发者不对以下情况承担任何明示或默示的担保或责任：</p>
-              <p>1. 用户因违反本声明或第三方服务商条款而产生的任何纠纷、处罚或损失；</p>
-              <p>2. 用户因篡改代码等自主行为所引发的一切后果；</p>
-              <p>3. 对第三方AI模型服务商提供的服务质量、内容准确性及合规性。</p>
-              <p>请您在使用前务必仔细阅读并同意以上全部条款。继续使用即代表您已充分理解并自愿承担所有相关风险。</p>
-            </div>
+              <ol class="st__doc-list">
+                <li>用户因违反本声明或第三方服务商条款而产生的任何纠纷、处罚或损失；</li>
+                <li>用户因篡改代码等自主行为所引发的一切后果；</li>
+                <li>对第三方 AI 模型服务商提供的服务质量、内容准确性及合规性。</li>
+              </ol>
+              <p class="st__doc-note">请您在使用前务必仔细阅读并同意以上全部条款。继续使用即代表您已充分理解并自愿承担所有相关风险。</p>
+            </section>
           </div>
-        </div>
 
-        <!-- 右上角关闭按钮(×)已移除(2026-09-25):退出统一走左侧栏顶部的「退出」按钮 -->
+        </div>
       </div>
     </div>
   </Transition>
@@ -1814,1065 +1587,392 @@ function resetAll() {
 
 <style scoped lang="scss">
 @use '../../styles/variables' as *;
-@use '../../styles/mixins' as *;
 
 // =============================================================================
-// 版式常量(改这里即可整体调节,勿在各处散写数值)
+// 设置面板(全屏分类面板)
 // -----------------------------------------------------------------------------
-// 页签栏宽度:桌面常驻一档(图标 + 文字),2026-09-25 起取消收起态 ——
-// 于是不再需要「收起 / 展开」两档宽度,窄屏也改成顶部横向条(见媒体查询)。
-// 宽度由「左右内边距 × 2 + 图标框 + 文字」推出,不再是纯计算值,故直接写死。
-// 顶栏高度 $head-h 为页签栏头部与主区标题行共用 —— 两者顶在同一基线上,
-// 视觉上才是一条贯通的横带。
+// 结构:遮罩 + 全屏窗口(顶部页签栏 / 内容滚动区)。
+// 通用的面板外观(遮罩、页签、分组标题、设置行、分段控件、胶囊按钮与输入框)
+// 全部来自全局设计系统 `styles/panel.scss`(`.pn-` 前缀),这里只写本页特有
+// 的栅格与少量补充样式(只读值、按钮行、滑块、危险按钮、文档与关于页)。
 // =============================================================================
-$head-h: 64px;          // 顶栏高度(桌面)
-$head-h-sm: 52px;       // 顶栏高度(窄屏)
-$nav-w: 196px;          // 页签栏宽度(桌面:常驻一列,图标 + 文字)
-$nav-rail-w-sm: 58px;   // 页签栏收起宽度(窄屏抽屉:只露图标的一条窄栏)
-$nav-open-w-sm: 180px;  // 页签栏展开宽度(窄屏抽屉)
-$nav-pad-x: 19px;       // 页签栏左右内边距(桌面)
-$nav-pad-x-sm: 17px;    // 页签栏左右内边距(窄屏)
-$nav-item-h: 44px;      // 页签项高度(两端一致;黄条定位依赖它固定)
-$nav-anim: 0.28s;       // 页签栏宽度 / 指示条的动画时长
-$icon-box: 24px;        // 图标框边长
-$body-pad-x: 32px;      // 主区左右内边距(桌面)
-$body-pad-x-sm: 16px;   // 主区左右内边距(窄屏)
 
-/// 菜单底色 + 24px 灰色网格纹理(设置面板主区的"面板材质")
-///
-/// 只有主区用:侧边栏刻意**不铺网格**(见 &__nav 的底色注释)。
-@mixin sd-surface {
-  background-color: $color-dialog-bg;
-  // 灰色正方形网格纹理(菜单背景):横竖 1px 细线交叉成 24px 格子
-  background-image:
-    linear-gradient(to right, rgba(134, 134, 133, 0.12) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(134, 134, 133, 0.12) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-
-.sd {
+.st {
   position: fixed;
   inset: 0;
-  z-index: 200;
-  background: rgba(0, 0, 0, 0.75);
-  // 两端都是居中显示的「窗口」而不是铺满整屏(与旧版设置面板形态一致):
-  // 桌面留 24px、窄屏留 12px(见媒体查询),四周透出后面的对话界面。
+  z-index: 500;
+
+  // 设置面板的遮罩比公告页更不透明:把后面的聊天界面压暗,控件更清楚
+  .pn-scrim {
+    background: rgba(8, 9, 10, 0.88);
+  }
+}
+
+.st__win {
+  // 顶部不留白:页签栏紧贴页面顶端
+  padding-top: 0;
+}
+
+.st__top {
+  position: relative;
   display: flex;
-  align-items: center;
+  flex-shrink: 0;
+  align-items: flex-start;
   justify-content: center;
-  padding: 24px;
+  min-height: 56px;
+}
 
-  &__panel {
-    position: relative;
-    // 窗口尺寸:够放下「侧边栏 + 内容」两列,又不占满大屏。
-    // 用 min() 兜底小窗口,避免窄桌面下溢出到屏幕外。
-    width: min(1040px, calc(100vw - 48px));
-    height: min(720px, calc(100vh - 48px));
-    border-radius: 0;
-    // 窗口有外框(全屏时四周留 1px 描边会显得"框住"整块界面,窗口则正需要)
-    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55);
-    @include sd-surface;
-    // 两列 × 两行:左列侧边栏跨满两行(导航 + 选中竖条),
-    // 右列上格是当前页标题,下格是可滚动内容。
-    // 用 grid 而不是嵌套 flex,是为了让页内容(六个 section)直接留在面板下,
-    // 不必再套一层容器。
-    display: grid;
-    grid-template-columns: auto 1fr;
-    grid-template-rows: auto 1fr;
-    grid-template-areas:
-      'nav title'
-      'nav body';
-    // 侧边栏宽度动画期间,内容不得溢出到面板外
-    overflow: hidden;
+// 左上角:与主界面顶部一致的「小图 + //BAKER/…」标题
+.st__brand {
+  position: absolute;
+  left: 22px;
+  top: 6px;
+  pointer-events: none;
+  user-select: none;
+}
 
-    // 菜单内所有元素一律直角(含伪元素,如滑块圆点)
-    *,
-    *::before,
-    *::after {
-      border-radius: 0 !important;
-    }
+.st__brand-deco {
+  display: block;
+  width: 63px;
+  height: 12px;
+  opacity: 0.85;
+}
 
-    // 主区内容压在装饰之上。侧边栏 / 遮罩 / 关闭按钮各有自己的定位方式,排除在外
-    // (窄屏页签栏是浮层、遮罩要铺满面板、× 要钉在面板右上角,这里的
-    //  position: relative 会把它们的 absolute 压掉)。
-    > *:not(.sd__close):not(.sd__nav):not(.sd__nav-scrim) {
-      position: relative;
-      z-index: 1;
-    }
+.st__brand-title {
+  margin: 5px 0 0;
+  color: $color-text-primary;
+  font-family: $font-harmony;
+  font-size: 21px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.5px;
+  white-space: nowrap;
+}
+
+.st__body {
+  // 内容与页签栏之间留一点呼吸
+  padding-top: 6px;
+}
+
+// ---- 只读值(当前干员 / 内置端点等) ----------------------------------------
+.st__ro {
+  color: #e6e6e6;
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+
+// 「每次检索条数」下拉:只占一小段,不拉满控件列
+.st__topk {
+  width: 132px;
+}
+
+// ---- 控件列里的纵向堆叠 ----------------------------------------------------
+.st__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+// ---- 按钮行 ----------------------------------------------------------------
+.st__btnrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+// ---- 温度滑块:轨道压成细线,拇指用标识黄 ---------------------------------
+.st__range {
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+
+  &::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.24);
   }
 
-  // ---- 左侧边栏(窄屏:顶部横向一条,见媒体查询) -----------------------------
-  &__nav {
-    grid-area: nav;
-    position: relative;
-    z-index: 3;
-    display: flex;
-    flex-direction: column;
-    // 不再有收起态:桌面常驻"图标 + 文字"这一档宽度
-    width: $nav-w;
-    // 底色必须**不透明**(窗口下也不透出后面的对话界面),但刻意**不铺那层 24px
-    // 网格纹理** —— 网格是主区的材质,铺到侧边栏上会从图标/文字的缝隙里透出细线,显脏。
-    background-color: $color-dialog-bg;
-    // 长标签不换行、不溢出(超出部分裁掉)
-    overflow: hidden;
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
+  &::-webkit-slider-thumb {
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    border: 0;
+    border-radius: 50%;
+    background: #ffee34;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.45);
+    appearance: none;
+    -webkit-appearance: none;
   }
 
-  &__nav-head {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    height: $head-h;
-    padding: 0 $nav-pad-x;
+  &::-moz-range-track {
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.24);
   }
 
-  // 退出按钮(取代原折叠按钮;右上角 × 已移除,退出入口统一到这里)
-  // 用左向箭头图标,点击即关闭整个设置窗口 —— 与点面板外的黑遮罩等价。
-  &__nav-exit {
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 8px;
-    margin: -8px;
-    background: none;
-    border: none;
-    color: rgba(255, 255, 255, 0.55);
-    cursor: pointer;
-    transition: color 0.2s;
-
-    svg {
-      width: 20px;
-      height: 20px;
-    }
-
-    &:hover { color: $color-text-primary; }
+  &::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border: 0;
+    border-radius: 50%;
+    background: #ffee34;
   }
+}
 
-  // 收起 / 展开按钮(仅窄屏抽屉用;桌面端页签栏常驻一列,不需要它)
-  // 命中区补偿与 &__nav-exit 同一套:图标 20px 偏小,用「等量 padding + 负 margin」
-  // 把可点区域撑到 36×36,图标位置不动。
-  &__nav-toggle {
-    display: none;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-    padding: 8px;
-    margin: -8px;
-    background: none;
-    border: none;
-    color: rgba(255, 255, 255, 0.55);
-    cursor: pointer;
-    transition: color 0.2s;
+// ---- 危险操作(重置全部) --------------------------------------------------
+.st__danger {
+  background: rgba(214, 74, 74, 0.22);
+  color: #ffb3b3;
+  box-shadow: 0 0 0 1.5px rgba(255, 120, 120, 0.42) inset;
 
-    svg {
-      width: 20px;
-      height: 20px;
-      // 箭头翻转与页签栏宽度同步(翻向规则见窄屏媒体查询)
-      transition: transform $nav-anim $ease-out;
-    }
-
-    &:hover { color: $color-text-primary; }
+  &:hover:not(:disabled) {
+    background: rgba(214, 74, 74, 0.36);
+    color: #ffd0d0;
   }
+}
 
-  // 关闭按钮(×):窄屏全屏面板的唯一退出入口(见媒体查询);
-  // 桌面端不渲染 —— 那边的退出入口是页签栏头部的箭头按钮。
-  &__close {
-    display: none;
-    position: absolute;
-    top: 12px;
-    right: 16px;
-    z-index: 4;
-    // 命中区补偿(与 &__nav-exit 同一套):× 字形本身约 14×24,
-    // 用「等量 padding + 负 margin」把可点区域撑到约 30×36,字形位置不变。
-    padding: 6px 8px;
-    margin: -6px -8px;
-    background: none;
-    border: none;
-    color: $color-text-primary;
-    font-size: 24px;
-    line-height: 1;
-    cursor: pointer;
-    opacity: 0.5;
-    transition: opacity 0.2s;
+// ---- 数据管理页(内嵌组件,铺满内容宽度) ----------------------------------
+.st__data {
+  padding: 0 44px;
 
-    &:hover { opacity: 1; }
-  }
-
-  // 窄屏抽屉展开时的浮层遮罩(仅窄屏渲染,见模板 v-if)
-  &__nav-scrim {
-    position: absolute;
-    inset: 0;
-    z-index: 2;
-    background: rgba(0, 0, 0, 0.45);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity $nav-anim $ease-out;
-
-    &--on {
-      opacity: 1;
-      pointer-events: auto;
-    }
-  }
-
-  // 侧边栏内的文字(头部「设置」与各页签标签共用一套排版)
-  &__nav-text {
-    white-space: nowrap;
-  }
-
-  &__nav-title {
-    font-family: $font-harmony;
-    font-size: 15px;
-    font-weight: 600;
-    color: $color-text-primary;
-  }
-
-  // 导航项列表(黄条以它为定位基准,故这里必须是 relative)
-  &__nav-list {
-    position: relative;
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 6px 0;
-    // 极矮屏(横屏手机)兜底:页签放不下时就地滚动;
-    // 黄条是列表的子元素,会跟着一起滚,不会错位
-    overflow-y: auto;
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar { display: none; }
-  }
-
-  &__nav-item {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    width: 100%;
-    // 高度固定:黄条定位不因内容变化失效(见脚本注释)
-    height: $nav-item-h;
-    padding: 0 $nav-pad-x;
-    background: none;
-    border: none;
-    // 文字与图标一律用**不透明白**,未选中的淡化交给整项的 opacity(见下)。
-    // 图标是 currentColor 描边,颜色一旦带 alpha,同一图标里的线条交叉处就会
-    // 叠成更深的一笔(实测交叉点亮度 201,单笔 152),看起来就是"线条重叠"。
-    color: $color-text-primary;
-    font-family: $font-harmony;
-    font-size: 14px;
-    text-align: left;
-    white-space: nowrap;
-    cursor: pointer;
-    // 半透明写在整项上:整项先按不透明合成、再整体淡出 ——
-    // 图标内部笔画重叠处颜色完全一致,文字与图标也共用同一个淡化系数。
-    opacity: 0.5;
-    transition: opacity $anim-fast;
-
-    &:hover { opacity: 0.85; }
-
-    // 选中态:整项不透明,选择标记交给最左侧的竖黄条
-    &--active {
-      opacity: 1;
-    }
-  }
-
-  &__nav-icon {
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: $icon-box;
-    height: $icon-box;
-
-    svg {
-      width: 22px;
-      height: 22px;
-    }
-  }
-
-  // 选中项的黄条
-  //
-  // 桌面:贴在页签栏最左侧的竖条,长度 = 激活项高度、位置 = 激活项的 offsetTop;
-  // 窄屏:贴在横向页签行底部,长度 = 激活项宽度、位置 = 激活项的 offsetLeft(见媒体查询)。
-  // 四项数值全部由脚本算好挂在 --ind-* 上,两端只是各取所需,不必两套测量逻辑。
-  &__nav-indicator {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 3px;
-    height: var(--ind-h, #{$nav-item-h});
-    background: #ffef00;
-    pointer-events: none;
-    will-change: transform;
-    transform: translateY(var(--ind-y, 0));
-
-    // 首次定位落位后才开过渡(见脚本 indicatorReady):
-    // 否则打开面板的瞬间,黄条会从列表起点滑到激活项上
-    &.is-ready {
-      transition:
-        transform $nav-anim $ease-out,
-        height $nav-anim $ease-out;
-    }
-  }
-
-  // 当前页标题:主区第一行,高度与页签栏头部一致(顶在同一条横带上)
-  &__title {
-    grid-area: title;
-    display: flex;
-    align-items: center;
-    height: $head-h;
-    margin: 0;
-    padding: 0 $body-pad-x;
-    font-family: $font-harmony;
-    font-size: 20px;
-    font-weight: 600;
-    color: $color-text-primary;
-  }
-
-  // 内容区:横向铺满侧边栏右侧的整块宽度(只留左右内边距,不再另外限宽)
-  &__body {
-    grid-area: body;
-    overflow-y: auto;
-    min-height: 0;
-    padding: 4px $body-pad-x 24px;
-    // 隐藏滚动条(但保留滚动功能)
-    scrollbar-width: none; // Firefox
-    -ms-overflow-style: none; // IE/Edge
-    &::-webkit-scrollbar {
-      display: none; // Chrome/Safari/Webkit
-    }
-  }
-
-  // ---- 窄屏 ---------------------------------------------------------------
-  // 断点 768 与 composables/useMobile 的 MOBILE_BREAKPOINT 同一数值(改一处要一起改)。
-  //
-  // 窄屏不铺满整屏,而是回到老版那个「小窗口」形态:
-  //   宽度 560 封顶、高度约 78%、四周留白 —— 一屏内容不必被拉满,看着才不臃肿。
-  // 页内布局也全部改成**上下布局**(老版就是纵向的):
-  //   一行标签 + 一行控件(控件铺满整行) + 至多一行状态;
-  // 桌面那套「标签在左、控件在右」的两列样式在窄屏一律取消 —— 窄屏横排必然换行。
-  //
-  // 页签栏在这里取 2.0 的**抽屉**形态:平时是一条只露图标的窄栏($nav-rail-w-sm),
-  // 点头部箭头展开成一栏完整菜单($nav-open-w-sm),压在内容之上并弹出遮罩;
-  // 选中任意页、点遮罩、或再点一次箭头都收起。桌面端完全不走这套(见上面的基础样式)。
-  @media (max-width: 768px) {
-    // 窄屏:设置面板**铺满整屏**(与旧版一致),四周不留白 ——
-    // 留白那圈黑边本来是"点空白关窗"的命中区,全屏后这个入口没有了,
-    // 关闭改走右上角的 ×(见模板 &__close)。
+  // 组件本身带一层 16px 内边距(弹窗居中用的),内嵌时必须归零:
+  // 否则整页内容比其它页多缩进 16px,左边缘对不齐。
+  :deep(.dm) {
     padding: 0;
-
-    &__panel {
-      // 全屏:宽高都吃满容器(旧版就是 100% × 100%)
-      width: 100%;
-      height: 100%;
-      max-height: none;
-      // 抽屉脱离文档流后,auto 那条列会塌成 0 —— 必须显式写出这一条图标列,
-      // 内容才会被让开 $nav-rail-w-sm;标题行仍在右上格(auto 高)。
-      grid-template-columns: $nav-rail-w-sm 1fr;
-      grid-template-rows: auto 1fr;
-      grid-template-areas:
-        'nav title'
-        'nav body';
-    }
-
-    // 关闭按钮(×):全屏后唯一的"退出设置"入口,只在窄屏出现
-    &__close {
-      display: block;
-    }
-
-    // 页签栏:浮层窄栏 / 展开成完整一栏
-    &__nav {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      left: 0;
-      width: $nav-rail-w-sm;
-      // 宽度动画只在窄屏需要(桌面常驻一列,宽度不变)
-      transition: width $nav-anim $ease-out;
-
-      // 展开时压住内容,给一道右侧投影拉开层次
-      &--open {
-        width: $nav-open-w-sm;
-        box-shadow: 0 0 24px rgba(0, 0, 0, 0.55);
-      }
-
-      // 收起时窄栏里只放得下图标:文字(「设置」与各页标签)只在展开后浮出。
-      // 展开时让文字**最后**入场 —— 先等宽度撑开,再出现,不然文字会被挤着走。
-      .sd__nav-text {
-        opacity: 0;
-        transform: translateX(-6px);
-        pointer-events: none;
-        transition:
-          opacity 0.14s $ease-out,
-          transform 0.16s $ease-out;
-      }
-
-      &--open .sd__nav-text {
-        opacity: 1;
-        transform: none;
-        transition:
-          opacity 0.2s $ease-out 0.1s,
-          transform 0.22s $ease-out 0.1s;
-      }
-
-      // 箭头翻向:向右 = 可展开,旋转 180° 后向左 = 可收起
-      &--open .sd__nav-toggle svg {
-        transform: rotate(180deg);
-      }
-    }
-
-    &__nav-head {
-      height: $head-h-sm;
-      padding: 0 $nav-pad-x-sm;
-    }
-
-    // 收起 / 展开箭头:仅窄屏存在(桌面端页签栏常驻,不需要)
-    &__nav-toggle {
-      display: flex;
-    }
-
-    // 头部只留「箭头 + 设置」这一组 —— 旧版窄屏正是如此。
-    // 退出按钮在窄屏收起(全屏后由右上角的 × 承担退出),免得头部冒出第二个箭头。
-    &__nav-exit {
-      display: none;
-    }
-
-    &__nav-item {
-      gap: 10px;
-      padding: 0 $nav-pad-x-sm;
-      font-size: 13px;
-    }
-
-    &__nav-icon svg {
-      width: 20px;
-      height: 20px;
-    }
-
-    // 页标题:抽屉收起时只露图标,全靠这一行知道当前在哪一页 —— 窄屏要留着
-    &__title {
-      height: $head-h-sm;
-      padding: 0 $body-pad-x-sm;
-      font-size: 17px;
-    }
-
-    // 内容区:左右与标题行同一档,上下各留一点(免得第一行选项贴着标题行)
-    &__body {
-      padding: 4px $body-pad-x-sm 20px;
-    }
-
-    // ---- 页内一律上下布局 ---------------------------------------------------
-    // 桌面是「标签在左、控件在右」的两列;窄屏两列必然换行,所以改成一列:
-    // 标签一行、控件一行,控件(开关 / 模式切换 / 输入框)一律铺满整行 —— 这也是老版的排法。
-    &__field--row {
-      grid-template-columns: 1fr;
-      row-gap: 8px;
-    }
-
-    // 开关按钮独占一行,但**不铺满**:整行通到两边会顶到弹窗边缘,
-    // 收成固定宽度的小按钮(左对齐),两侧自然留出余白
-    &__field--row > .sd__switch {
-      width: auto;
-      min-width: 112px;
-      justify-self: start;
-    }
-
-    // 标签永不换行:一个选项的文字就一行
-    // (超长兜底裁成省略号;现有文案最长 16 个汉字,窄屏一行放得下)
-    &__label {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    // 按钮行:按钮等分整行,行内不再出现横向滚动
-    &__actions,
-    &__route {
-      width: 100%;
-
-      > .sd__btn {
-        flex: 1;
-      }
-    }
-
-    // ---- 文字:只留一行 -----------------------------------------------------
-    // 窄屏一行约 24 个汉字,说明性文字必然换行 —— 老版的做法是干脆不写。
-    // 规则:
-    //   · .sd__hint / .sd__desc 默认隐藏(解释"为什么"、复述开关状态都属非必要);
-    //   · 动态反馈(连接测试结果、拉取失败、被禁用原因、当前选项值)加 --keep 保留;
-    //   · 长句里的补充说明用 .sd__pc-only 包住,窄屏只留前半句。
-    &__hint,
-    &__desc {
-      display: none;
-    }
-
-    &__hint--keep,
-    &__desc--keep {
-      display: block;
-      // 保留的多是报错 / 状态文本,里面可能夹着长 URL:允许在任意处断行,免得撑破面板
-      overflow-wrap: anywhere;
-    }
-
-    // 桌面专有的补充说明:窄屏不渲染
-    &__pc-only {
-      display: none;
-    }
   }
 
-  &__section {
+  // 分组标题:与设置页各分类同一套(黄色竖条 + 通栏细线)
+  // 数值逐项对齐 .pn-sec__head + .pn-rows:字号 17 / 上 2px 下 10px,
+  // 标题与下方内容之间留 8px(其它页由 .pn-rows 的 margin-top 提供)
+  :deep(.dm__group) {
+    position: relative;
     display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  // 后端路线的「默认 / 备用」并排按钮(复用 &__btn 外观,只负责排布)
-  &__route {
-    display: flex;
-    gap: 8px;
-  }
-
-  &__field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  /**
-   * 开关行:标签在左、控件在右,说明/提示行独占下方整行。
-   *
-   * 为什么不用默认的纵排列:控件(开关 / 两段模式切换)被 flex 的 stretch 拉成
-   * 满行宽 —— 在整屏宽度下就是一条横贯页面的长条,既难看出"这是个开关",
-   * 也和模式切换那种"一小块黄底"的选中语汇对不上。
-   * 改成网格后控件只占自身宽度,同页所有开关右边缘对齐成一列。
-   */
-  &__field--row {
-    display: grid;
-    grid-template-columns: 1fr auto;
     align-items: center;
-    column-gap: 16px;
-    row-gap: 4px;
+    gap: 10px;
+    margin: 12px 0 8px;
+    padding: 2px 0 10px;
+    color: #ffef00;
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.4;
 
-    // 提示行不受两列限制,通栏排在下方
-    > .sd__hint {
-      grid-column: 1 / -1;
+    &::before {
+      content: '';
+      flex: 0 0 4px;
+      width: 4px;
+      height: 20px;
+      background: #ffef00;
     }
 
-    // 子选项(如「联网搜索」下的「强制每条搜索」):
-    // 通栏排 + 左侧竖线缩进,视觉上明确是从属关系而不是并列开关。
-    > .sd__subfield {
-      grid-column: 1 / -1;
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: center;
-      column-gap: 16px;
-      row-gap: 4px;
-      margin-top: 8px;
-      padding-left: 12px;
-      border-left: 2px solid rgba(255, 239, 0, 0.28);   // 与强调黄同色系
-
-      > .sd__hint {
-        grid-column: 1 / -1;
-      }
-
-      > .sd__label {
-        font-size: 12px;
-      }
-    }
-
-    // 两段模式切换在行内收窄:每段各占一半,黄条位移的百分比仍以自身宽度为准
-    > .sd__mode-toggle {
-      width: 340px;
-      max-width: 100%;
+    &::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 1px;
+      background: rgba(255, 255, 255, 0.32);
     }
   }
 
-  /**
-   * 开关按钮(开启 / 关闭)
-   *
-   * 状态型控件,沿用「模式切换」那套选中语汇:开 = 黄块 + 深色字,
-   * 关 = 细灰框 + 弱化白字。定宽是为了同一页里所有开关对齐、
-   * 且「开启 ✓ / 关闭」两种文案切换时宽度不跳动。
-   */
-  &__switch {
-    flex: none;
-    min-width: 92px;
-    padding: 7px 14px;
-    background: none;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: rgba(255, 255, 255, 0.55);
-    font-family: $font-harmony;
+  // 顶部统计行后面紧跟的第一个分组标题:不要再加间距
+  :deep(.dm__stats + .dm__group) {
+    margin-top: 0;
+  }
+
+  :deep(.dm__group--danger) {
+    color: #ff8f8f;
+
+    &::before {
+      background: #ff8f8f;
+    }
+  }
+
+  :deep(.dm__stats) {
+    margin: 0 0 12px;
+    color: rgba(255, 255, 255, 0.72);
     font-size: 13px;
-    text-align: center;
-    white-space: nowrap;
-    cursor: pointer;
-    transition:
-      background-color $anim-fast,
-      border-color $anim-fast,
-      color $anim-fast;
+  }
+
+  :deep(.dm__subtitle) {
+    // 标题下方那行灰字(云同步说明):离分割线再远一点,别贴着看
+    margin: 6px 0 10px;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 13px;
+  }
+
+  // 按钮组做成一张卡片,与设置行同色、同内边距、同圆角、同最小高度
+  // (圆角要 !important:弹窗那套 shell 会给子元素强制直角)
+  :deep(.dm__actions) {
+    gap: 10px;
+    min-height: 62px;
+    padding: 10px 24px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 3px !important;
+    background: #323234;
+  }
+
+  // 危险操作:一行排开(手机上自动换行),不再竖着堆四条
+  :deep(.dm__actions--menu) {
+    flex-flow: row wrap;
+    gap: 10px;
+  }
+
+  :deep(.dm__divider) {
+    display: none;
+  }
+
+  :deep(.dm__btn) {
+    border-radius: 999px !important;
+    padding: 6px 16px !important;
+    background: #edebec !important;
+    color: #373537 !important;
+    font-size: 13.5px !important;
+    line-height: 1.4 !important;
+    box-shadow: 0 0 3px rgba(0, 0, 0, 0.27);
+    transition: background-color 0.15s ease;
 
     &:hover:not(:disabled) {
-      border-color: rgba(255, 255, 255, 0.35);
-      color: $color-text-primary;
-    }
-
-    // 开启态(黄底上保持深色字,不被 hover 变白)
-    &--on,
-    &--on:hover:not(:disabled) {
-      background: #ffef00;
-      border-color: #ffef00;
-      color: #1a1a1a;
+      background: #e0e0e0 !important;
     }
 
     &:disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
+      opacity: 0.45;
     }
   }
 
-  // 开关行在窄屏上的唯一调整:两段模式切换(340px)在手机上放不进右侧那一格,
-  // 让它跨两列掉到标签下方、占满整行;开关按钮本身够窄,仍与标签同行。
-  // 注意必须写在 &__field--row 之后 —— 同权重下后写的规则才生效。
-  @media (max-width: 768px) {
-    &__field--row > .sd__mode-toggle {
-      grid-column: 1 / -1;
-      width: 100%;
+  :deep(.dm__btn--primary) {
+    background: #2a2728 !important;
+    color: #fefcfc !important;
+
+    &:hover:not(:disabled) {
+      background: #1e1c1c !important;
     }
   }
 
-  &__label {
-    font-family: $font-harmony;
-    font-size: 13px;
-    color: rgba(255, 255, 255, 0.6);
-  }
+  :deep(.dm__btn--danger) {
+    background: rgba(214, 74, 74, 0.22) !important;
+    color: #ffb3b3 !important;
 
-  &__input {
-    padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 8px;
-    color: $color-text-primary;
-    font-family: $font-harmony;
-    font-size: 14px;
-    outline: none;
-    transition: border-color 0.2s;
-
-    &:focus { border-color: rgba(255, 255, 255, 0.3); }
-    &::placeholder { color: rgba(255, 255, 255, 0.25); }
-  }
-
-  // 模型下拉:外观沿用 &__input,额外补上原生 option 的深色底
-  // (option 由系统绘制,不继承 select 的半透明背景 —— 不显式指定的话,
-  //  在浅色系统主题下会变成白底白字,整个列表看不见)
-  &__select {
-    option {
-      background: $color-dialog-bg;
-      color: $color-text-primary;
+    &:hover:not(:disabled) {
+      background: rgba(214, 74, 74, 0.36) !important;
     }
   }
 
-  // 隐藏的背景图文件选择框(由"上传背景"按钮触发)
-  &__file {
-    display: none;
+  :deep(.dm__input) {
+    border-radius: 999px !important;
+    background: #edebec !important;
+    color: #2c2c2c !important;
   }
 
-  &__slider {
-    width: 100%;
-    accent-color: #ffef00;
+  :deep(.dm__code-value) {
+    color: #ffee34;
   }
 
-  &__textarea {
-    width: 100%;
-    padding: 10px 12px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 8px;
-    color: $color-text-primary;
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.6;
-    resize: vertical;
-    outline: none;
-    transition: border-color 0.2s;
-    // 确保 textarea 滚动条可见(不被父级隐藏)
-    scrollbar-width: auto; // Firefox
-    -ms-overflow-style: auto; // IE/Edge
-    &::-webkit-scrollbar {
-      display: block; // Chrome/Safari/Webkit
-      width: 8px;
-    }
-    &::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.2);
-      border-radius: 4px;
-    }
-    &::-webkit-scrollbar-track {
-      background: rgba(255, 255, 255, 0.05);
-    }
+  // 二次确认弹窗的正文在白底弹窗里,文字颜色由 DataManagerDialog 自己定,
+  // 这里不要再覆盖(曾经写过 #fff,导致白底白字)
+}
 
-    &:focus { border-color: rgba(255, 255, 255, 0.3); }
-    &::placeholder { color: rgba(255, 255, 255, 0.25); }
-    &:disabled { opacity: 0.4; cursor: not-allowed; }
+// ---- 免责声明 / 关于:长文档排版 ------------------------------------------
+.st__doc {
+  padding: 2px 44px 44px;
+  color: rgba(255, 255, 255, 0.82);
+  font-family: $font-harmony;
+  font-size: 13.5px;
+  line-height: 1.9;
+}
 
-    &--tall { min-height: 320px; }
+.st__doc-sec {
+  margin: 0 0 6px;
+}
+
+// 与小节标题同一套语言:黄色竖条 + 通栏细线
+.st__doc-h {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 20px 0 10px;
+  padding: 0 0 10px;
+  color: #ffee34;
+  font-size: 16px;
+  font-weight: 700;
+
+  &::before {
+    content: '';
+    flex: 0 0 4px;
+    width: 4px;
+    height: 18px;
+    background: #ffee34;
   }
 
-  &__select {
-    padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 8px;
-    color: $color-text-primary;
-    font-family: $font-harmony;
-    font-size: 14px;
-    outline: none;
-    cursor: pointer;
-
-    option { background: $color-dialog-bg; }
-  }
-
-  &__mode-toggle {
-    position: relative;
-    display: flex;
-    gap: 0;
-    border-radius: 0;
-    overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-  }
-
-  // 黄色滑动指示条:宽度 = 一格(两列各 50%),按"格数"滑动
-  //
-  // 位移百分比以**指示条自身宽度**为基准,而它的宽度恰好是一格宽 →
-  // 前进 N 格就是 translateX(N×100%)。
-  //
-  // 这里刻意按"步数"而不是"列位"命名:早先叫 --middle / --right(列位语义),
-  // 两列的总结 API 开关复用了 --right 想表达"第二列",结果按三列的语义
-  // 滑了两格(492px,整个容器宽),黄条直接滑出容器外被 overflow 裁掉,
-  // 而激活按钮的深色文字(#1a1a1a,本是给黄底用的)落在深色面板上就看不见了。
-  &__mode-indicator {
+  &::after {
+    content: '';
     position: absolute;
-    top: 0;
     left: 0;
-    width: 50%;
-    height: 100%;
-    background: #ffef00;
-    pointer-events: none;
-    transition:
-      transform 0.25s ease,
-      opacity 0.2s ease;
-
-    /** 前进一格(两列开关的第二列) */
-    &--step-1 {
-      transform: translateX(100%);
-    }
-
-    /**
-     * 三列变体(API 模式:默认 / 自定义 / 旧版)
-     *
-     * 不加这条时指示条会沿用两列的 50% 宽 —— 黄块横跨第 1、2 个按钮，
-     * 第三个按钮永远没有黄底，看起来"选不中"，这就是之前 API 模式选不了的原因。
-     * 三列时一格 = 1/3，步进仍是 100%/200%（位移基准是指示条自身宽度）。
-     */
-    &--three {
-      width: 33.3333%;
-
-      // 第二格(自定义 API)
-      &.sd__mode-indicator--step-1 {
-        transform: translateX(100%);
-      }
-
-      // 第三格(旧版模式)
-      &.sd__mode-indicator--step-2 {
-        transform: translateX(200%);
-      }
-    }
-
-    /**
-     * 当前模式不在本开关内(如「连接设置」页的开关里没有"自定义 API")。
-     *
-     * 直接隐藏:黄块若停在"默认 API"上,会被误读成该模式已选中 ——
-     * 而实际上此刻生效的是自定义 API。此时由旁边的提示行说明当前模式。
-     */
-    &.is-hidden {
-      opacity: 0;
-    }
-  }
-
-  &__mode-btn {
-    position: relative;
-    z-index: 1;
-    flex: 1;
-    padding: 8px 12px;
-    background: none;
-    border: none;
-    color: rgba(255, 255, 255, 0.5);
-    font-family: $font-harmony;
-    font-size: 13px;
-    cursor: pointer;
-    transition: color 0.2s;
-
-    &:hover { color: rgba(255, 255, 255, 0.8); }
-
-    // 激活态(黄底上)悬停时保持深色文字,不被 hover 变白
-    &--active,
-    &--active:hover {
-      color: #1a1a1a;
-    }
-  }
-
-  &__char-textarea-wrap {
-    position: relative;
-  }
-
-  // 分区分隔线(自定义 API 分支内的提示词/世界观区块)
-  &__divider {
+    right: 0;
+    bottom: 0;
     height: 1px;
-    margin: 12px 0;
-    background: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.32);
   }
+}
 
-  &__desc {
-    margin: 0 0 4px;
-    font-family: $font-harmony;
-    font-size: 13px;
-    color: rgba(255, 255, 255, 0.5);
-    line-height: 1.5;
-  }
+.st__doc p {
+  max-width: 96ch;
+  margin: 0 0 10px;
+}
 
-  &__actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 4px;
-    // 窄屏放不下时让按钮整体换行,而不是把它们挤到内容宽以下
-    // (挤窄的后果是按钮内的中文被拆成两行,很难看)
-    flex-wrap: wrap;
-  }
+// 条款列表:黄色序号 + 悬挂缩进
+.st__doc-list {
+  max-width: 96ch;
+  margin: 0 0 12px;
+  padding-left: 1.6em;
 
-  &__btn {
-    padding: 8px 20px;
-    border: 1px solid #f0eeee;
-    border-radius: 0;
-    background: #f0eeee; // 不透明亮灰(次要操作按钮)
-    color: #1a1a1a;
-    font-family: $font-harmony;
-    font-size: 14px;
-    // 按钮文字永不换行:中文在窄按钮里会被逐字拆行(「保存」→「保/存」)。
-    // 空间不够时交给 &__actions 的 flex-wrap 整体换行
-    white-space: nowrap;
-    cursor: pointer;
-    transition: all 0.2s;
+  li {
+    margin-bottom: 5px;
 
-    // 禁用态不得再响应悬停变色:浏览器对 disabled 按钮依然会匹配 :hover,
-    // 加了 :not(:disabled) 才能让它真正"看起来按不动"
-    &:hover:not(:disabled) { background: #dcdcdc; }
-    &:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-
-    &--primary {
-      background: #ffef00;
-      border-color: #ffef00;
-      color: #1a1a1a;
-
-      &:hover:not(:disabled) { background: #e6d936; }
-    }
-
-    // 上下文窗口预设(8K/16K/…):一排五个,按默认内边距会撑爆面板宽度
-    &--preset {
-      padding: 6px 10px;
-      font-size: 13px;
-    }
-  }
-
-  // 窄屏(≤400px):面板内容宽 = 100vw − 88,「保存 / 连接测试 / 重置全部」
-  // 按 20px 内边距需要 276px,360px 视口只有 272px 就放不下了。
-  // 收到 12px 后总宽降到 228px,320px 视口(内容宽 232px)仍能排成一行。
-  @media (max-width: 400px) {
-    &__btn {
-      padding: 8px 12px;
-    }
-  }
-
-  &__hint {
-    margin: 0;
-    font-family: $font-harmony;
-    font-size: 13px;
-    // 基色必须显式给:--ok / --warn 是修饰类,只有它们带颜色。
-    // 缺了这行,不带修饰的提示会一路继承到浏览器默认的黑色(面板是深色底 → 黑字看不见)。
-    // 取值与 __desc / __label 同一族的弱化白,保证"提示文字"读起来是一套。
-    color: rgba(255, 255, 255, 0.5);
-
-    &--ok { color: rgba(100, 255, 100, 0.7); }
-    &--warn { color: rgba(255, 180, 80, 0.8); }
-  }
-
-  // ---- 关于样式 -------------------------------------------------------------
-  &__about {
-    gap: 16px;
-  }
-
-  &__about-title {
-    margin: 0 0 4px;
-    font-family: $font-harmony;
-    font-size: 18px;
-    font-weight: 600;
-    color: $color-text-primary;
-    text-align: center;
-  }
-
-  // QQ 群入口:两行,整体居中(与上方标题同一轴线)
-  &__about-groups {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    text-align: center;
-  }
-
-  &__about-group {
-    margin: 0;
-    font-family: $font-harmony;
-    font-size: 15px;
-    line-height: 1.8;
-    // 群名(汉字 + 英文)一律白色;只有群号是超链接,颜色在 &-link 里单独给
-    color: $color-text-primary;
-  }
-
-  // 群号说明:白字,比上面两行群名小一档
-  &__about-group-tip {
-    margin: 2px 0 0;
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.6;
-    color: $color-text-primary;
-  }
-
-  // 关于页所有外链共用同一套外观:强调黄 / 悬停变浅黄 / 不加下划线。
-  // 「相关链接」的列表项与上方 QQ 群号都走这条,避免两处各写一份后分叉。
-  &__about-links a,
-  &__about-group-link {
-    color: #ffef00;
-    text-decoration: none;
-
-    &:hover {
-      color: #fff983;
-    }
-  }
-
-  &__about-block {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  &__about-heading {
-    margin: 0;
-    font-family: $font-harmony;
-    font-size: 15px;
-    font-weight: 500;
-    color: $color-text-primary;
-  }
-
-  &__about-log {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  &__about-log-date {
-    margin: 8px 0 2px;
-    font-family: $font-harmony;
-    font-size: 16px;
-    font-weight: 600;
-    color: $color-text-primary;
-
-    &:first-child {
-      margin-top: 0;
-    }
-  }
-
-  &__about-log-desc {
-    margin: 0;
-    padding-left: 10px;
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.8;
-    color: rgba(255, 255, 255, 0.65);
-  }
-
-  &__about-links {
-    margin: 0;
-    padding: 0;
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.8;
-    color: rgba(255, 255, 255, 0.65);
-    list-style: none;
-    // 链接外观统一在上方 &__about-links a / &__about-group-link 的合并规则里
-  }
-
-  // ---- 免责声明样式 ---------------------------------------------------------
-  &__disclaimer {
-    gap: 16px;
-  }
-
-  &__disclaimer-title {
-    margin: 0 0 4px;
-    font-family: $font-harmony;
-    font-size: 18px;
-    font-weight: 600;
-    color: $color-text-primary;
-    text-align: center;
-  }
-
-  &__disclaimer-content {
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.8;
-    color: rgba(255, 255, 255, 0.65);
-
-    p {
-      margin: 0 0 8px;
-
-      &:last-child {
-        margin-bottom: 0;
-      }
-    }
-
-    strong {
-      color: $color-text-primary;
-      font-size: 14px;
+    &::marker {
+      color: #ffee34;
+      font-variant-numeric: tabular-nums;
     }
   }
 }
 
-/* ⛔ 临时彩蛋(可删):关于页「兑换码」那一块 —— 删掉本块 + 模板里的 ⛔ 块 +
-   脚本里的 ⛔ 两处即可(见 src/easteregg/moon/README.md)。
-   刻意写成独立顶层选择器(不塞进上面的 .sd 嵌套),为的就是"整块可删"。 */
-.egg-redeem {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+// 结尾提示:左侧黄条 + 淡黄底,和正文区分开
+.st__doc-note {
+  max-width: 96ch;
+  margin: 14px 0 0;
+  padding: 10px 14px;
+  border-left: 3px solid #ffee34;
+  border-radius: 0 3px 3px 0;
+  background: rgba(255, 238, 52, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+}
 
-  &__input {
-    flex: 1;
-    min-width: 0;
+// ---------------------------------------------------------------------------
+// 移动端
+// ---------------------------------------------------------------------------
+@media (max-width: 768px) {
+  // 手机端不显示左上角的「//设置」与小图,把顶部整条让给页签
+  .st__brand {
+    display: none;
   }
 
-  /* 兑换成功后显示的操作提示(绿色小字);文案来自 redeem.ts 的 MOON_HINT */
-  &__ok {
-    margin: 8px 0 0;
-    color: #5fd07a;
-    font-family: $font-harmony;
-    font-size: 12px;
-    line-height: 1.5;
+  .st__top {
+    min-height: 44px;
   }
 
-  &__err {
-    margin: 8px 0 0;
-    color: #ff6b6b;
-    font-family: $font-harmony;
-    font-size: 12px;
-    line-height: 1.5;
+  .st__data,
+  .st__doc {
+    padding-left: 12px;
+    padding-right: 12px;
   }
 }
 </style>

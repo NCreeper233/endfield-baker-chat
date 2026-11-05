@@ -28,6 +28,7 @@ import { useReplyReveal } from './useReplyReveal'
 import { requestSummary } from '../utils/summary'
 import { BACKEND_HISTORY_LIMIT } from '../utils/backend'
 import type { Ref } from 'vue'
+import type { Conversation } from '../types/chat'
 import {
   type GroupHistoryItem,
   type GroupReplyItem,
@@ -122,6 +123,14 @@ let runToken = 0
 let runningSub: number | null = null
 let runningCard: (GroupCardLike & { groupRunning?: boolean }) | null = null
 
+/**
+ * 本回合锁定的**会话对象**(与 runningSub 同时写入)
+ *
+ * 下标只是位置,删群 / 建群 / 导入之后同一个下标可能已经换成另一段会话。
+ * 落字前比一次对象引用,才能认出"位置还在、但已经不是当初那一段"。
+ */
+let runningConv: Conversation | null = null
+
 /** 「切换对话即暂停」的监听是否已注册(模块级:整个应用只注册一次) */
 let switchGuardBound = false
 
@@ -166,11 +175,17 @@ export function useGroupChat() {
     effectScope(true).run(() => {
       watch(
         () => chatStore.activeSub,
-        (next, prev) => {
-          // 未选中过对话、没换会话、或当前并没有回合在跑 → 无需处理
-          if (prev === null || next === prev || !busy.value) return
-          // 正在跑的不是刚离开的那个会话(例如已被玩家暂停过)→ 不要误伤
-          if (runningSub !== prev) return
+        () => {
+          // 没有回合在跑 → 无需处理(busy 是这里唯一的"是否还在跑"判据:
+          // 回合结束时 finally 不再清 runningSub,由 busy 负责区分)
+          if (runningSub === null || !busy.value) return
+          // 判据不是"下标变了",而是"当前会话不再是我锁定的那一段":
+          //   · 玩家切到别的会话 / 退回列表(activeSub 变 null) → 必须停,
+          //     否则回合会在看不见的地方继续往后端要下一位发言人、继续烧额度
+          //   · 同一个位置换成了另一段会话(删群 / 建群 / 导入) → 同样必须停
+          // 旧判据 `prev === null || next === prev` 会在"退回列表"这条路径上
+          // 直接放行,正是"该停的没停"。
+          if (chatStore.activeSub === runningSub && lockedConvStillHere()) return
           // abort() 会清空 runningSub/runningCard,卡片先取到手
           const card = runningCard
           abort()
@@ -179,6 +194,18 @@ export function useGroupChat() {
       )
     })
   }
+
+  /**
+   * 回合锁定的那段会话是否还在原下标上
+   *
+   * 结构变更(删一段会话 / 新建 / 导入恢复)会让后面的会话整体前移或后移,
+   * 同一个下标于是指向另一段会话 —— 这时落字就是串台。
+   */
+  function lockedConvStillHere(): boolean {
+    if (runningSub === null) return false
+    return chatStore.conversations[runningSub] === runningConv
+  }
+
   bindSwitchGuard()
 
   /** 玩家在群里的显示名(与 groupSelfName 口径一致) */
@@ -257,7 +284,22 @@ export function useGroupChat() {
    * 分段规则复用 utils/aiText.splitAiSegments:顺带处理转义残留,
    * 并把"只有括号的段落"并进相邻段,避免出现只有动作没有台词的气泡。
    */
-  async function showReply(item: GroupReplyItem, sub: number): Promise<void> {
+  async function showReply(
+    item: GroupReplyItem,
+    sub: number,
+    /**
+     * 回合开始时锁定的目标会话对象
+     *
+     * 传对象而不是"只传下标":下标只是位置。回合中途删掉/新建/导入会话之后,
+     * 同一个下标可能已经是另一段会话 —— 只有比对象引用才认得出"位置还在,
+     * 但已经不是当初那一段"。null 表示调用方没有锁定(兼容旧调用,此时只按
+     * 下标写,行为与改动前一致)。
+     */
+    convLock: Conversation | null,
+  ): Promise<void> {
+    // 落字前的第一道归属校验(第二道在 store:ctx 锁定了会话对象)
+    if (convLock && chatStore.conversations[sub] !== convLock) return
+
     // 是否在左括号前也切,与单聊共用同一个设置项「智能消息分条」
     const segments = splitAiSegments(item.text, settingsStore.smartSplit)
     if (segments.length === 0) return
@@ -267,8 +309,12 @@ export function useGroupChat() {
         // 段间停顿,模拟"同一个人接着补一句"
         await delay(TYPING_MIN * 0.6 + Math.random() * (TYPING_MAX - TYPING_MIN) * 0.5)
       }
-      // 关键:锁定回合开始时的会话,玩家中途切换也不会写串
-      const ctx = chatStore.beginAiResponse(item.speaker, avatarOf(item.speaker), sub)
+      // 停顿期间可能切走了会话 / 结构变了:每一段落字前都重新校验一次
+      if (convLock && chatStore.conversations[sub] !== convLock) return
+      // 关键:锁定回合开始时的会话,玩家中途切换也不会写串。
+      // 末位传 convLock:store 会把它记为归属,后续 appendAiChunk 继续校验
+      const ctx = chatStore.beginAiResponse(
+        item.speaker, avatarOf(item.speaker), sub, undefined, convLock ?? undefined)
       if (!ctx) return
       // 这一段是**同一条回复的前端续段**(每段各走一次 begin/finish 才有独立节拍):
       // 显式标记"本轮已开始",使它的加载态保持"头像 + 加载气泡",
@@ -277,6 +323,7 @@ export function useGroupChat() {
       // 先让加载气泡顶着该角色的头像停留一下,再落字
       await delay(TYPING_MIN + Math.random() * (TYPING_MAX - TYPING_MIN))
       if (!chatStore.isCtxActive(ctx)) return
+      if (convLock && chatStore.conversations[sub] !== convLock) return
       // 分拍写入:开启「括号描写居中」时,居中条与台词之间留出间隔(见 useReplyReveal)
       await appendStaged(segments[i], ctx)
       chatStore.finishAiResponse(ctx)
@@ -481,8 +528,13 @@ export function useGroupChat() {
     // 都只往这一个会话写。玩家中途切到单聊或另一个群聊,都不会串台。
     const sub = chatStore.activeSub
     if (sub === null) return
+    // 会话对象的引用也一起锁定:index 只是位置,回合中途删/建/导入之后,
+    // 同一个下标会指向另一段会话(见 showReply 的 convLock)
+    const conv = chatStore.conversations[sub] ?? null
+    if (!conv) return
     // 记住本回合的目标:玩家中途切走时,切换守卫据此停掉"该停的那一个"(见 bindSwitchGuard)
     runningSub = sub
+    runningConv = conv
     runningCard = card as GroupCardLike & { groupRunning?: boolean }
 
     const myToken = ++runToken
@@ -501,12 +553,20 @@ export function useGroupChat() {
 
       for (let round = 0; round < maxRounds; round++) {
         if (signal.aborted) break
+        // 结构变更后锁定的会话可能已不在原下标:再请求下去只会往别人那里写,
+        // 立刻收手(切换守卫覆盖"玩家切走",这里覆盖"结构自己变了")
+        if (chatStore.conversations[sub] !== conv) {
+          devInfo('[group] 回合锁定的会话已不在原位,结束本回合')
+          break
+        }
 
         // 本轮开始时「继续对话」浮窗是否已经挂着 —— 这一轮结束后的判定只看这个快照。
         // 必须用"本轮开始前"的状态:浮窗是在第 20 条消息落下的瞬间由 store 弹出来的,
         // 若拿"此刻"的状态判,这一轮刚弹出就会立刻被判成"没人点"而暂停,
         // 玩家只看到浮窗闪一下。快照保证至少整整聊完一轮才停(够看一眼、点一下)。
-        const nudgeWasOpen = !opts.once && chatStore.groupContinueOpen
+        // 浮窗状态按会话隔离,这里必须显式带上本回合锁定的 sub —— 用"当前会话"
+        // 会让别的群挂着的浮窗把这一轮掐停。
+        const nudgeWasOpen = !opts.once && chatStore.isGroupContinueOpen(sub)
 
         let result = await pullOnce(sessionId, card, newTurn, signal, sub)
         newTurn = false
@@ -523,7 +583,7 @@ export function useGroupChat() {
 
         for (const item of result.replies) {
           if (signal.aborted) break
-          await showReply(item, sub)
+          await showReply(item, sub, conv)
         }
         // 推荐:一段对话只生成一次 —— 回合结束(对话状态变了)就把上一轮的推荐
         // 从面板上收掉,避免显示"已经过期的推荐";玩家下次点开面板时按需生成
@@ -548,9 +608,9 @@ export function useGroupChat() {
         // (这正是"攒够 20 条也毫无反应"的原因)。
         // 「指定发言」那种单点一次(once)不计入 —— 它由玩家逐次点出来,
         // 而且指定模式没有「恢复对话」按钮,一旦被自动暂停,玩家打字将永远等不到回复。
-        if (nudgeWasOpen && chatStore.groupContinueOpen) {
+        if (nudgeWasOpen && chatStore.isGroupContinueOpen(sub)) {
           if (runningCard) runningCard.groupRunning = false
-          chatStore.resetGroupContinue()
+          chatStore.resetGroupContinue(sub)
           devInfo('[group] 「继续对话」未确认,已自动暂停对话')
           break
         }
@@ -574,8 +634,12 @@ export function useGroupChat() {
       if (myToken === runToken) {
         busy.value = false
         controller = null
-        runningSub = null
-        runningCard = null
+        // 刻意**不**在这里清 runningSub / runningConv / runningCard:
+        // 回合自然收束后它们仍是"最后一次锁定的那段会话",而切换守卫用 busy
+        // 判断"是否还在跑"。在这里清空会让守卫的判据(当前会话不再是我锁定的
+        // 那个)失效 —— 正是"该停的没停"的另一半。它们的生命周期由 abort()
+        // (打断)与下一次 runTurn(重新锁定)负责。
+        //
         // 刻意**不**在这里复位 groupRunning:
         // 它是"玩家希望这段群聊处于进行/可恢复状态"的持久化意图,只有玩家
         // 显式点「暂停对话」才置 false。回合自然收束(后端判定 END / 达到轮数
@@ -594,6 +658,7 @@ export function useGroupChat() {
     busy.value = false
     // 目标一并清掉:回合已不再属于任何会话(切换守卫取卡片时用的是清空前的值)
     runningSub = null
+    runningConv = null
     runningCard = null
   }
 

@@ -70,6 +70,9 @@ export function isCustomApiConfigured(config: ApiConfig): boolean {
  * 行为与改动前完全一致。
  */
 export function applyThinkMode(body: Record<string, unknown>, think: boolean): void {
+  // 只在**开启**思考时才发送这个扩展字段：不少 OpenAI 兼容服务端会拒绝未知字段
+  // （400 unrecognized_keys: 'chat_template_kwargs'），关着思考还发它纯属自找失败。
+  if (!think) return
   const prev = body.chat_template_kwargs
   const merged = prev && typeof prev === 'object' ? { ...(prev as object) } : {}
   body.chat_template_kwargs = { ...merged, enable_thinking: !!think }
@@ -114,17 +117,34 @@ export async function customChatCompletion(
   const timer = window.setTimeout(() => controller.abort(), opts.timeoutMs ?? 60_000)
 
   try {
-    const response = await fetch(customChatUrl(config), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    })
+    const url = customChatUrl(config)
+    const send = async (payload: Record<string, unknown>) => {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      })
+      const errText = r.ok ? '' : await r.text().catch(() => r.statusText)
+      return { r, errText }
+    }
+    let sent = await send(body as Record<string, unknown>)
+    // 思考模式是可选扩展：若服务端明确拒绝这个字段，去掉它重试一次，
+    // 而不是让整条对话直接失败（用户看到的是"API 请求失败 (400)"）。
+    if (
+      !sent.r.ok &&
+      sent.r.status === 400 &&
+      /chat_template_kwargs/i.test(sent.errText) &&
+      'chat_template_kwargs' in (body as Record<string, unknown>)
+    ) {
+      delete (body as Record<string, unknown>).chat_template_kwargs
+      sent = await send(body as Record<string, unknown>)
+    }
+    const { r: response, errText } = sent
     if (!response.ok) {
-      const errText = await response.text().catch(() => response.statusText)
       // 保留 HTTP 状态码:调用方(useGroupChat)按 /限速|429/ 判定退避重试
       throw new Error(`API 请求失败 (${response.status}): ${errText}`)
     }

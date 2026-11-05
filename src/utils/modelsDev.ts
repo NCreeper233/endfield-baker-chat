@@ -85,7 +85,7 @@ let lastError = ''
 let failedAt = 0
 
 /** 当前抓取状态 */
-export function libraryStatus(): LibraryStatus {
+function libraryStatus(): LibraryStatus {
   return status
 }
 

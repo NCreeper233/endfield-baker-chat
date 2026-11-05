@@ -215,11 +215,11 @@ function onMore(): void {
       <div class="card__rect" />
       <!-- 删除模式:被勾选的群聊在左缘挂一条悬浮黄条(与单聊子卡同一套标记) -->
       <span v-if="isDeleteSelected" class="card__del-bar" />
-      <img class="card__texture" :src="MATERIALS.cardTexture" alt="" />
-      <img class="card__faint" :src="MATERIALS.cardFaint" alt="" />
+      <img class="card__texture" :src="MATERIALS.cardTexture" alt="" loading="lazy" decoding="async" />
+      <img class="card__faint" :src="MATERIALS.cardFaint" alt="" loading="lazy" decoding="async" />
       <p class="card__name">{{ title }}</p>
-      <img class="card__underline" :src="MATERIALS.underline" alt="" />
-      <img class="card__corner" :src="MATERIALS.cornerDeco" alt="" />
+      <img class="card__underline" :src="MATERIALS.underline" alt="" loading="lazy" decoding="async" />
+      <img class="card__corner" :src="MATERIALS.cornerDeco" alt="" loading="lazy" decoding="async" />
 
       <div class="card__avatar">
         <div class="card__avatar-clip">
@@ -231,12 +231,14 @@ function onMore(): void {
                 :class="{ 'is-original-scale': isOriginalScaleAvatar(m) }"
                 :src="avatarOf(m)"
                 :alt="m"
+                loading="lazy"
+                decoding="async"
               />
             </span>
           </div>
         </div>
         <!-- 消息浮标:只有还没聊过的群才挂(与单人主卡同一张素材、同一条动画) -->
-        <img v-if="!hasChatRecord" class="card__chat-indicator" :src="MATERIALS.chatBadge" alt="" />
+        <img v-if="!hasChatRecord" class="card__chat-indicator" :src="MATERIALS.chatBadge" alt="" loading="lazy" decoding="async" />
       </div>
 
       <!-- 右下角「⋯」:进入群聊设置。位置对齐单人主卡折叠箭头的槽位。

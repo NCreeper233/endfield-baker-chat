@@ -22,6 +22,11 @@
 // 都调 splitAiSegments。此前单聊曾内联一份等价拷贝,改规则要改两处、
 // 极易走散,已合并。
 //
+// 流式(SSE)另有两个入口,规则与 splitAiSegments 同源:
+//   - splitAiSegmentsStreaming:只切"已经定稿"的前缀,未闭合括号内部不切
+//     (理由见该函数注释:半截描写一旦先播出去就会写进历史)
+//   - countDialogueChars:去掉括号描写后还剩几个字的台词,供"无台词"守卫使用
+//
 // 另有 splitBracketParts(渲染层):把**一条**消息拆成"气泡段 + 居中段",
 // 供设置项「括号描写居中」在渲染层使用。它与 splitAiSegments 是两个层面:
 //   - splitAiSegments:一次回复 → 几条消息(落库,进 AI 上下文)
@@ -84,6 +89,15 @@ interface RawSegment {
    * 否则合并会凭空抹掉/添加断行,而这段文本还要写进 AI 上下文。
    */
   br: boolean
+  /**
+   * 本段首字符在**原始文本**里的下标
+   *
+   * 只有流式分段(splitAiSegmentsStreaming)用得上:它要告诉调用方"缓冲里
+   * 哪些字符已经播出去了、可以从头上切掉"。普通分段完全不看这两个字段。
+   */
+  start: number
+  /** 本段尾后一位在原始文本里的下标(含义同 String#slice 的 end) */
+  end: number
 }
 
 /** 统计"字数":表情 token(`[sns_emoji_001]`)记 1 个字,其余按码点计 */
@@ -93,7 +107,13 @@ function charCount(text: string): number {
 
 /** 旧版切段:只按换行 */
 function splitByNewline(text: string): RawSegment[] {
-  return text.split('\n').map((t, i) => ({ text: t, br: i > 0 }))
+  let at = 0
+  return text.split('\n').map((t, i) => {
+    const start = at
+    // +1 是被 split 吃掉的那个换行符
+    at += t.length + 1
+    return { text: t, br: i > 0, start, end: start + t.length }
+  })
 }
 
 /**
@@ -120,6 +140,8 @@ function splitSmart(text: string): RawSegment[] {
   let atSentenceEnd = false
   /** 下一段是否紧跟在换行之后(供合并时还原分隔符) */
   let nextBr = false
+  /** 当前缓冲首字符在原文里的下标(流式分段靠它算"已消费字符数") */
+  let bufStart = 0
 
   /** 成对括号描写的区间(只取 centered 的那些 = 括号本身) */
   const bracketRanges = bracketPartRanges(text)
@@ -128,8 +150,8 @@ function splitSmart(text: string): RawSegment[] {
     bracketRanges.some((r) => r.centered && pos > r.start && pos < r.end)
 
   /** 收段:把当前缓冲推出去(调用方负责复位 atSentenceEnd) */
-  const flush = () => {
-    out.push({ text: buf, br: nextBr })
+  const flush = (end: number) => {
+    out.push({ text: buf, br: nextBr, start: bufStart, end })
     buf = ''
     nextBr = false
   }
@@ -147,18 +169,21 @@ function splitSmart(text: string): RawSegment[] {
         atSentenceEnd = false
         continue
       }
-      flush()
+      flush(i)
       nextBr = true
       atSentenceEnd = false
+      // 换行本身不属于任何段:下一段的起点是它后面那个字符
+      bufStart = i + 1
       continue
     }
 
     if (OPEN_BRACKET.test(ch)) {
       // 括号内部的嵌套左括号不切;只有括号**外**的左括号才在它之前断句
       if (!inBracket(i)) {
-        flush()
+        flush(i)
         buf = ch
         atSentenceEnd = false
+        bufStart = i
         continue
       }
       buf += ch
@@ -174,15 +199,16 @@ function splitSmart(text: string): RawSegment[] {
     // 文本被切成一字一段 —— 表现是"分条看起来失效了"(单字段全被短段合并
     // 又拼回去,合并边界与设计不符)。
     if (atSentenceEnd && !TRAILING_CLOSER.test(ch) && !SENTENCE_END.test(ch) && !inBracket(i)) {
-      flush()
+      flush(i)
       atSentenceEnd = false
+      bufStart = i
     }
 
     buf += ch
     if (SENTENCE_END.test(ch)) atSentenceEnd = true
   }
 
-  flush()
+  flush(text.length)
   return out
 }
 
@@ -219,6 +245,9 @@ function mergeShortSegments(input: RawSegment[]): RawSegment[] {
   const append = (a: RawSegment, b: RawSegment): RawSegment => ({
     text: a.text + (b.br ? '\n' : '') + b.text,
     br: a.br,
+    // 合并只改变"怎么分条",不改变文本来源:区间取首段之头与末段之尾
+    start: a.start,
+    end: b.end,
   })
   const joinAll = (segs: RawSegment[]): RawSegment =>
     segs.reduce((acc, s) => append(acc, s))
@@ -253,7 +282,7 @@ export function splitAiSegments(raw: string, smartSplit = true): string[] {
   const normalized = normalizeAiText(raw)
 
   const rawSegments = (smartSplit ? splitSmart(normalized) : splitByNewline(normalized))
-    .map((s) => ({ text: s.text.trim(), br: s.br }))
+    .map((s) => ({ ...s, text: s.text.trim() }))
     .filter((s) => s.text.length > 0)
 
   const segments: string[] = []
@@ -359,6 +388,162 @@ export function bracketPartRanges(text: string): BracketPartRange[] {
   }
   if (cursor < text.length) ranges.push({ start: cursor, end: text.length, centered: false })
   return ranges
+}
+
+// =============================================================================
+// 流式分段(SSE)与"无台词"判定
+// -----------------------------------------------------------------------------
+// 两者都建立在上面那套分段规则之上,只是用途不同:
+//   - splitAiSegmentsStreaming:边收边播时"现在哪些段已经定稿"
+//   - countDialogueChars:一条回复去掉括号描写后还剩几个字的台词
+// =============================================================================
+
+/** 台词的最小有效字数:低于它视为"只有动作/神态,没有台词" */
+/**
+ * "有台词"的最低字符数。
+ *
+ * 【为什么是 1 而不是 3】这个应用的角色卡明确写着"能用一个字绝不延伸"，
+ * "嗯。""好。"这类两字回复是**正常台词**，不是描述。阈值取 3 会把它们判成
+ * "无台词"并丢弃回复 —— 用户看到的就是"回复时报错、内容没了"。
+ * 取 1 后只拦"整条全是括号描写、一个字台词都没有"这一种情况。
+ */
+export const MIN_DIALOGUE_CHARS = 1
+
+/**
+ * 统计"有效台词"字数:去掉括号描写、空白与表情 token 后剩下的码点数
+ *
+ * 用途是"无台词"守卫(见 useAiChat):只有括号描写的回复一旦写进
+ * contextHistory,下一轮模型会把那条 assistant 历史当成范例照着学,于是
+ * 越聊越只有动作没有台词——必须在落字前拦一次。
+ *
+ * 判定刻意按**未闭合也算括号**处理:模型漏写右括号时 `（她笑了` 之后的文字
+ * 都是描写,不该被当成台词而放过整条回复。表情 token 记 0 字:它只是点缀,
+ * `(微笑)[sns_emoji_001]` 依然是"没有台词"。
+ */
+export function countDialogueChars(text: string): number {
+  const raw = (text ?? '').replace(EMOJI_TOKEN_RE, '')
+  let depth = 0
+  let count = 0
+  // for...of 按码点遍历:emoji / 生僻字不会被算成两个字
+  for (const ch of raw) {
+    if (OPEN_PAREN.has(ch)) {
+      depth++
+      continue
+    }
+    if (CLOSE_PAREN.has(ch)) {
+      if (depth > 0) depth--
+      continue
+    }
+    if (depth > 0) continue
+    if (/\s/.test(ch)) continue
+    count++
+  }
+  return count
+}
+
+/**
+ * 找出"最后一个未闭合左括号"的位置(没有则返回文本长度)
+ *
+ * 流式切分只敢处理这一段之前的内容:括号里的字随时可能还没到,
+ * 在括号中间切出来的半句描写会被当成一条独立消息播出去并写进历史,
+ * 等右括号到达后权威分段变少,`playedCount` 就对不上了(后半段永远不显示)。
+ */
+function stablePrefixLength(text: string): number {
+  let depth = 0
+  let lastOpen = -1
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (OPEN_PAREN.has(ch)) {
+      if (depth === 0) lastOpen = i
+      depth++
+    } else if (CLOSE_PAREN.has(ch) && depth > 0) {
+      depth--
+      if (depth === 0) lastOpen = -1
+    }
+  }
+  return depth > 0 && lastOpen >= 0 ? lastOpen : text.length
+}
+
+/** 流式分段的结果 */
+export interface StreamingSplit {
+  /**
+   * 可以**立刻播出**的分段(已定稿:后续增量不会改写它们的文本或归属)
+   *
+   * 调用方播完这些段后,应把缓冲头部按 consumed 个字符切掉。
+   */
+  segments: string[]
+  /** 已消费的字符数(相对传入的原始缓冲,不是归一化后的文本) */
+  consumed: number
+}
+
+/**
+ * 流式分段:从"还在增长的缓冲"里切出**已经定稿**的前几段
+ *
+ * 与 splitAiSegments 的区别(也是它存在的理由):
+ *   1. 未闭合括号内部一律不切 —— 半截描写绝不能先播出去,否则它会写进历史;
+ *   2. 末尾两段不播 —— 最后一段还可能被后续增量追加/被短尾段并走,
+ *      倒数第二段在"最后一段是纯括号描写"时会被它并回去(见 splitAiSegments
+ *      结尾那段合并),播了就会与权威分段对不上,`playedCount` 多计 → 丢字;
+ *   3. 返回 consumed,调用方据此切缓冲,不再靠 `indexOf(下一段)` 猜位置
+ *      (文本重复时 indexOf 会切错地方)。
+ *
+ * 收尾时调用方仍应以 done 帧的权威全文重新分段、只补播剩下的部分 —— 本函数
+ * 只负责"提前播一部分",不改变最终分条结果。
+ *
+ * @param raw        当前累计的**原始**缓冲(尚未归一化)
+ * @param smartSplit 是否启用智能分条(与 splitAiSegments 同一个设置项)
+ */
+export function splitAiSegmentsStreaming(raw: string, smartSplit = true): StreamingSplit {
+  const empty: StreamingSplit = { segments: [], consumed: 0 }
+  if (!raw) return empty
+
+  const normalized = normalizeAiText(raw)
+  // 归一化会**改变长度**(\\n / \r\n 等转义被还原)。此时"已消费字符数"无法
+  // 映射回原始缓冲,与其算错切点,不如一拍都不播:等 done 帧按权威全文一次播完。
+  // 这类转义残留极少见,退化的只是节奏,不会丢内容。
+  if (normalized.length !== raw.length) return empty
+
+  const prefix = normalized.slice(0, stablePrefixLength(normalized))
+  if (!prefix) return empty
+
+  const rawSegments = (smartSplit ? splitSmart(prefix) : splitByNewline(prefix))
+    .map((s) => ({ ...s, text: s.text.trim() }))
+    .filter((s) => s.text.length > 0)
+  const groups = mergeShortSegments(rawSegments)
+
+  // 最后一组永远不消费(会被后续增量改写);若它是纯括号段,倒数第二组也留着
+  // 不消费 —— 那条纯括号段没有后继台词时会被并回前一组,提前播出去就丢字。
+  let stable = groups.length - 1
+  if (stable > 0 && PURE_BRACKET.test(groups[groups.length - 1].text)) stable--
+  // 稳定区末尾也不能是纯括号段:它的归属取决于下一组,而下一组还没定稿。
+  while (stable > 0 && PURE_BRACKET.test(groups[stable - 1].text)) stable--
+  if (stable === 0) return empty
+
+  // 与 splitAiSegments 相同的"纯括号段并进下一段"转换;上面已保证稳定区
+  // 末尾不是纯括号段,因此这段转换的结果是确定的(不会再被后续增量改写)。
+  const segments: string[] = []
+  const pending: string[] = []
+  for (let i = 0; i < stable; i++) {
+    const seg = groups[i].text
+    if (PURE_BRACKET.test(seg)) {
+      pending.push(seg)
+      continue
+    }
+    segments.push(pending.splice(0, pending.length).join('') + seg)
+  }
+  if (pending.length > 0) {
+    // 兜底:理论上到不了这里(循环已把末尾纯括号段退掉)。真到了就把它们
+    // 并进上一段,绝不单独播一条只有括号的气泡。
+    if (segments.length === 0) return empty
+    segments[segments.length - 1] += `\n${pending.join('')}`
+  }
+
+  // stable 是"已定稿分组的个数"，极端情况下（首帧就只剩未闭合括号）会是 0，
+  // 此时 groups[-1] 是 undefined —— 直接取 .end 会抛
+  // "Cannot read properties of undefined (reading 'end')"。有上限保护再取。
+  const lastGroup = groups[stable - 1]
+  if (!lastGroup) return empty
+  return { segments, consumed: lastGroup.end }
 }
 
 /**

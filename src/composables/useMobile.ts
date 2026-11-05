@@ -34,8 +34,18 @@ const visualOffsetTop = ref(0)
 /** 软键盘顶起的高度(px);0 表示键盘未弹出 */
 const keyboardInset = ref(0)
 
-/** 当前是否正在编辑输入(文本框 / 多行文本 / contenteditable) */
-
+/**
+ * 当前焦点是否在可编辑元素上(文本框 / 多行文本 / contenteditable)
+ *
+ * 键盘判定不能只看高度差:双指缩放、地址栏收起、横竖屏切换都会让
+ * visualViewport.height 变矮。只有"确实在输入"时,这个高度差才可信。
+ */
+export function hasEditableFocus(): boolean {
+  const el = document.activeElement as HTMLElement | null
+  if (!el) return false
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return true
+  return el.isContentEditable === true
+}
 
 /** 读取可视视口尺寸与偏移,判定软键盘是否弹出 */
 function updateVisual() {
@@ -52,7 +62,7 @@ function updateVisual() {
   // 只有"确实在编辑 + 可视视口明显变矮"才算键盘弹出:
   // 双指缩放同样会让 visualViewport.height 变小,不能单凭它判断。
   const inset = layoutH - visH
-  keyboardInset.value = inset > 80 ? inset : 0
+  keyboardInset.value = hasEditableFocus() && inset > 80 ? inset : 0
   // 只有键盘弹出时才补偿浏览器的可视视口平移;平时保持 0,不干扰双指缩放浏览
   visualOffsetTop.value = keyboardInset.value > 0 ? v.offsetTop : 0
 }
@@ -143,70 +153,37 @@ function stopPolling() {
   }
 }
 
-/** 失焦刷新延迟(ms):等待软键盘收起动画结束(约 250-300ms)后再读视口尺寸 */
+/** 聚焦/失焦刷新延迟(ms):等待软键盘弹出/收起动画结束(约 250-300ms)后再读视口尺寸 */
 const FOCUSOUT_DELAY = 350
-/** 失焦刷新定时器句柄 */
+/** 聚焦/失焦刷新定时器句柄 */
 let focusInTimer: number | null = null
 let focusOutTimer: number | null = null
 
 /**
- * 失焦兜底:输入框失焦(软键盘收起)后,等待键盘动画结束再强制刷新一次视口尺寸,
- * 兜住"键盘收起不触发 resize"的浏览器;同时复位可能被键盘滚动过的文档,
- * 避免 iOS 上 fixed 元素残留错位。定时轮询(startPolling)继续兜底极端场景。
+ * 聚焦/失焦兜底:等键盘动画结束再重读一次视口尺寸
+ *
+ * 只读不写。以前这里会 `window.scrollTo(0,0)` + `visualViewport.scrollTo(0,0)`,
+ * 把浏览器"为了让输入框露出来"做的那次滚动强行抵消 —— 结果输入框重新被
+ * 键盘挡住;iOS 还会因为判断输入框不可见而立刻收起键盘(点了就回弹)。
+ * 位置交给浏览器,布局交给 .m-chat 的 top/height 跟随可视视口。
  */
 function resetViewport() {
   update()
   updateVisual()
-  const vv = window.visualViewport
-  if (vv && (vv.offsetTop > 2 || vv.offsetLeft > 2)) (vv as unknown as { scrollTo: (x: number, y: number) => void }).scrollTo(0, 0)
-  window.scrollTo(0, 0)
 }
 
-function pinBody() {
-  if (document.body.dataset.pinned === '1') return
-  const y = window.scrollY
-  document.body.dataset.pinned = '1'
-  document.body.dataset.pinnedScrollY = String(y)
-  document.body.style.position = 'fixed'
-  document.body.style.top = -y + 'px'
-  document.body.style.left = '0'
-  document.body.style.right = '0'
-  document.body.style.width = '100%'
-}
-function unpinBody() {
-  if (document.body.dataset.pinned !== '1') return
-  const y = document.body.dataset.pinnedScrollY
-  delete document.body.dataset.pinned
-  delete document.body.dataset.pinnedScrollY
-  document.body.style.position = ''
-  document.body.style.top = ''
-  document.body.style.left = ''
-  document.body.style.right = ''
-  document.body.style.width = ''
-  window.scrollTo(0, parseInt(String(y), 10) || 0)
-}
-
-// Instantly counter the iOS visual-viewport shift when the soft keyboard opens:
-// m-chat is position:fixed (anchored to the layout viewport); when iOS shifts
-// the visual viewport down (offsetTop>0) to reveal the focused input, the fixed
-// container is pushed out of view and the input hides behind the keyboard.
-// Detect that shift on visualViewport.scroll and pull the viewport back (100ms throttle).
-let vvScrollResetAt = 0
+/**
+ * 可视视口滚动:只同步几何,不把视口拉回 (0,0)
+ *
+ * 软键盘弹出时浏览器会平移可视视口以露出输入框。以前这里每 100ms 强行
+ * scrollTo(0,0),等于和系统反复对抗 —— 表现为"整体顶到最上面、停不住"。
+ */
 function onVvScroll() {
   updateVisual()
-  const vv = window.visualViewport
-  if (!vv) return
-  const now = Date.now()
-  if ((vv.offsetTop > 2 || vv.offsetLeft > 2) && now - vvScrollResetAt > 100) {
-    vvScrollResetAt = now
-    // only reset while the keyboard is up (vv clearly shorter than layout)
-    if (vv.height < window.innerHeight - 80) (vv as unknown as { scrollTo: (x: number, y: number) => void }).scrollTo(0, 0)
-  }
 }
 
-// focus fallback: re-align the viewport once the keyboard-open animation settles
+// 聚焦兜底:等键盘弹出动画结束后重读视口尺寸(不再改 body 定位)
 function onFocusIn() {
-  pinBody()
   if (focusInTimer !== null) clearTimeout(focusInTimer)
   focusInTimer = window.setTimeout(() => {
     focusInTimer = null
@@ -214,9 +191,8 @@ function onFocusIn() {
   }, FOCUSOUT_DELAY)
 }
 
-// blur fallback: re-align after the keyboard-close animation settles
+// 失焦兜底:等键盘收起动画结束后重读视口尺寸
 function onFocusOut() {
-  unpinBody()
   if (focusOutTimer !== null) clearTimeout(focusOutTimer)
   focusOutTimer = window.setTimeout(() => {
     focusOutTimer = null

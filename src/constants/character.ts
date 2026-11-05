@@ -64,7 +64,9 @@ interface Character {
  * import.meta.glob 会返回 { './梨诺.webp': url } 形式的对象,
  * Vite 构建时会处理为正确的资源 URL(哈希命名等)。
  *
- * eager:立即加载而非懒加载,character.ts 初始化时所有头像 URL 即可用
+ * eager: 把 40 张头像的 **URL 字符串**内联进主包（不是下载图片！）。
+ *   图片仍然是 <img> 渲染时才发请求，所以首屏会一次性发起 40 个图片请求（共 ≈1.13MB）。
+ *   见 docs/AUDIT-2026-10-04.md A6：应归一分辨率 + 加 loading="lazy"。
  * as:'url':直接返回 URL 字符串,而非模块对象
  */
 const avatarModules = import.meta.glob('../assets/avatars/*.webp', {
@@ -116,6 +118,10 @@ function resolveLocalAvatar(name: string): string | undefined {
 /** 内置干员数据列表(头像 URL 由 import.meta.glob 注入) */
 export const CHARACTERS: Character[] = [
   // 新添加的角色一律排在**最上方**(越新越靠前)—— 见下面的「管理员」。
+  // 2026-11-05:明河最新,排第一;祀次之(祀此前曾被误放在数组末尾,导致新用户 /
+  // 清空数据后它在列表最底部,已修正)。老用户已有的卡不受此处顺序影响。
+  { name: '明河',       avatar: resolveLocalAvatar('明河')!,       attribute: 'electric', gender: 'male' },
+  { name: '祀',         avatar: resolveLocalAvatar('祀')!,         attribute: 'cryo',     gender: 'female' },
   { name: '噗切娜',     avatar: resolveLocalAvatar('噗切娜')!,     attribute: 'physical', gender: 'female' },
   // 「管理员」:我方身份那一位的同名角色卡,按普通角色处理,只有两点特殊 ——
   //   1. 两张形象(男 / 女),主卡头像与聊天区对方头像都可点击切换(avatarAlt);
@@ -155,7 +161,6 @@ export const CHARACTERS: Character[] = [
   { name: '安塔尔',     avatar: resolveLocalAvatar('安塔尔')!,     attribute: 'electric', gender: 'male' },
   { name: '聂菲斯',     avatar: resolveLocalAvatar('聂菲斯')!,     attribute: 'aetherside', gender: 'female' },
   { name: '阿达希尔',   avatar: resolveLocalAvatar('阿达希尔')!,   attribute: 'aetherside', gender: 'male' },
-  { name: '祀',         avatar: resolveLocalAvatar('祀')!,         attribute: 'heat',     gender: 'female' },
 ]
 
 // DEV 模式下校验所有头像已正确加载。resolveLocalAvatar 返回 undefined

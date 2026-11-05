@@ -3,7 +3,7 @@
 // -----------------------------------------------------------------------------
 // 对 html-to-image 的薄封装:
 //   - captureRegion():toSvg → Image → canvas 裁剪子区域
-//   - downloadDataUrl():下载 data URL
+//   - downloadDataUrl():保存 data URL(原生端走系统保存通道)
 //
 // 设计理由:
 //   - 本项目 .chat-area 为 0×0 origin-container,子元素按 1920×1080 设计坐标
@@ -18,6 +18,8 @@
 
 import { toSvg } from 'html-to-image'
 import { ensureBubbleFont } from './measure'
+import { isNative } from './platform'
+import { downloadBlob } from './zipExport'
 
 /** 捕获子区域(设计坐标,与画布 zoom 无关) */
 export interface CaptureRegion {
@@ -130,8 +132,42 @@ export async function captureRegion(
   return canvas.toDataURL()
 }
 
-/** 下载 data URL 为文件(<a> 标签触发下载,与 zipExport.downloadProject 风格一致) */
-export function downloadDataUrl(dataUrl: string, filename: string): void {
+/** dataURL → Blob（只用于原生保存；按真实字节解码，顺带校验非空） */
+function dataUrlToBlob(dataUrl: string): Blob {
+  const comma = dataUrl.indexOf(',')
+  if (!dataUrl.startsWith('data:') || comma < 0) throw new Error('截图数据无效，无法保存')
+  const meta = dataUrl.slice(5, comma)
+  const body = dataUrl.slice(comma + 1)
+  const mime = meta.split(';')[0] || 'image/png'
+  if (!meta.includes(';base64')) {
+    return new Blob([decodeURIComponent(body)], { type: mime })
+  }
+  const binary = atob(body)
+  // 空内容守卫看**解码后的真实字节**，不看字符串长度（B10）：
+  // 字符串非空不代表图有效，落一个 0 字节文件比直接报错更糟。
+  if (binary.length === 0) throw new Error('截图内容为空（0 字节），已中止保存')
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return new Blob([bytes], { type: mime })
+}
+
+/**
+ * 保存 data URL 为文件
+ *
+ * 原生端（安卓/iOS）**不能**走 <a download>：Android WebView 里 download 属性
+ * 没有系统下载器接管，点了什么都不会发生（审计 B9）。原生端改为与 ZIP/JSON
+ * 完全相同的保存通道（downloadBlob → saveExportFileSmart）：
+ *   · APK：SAF 保存框 / 大文件分块写入；
+ *   · 浏览器（含 EXE 桌面端）：保持原来的 <a download>。
+ *
+ * 注意：这个函数现在是异步的（原生保存需要等用户选位置）。
+ */
+export async function downloadDataUrl(dataUrl: string, filename: string): Promise<void> {
+  if (isNative()) {
+    await downloadBlob(dataUrlToBlob(dataUrl), filename)
+    return
+  }
+
   const a = document.createElement('a')
   a.href = dataUrl
   a.download = filename

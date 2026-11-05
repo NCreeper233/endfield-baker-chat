@@ -72,7 +72,7 @@ export const GROUP_CONTINUE_EVERY = 20
  * 现已**不再限制人数**(可按需求勾选全部角色),保留此常量仅为兼容引用;
  * createGroupCard 不再据此截断。
  */
-export const GROUP_MAX_MEMBERS = Number.MAX_SAFE_INTEGER
+const GROUP_MAX_MEMBERS = Number.MAX_SAFE_INTEGER
 
 /**
  * 群聊成员数量的下限
@@ -293,6 +293,17 @@ export interface AiResponseCtx {
   token: number
   /** 目标会话下标(发起时锁定,不受之后切换会话影响) */
   sub: number
+  /**
+   * 发起时锁定的**会话对象本身**(归属校验)
+   *
+   * `sub` 只是扁平数组里的位置,不是身份:删一段 / 建一段 / 导入恢复都会让
+   * 同一个下标指向另一段会话。只比 token 的话,下标位移后旧 ctx 依然"有效",
+   * 后续写入会把内容落进**同下标下另一个角色**的会话,头像、语气、内容错位
+   * (玩家看到的"莫名回复")。锁定对象引用后,写入前一比就能发现归属已变。
+   *
+   * 未锁定的 ctx(理论不存在,留作旧调用兼容)不做归属校验。
+   */
+  lockedConversation?: Conversation
   /** 本轮 AI 说话人(发起时捕获,不会被其他请求覆盖) */
   speaker: { name: string; avatar: string }
   /** 本段正在追加的目标消息 id */
@@ -493,6 +504,17 @@ export const useChatStore = defineStore('chat', () => {
     activeSub.value === null ? null : conversationMeta.value[activeSub.value],
   )
 
+  /**
+   * 取某段会话的派生展示信息(title / avatar)
+   *
+   * 与 currentConversationMeta 同源,但按显式下标取:AI 回合在发起时锁定目标
+   * 会话后,头像/角色名必须取**那段会话自己的**,不能取"此刻选中的那段" ——
+   * 否则等待回复期间玩家切走,回复虽写回原会话,头像却换成了别人的。
+   */
+  function conversationMetaAt(sub: number): { title: string; avatar: string } | null {
+    return conversationMeta.value[sub] ?? null
+  }
+
   /** 当前对话的对方姓名(显示在聊天条;未选中时为空串) */
   const counterpartName = computed<string>(() => currentConversationMeta.value?.title ?? '')
 
@@ -578,6 +600,9 @@ export const useChatStore = defineStore('chat', () => {
     // 群聊主卡不支持"再建一个子会话":群聊在列表里就是一整张卡,
     // 建出来的空子会话会以空占位形式挤进群聊列表(无名字、无内容)。
     if (isGroupCardAt(idx)) return false
+    // 会往扁平数组里插一段 → 后面所有会话的下标整体 +1:在途 AI 响应的 ctx
+    // 以旧下标为 key,必须先作废,否则它的续写会落到"下一段"会话里
+    invalidateAllAiCtx()
     // 新子对话继承父卡角色名(与第一张子对话一致),
     // 确保提示词 / 头像 / 预览文本 / 成员推导均正确。
     // 若父卡首对话无角色名(异常情况),回退"未命名会话"。
@@ -613,6 +638,9 @@ export const useChatStore = defineStore('chat', () => {
       if (m && list.indexOf(m) === -1) list.push(m)
     }
     if (list.length < GROUP_MIN_MEMBERS) return null
+
+    // 建群会往扁平数组尾部追加一段,并切到群聊列表 → 在途 AI 响应不能再往下写
+    invalidateAllAiCtx()
 
     const name = (title ?? '').trim() || groupTitle(list, groupSelfName(myRole))
     const card: Card = {
@@ -758,8 +786,11 @@ export const useChatStore = defineStore('chat', () => {
    * 头像解析(resolveMessageAvatar)按此署名决定显示谁的头像,因此这里必须
    * 与消息写入时的 speakerName 保持一致。
    */
-  function currentSelfIdentity(): { name: string; avatar: string } {
-    const role = activeCard.value?.myRole
+  function currentSelfIdentity(targetSub?: number): { name: string; avatar: string } {
+    // 缺省走 activeCard(与改动前完全一致);显式传 sub 时按该会话所属卡片取,
+    // 这样"锁定会话后才发送"不会用到另一张卡的身份(群聊扮演某角色时尤其明显)
+    const cardIdx = targetSub === undefined ? activeCardIndex.value : cardIndexOfSub(targetSub)
+    const role = cardIdx === null ? undefined : cards.value[cardIdx]?.myRole
     if (role && role !== 'admin' && role !== 'observer') {
       const c = findCharacter(role)
       return { name: role, avatar: c?.avatar || myAvatar.value }
@@ -1205,6 +1236,11 @@ export const useChatStore = defineStore('chat', () => {
     const drop = new Set(subs.filter((s) => s >= 0 && s < conversations.value.length))
     if (drop.size === 0) return 0
 
+    // 删除会让后面的会话整体前移(下标位移):在途 AI 响应的 ctx 以旧下标为 key,
+    // 必须整体作废,否则迟到的回复会落进同下标下**另一个角色**的会话。
+    // 群聊删卡走这里(没有单独的 deleteGroupCard),因此也是群聊回合的止血点。
+    invalidateAllAiCtx()
+
     const prevSub = activeSub.value
 
     // 1) 先算出最终保留哪些全局子卡(内置角色的"最后一段"在这里被改成"清空")
@@ -1347,10 +1383,46 @@ export const useChatStore = defineStore('chat', () => {
    *
    * 同一会话若已发起更新的请求,旧上下文的 token 不再匹配 → 返回 false,
    * 其迟到内容会被各处写入方法直接丢弃(防串台的关键)。
+   *
+   * 除 token 外还要比**归属**:ctx 锁定的是哪一段会话对象,`conversations` 里
+   * 那个位置现在还必须是它。删过/新建过会话之后,同一个下标可能已经换成别人
+   * 的对话 —— 只看 token 会把回复写进另一个角色(串台的另一半)。
    */
   function isCtxActive(ctx?: AiResponseCtx | null): boolean {
     if (!ctx) return false
-    return aiCtxBySub.get(ctx.sub)?.token === ctx.token
+    if (aiCtxBySub.get(ctx.sub)?.token !== ctx.token) return false
+    if (ctx.lockedConversation && conversations.value[ctx.sub] !== ctx.lockedConversation) {
+      return false
+    }
+    return true
+  }
+
+  /**
+   * 作废**所有**在途 AI 响应上下文
+   *
+   * 什么时候必须调用:任何会改变"扁平数组结构"的操作(删对话 / 新建子对话 /
+   * 建群 / 删群 / 导入恢复)。这些操作会让下标的含义整体位移,而 aiCtxBySub
+   * 正是以下标为 key —— 不清掉的话,旧 ctx 的 token 仍然匹配,迟到的 chunk
+   * 会写进同下标下**另一个角色**的会话(头像对、语气和内容全错),finish 时
+   * 还会把这段写进别人的 contextHistory。
+   *
+   * 因此这里是"结构变更"的统一止血点:先 abort 所有在途请求(别让它们继续
+   * 花钱),再清空全部响应态。彻底方案是给 Conversation 一个稳定 id 取代下标,
+   * 改动面大,单独立项。
+   */
+  function invalidateAllAiCtx(): void {
+    aiCtxBySub.forEach((ctx) => {
+      try {
+        ctx.controller.abort()
+      } catch {
+        // 忽略:abort 抛错不该影响结构变更本身
+      }
+    })
+    aiCtxBySub.clear()
+    aiLoadingSubs.value = []
+    aiRespondingSubs.value = []
+    aiEmittedSubs.value = []
+    aiSpeakers.value = {}
   }
 
   /** 清理某会话的全部响应态(loading / responding / 说话人 / 本轮已落内容标记) */
@@ -1434,9 +1506,9 @@ export const useChatStore = defineStore('chat', () => {
    * 模式的对话 —— 与左侧列表对不上,还容易把消息发进"看不见的那张卡"里。
    *
    * 只在模式变化时清:同模式重复点击(理论上不会发生)不该误伤当前会话。
-   * 注意 createGroupCard / deleteGroupCard 是直接写 chatMode.value 的,
-   * 它们需要连同选中态一起安排(建群后选中新群、删群后切到剩余群),
-   * 因此不走这里 —— 那里的选中态不会被本函数清掉。
+   * 注意 createGroupCard 与删除群聊的 deleteConversationsAt 都是直接写
+   * chatMode.value 的,它们需要连同选中态一起安排(建群后选中新群、
+   * 删群后切到剩余群),因此不走这里 —— 那里的选中态不会被本函数清掉。
    */
   function setChatMode(mode: 'single' | 'group'): void {
     if (chatMode.value === mode) return
@@ -1547,15 +1619,22 @@ export const useChatStore = defineStore('chat', () => {
   // ---- 群聊「继续对话」浮窗(每 GROUP_CONTINUE_EVERY 条角色消息一次) ----------
 
   /**
-   * 上一次确认时,该会话里角色消息的总条数(计数基线)
+   * 每个会话的「继续对话」浮窗状态(键 = 会话下标)
+   *
+   * 为什么必须按会话隔离:它原先是一份全局单例,却在判定时读**当前会话**的
+   * 消息条数。A 群攒到 20 条弹出浮窗后切到 B 群,B 群的对话循环会把"浮窗还
+   * 挂着"当成"玩家没确认",于是把 B 群正在跑的回合掐停 —— 玩家看到的是
+   * "聊着聊着莫名其妙自己暂停了",而这句话本来问的是 A 群。
+   */
+  const groupContinueOpenBySub = ref<Record<number, boolean>>({})
+
+  /**
+   * 每个会话"上一次确认时的角色消息条数"(计数基线,键 = 会话下标)
    *
    * 不自己累加计数,而是"当前条数 − 基线"现算:消息可以被删除/清空,
    * 累加出来的数字迟早与聊天区里真实存在的消息对不上。
    */
-  const groupAckBase = ref(0)
-
-  /** 「继续对话」浮窗是否挂着 */
-  const groupContinueOpen = ref(false)
+  const groupAckBases = ref<Record<number, number>>({})
 
   /** 某会话里角色们(非我方)说过的消息条数 */
   function countGroupMessages(sub: number): number {
@@ -1563,17 +1642,59 @@ export const useChatStore = defineStore('chat', () => {
     return msgs.filter((m) => m.side === 'other' && !m.isError && !m.topic).length
   }
 
-  /** 自上次确认以来,角色们一共又说了多少条(浮窗文案里的数字) */
+  /**
+   * 保证某会话有计数基线
+   *
+   * 首次见到一段会话(切进来 / 重开页面)时以"此刻的条数"为起点:否则一段
+   * 已经有 40 条消息的老群聊一进来就被判成"该确认了";而多段会话共用一条
+   * 基线时,数字必然串到别的群上。
+   */
+  function ensureGroupAckBase(sub: number): number {
+    const bases = groupAckBases.value
+    const known = bases[sub]
+    if (known !== undefined) return known
+    const base = countGroupMessages(sub)
+    groupAckBases.value = { ...bases, [sub]: base }
+    return base
+  }
+
+  /** 某会话的浮窗是否挂着(缺省 = 当前会话) */
+  function isGroupContinueOpen(sub?: number): boolean {
+    const key = sub ?? activeSub.value
+    return key === null ? false : groupContinueOpenBySub.value[key] === true
+  }
+
+  /** 当前会话的浮窗是否挂着(供组件:GroupContinueNudge 的 visible) */
+  const groupContinueOpen = computed(() => isGroupContinueOpen())
+
+  /** 自上次确认以来,当前会话角色们一共又说了多少条(浮窗文案里的数字) */
   const groupMessagesSinceAck = computed(() => {
     const sub = activeSub.value
     if (sub === null) return 0
-    return Math.max(0, countGroupMessages(sub) - groupAckBase.value)
+    const base = groupAckBases.value[sub]
+    // 基线未知(该会话还没被观察过)时按"0 条新增"算,不虚报历史条数
+    return base === undefined ? 0 : Math.max(0, countGroupMessages(sub) - base)
   })
 
-  /** 关掉浮窗,并把计数基线挪到"此刻"(玩家点了继续 / 显式开始暂停 / 切换会话) */
-  function resetGroupContinue(): void {
-    groupContinueOpen.value = false
-    groupAckBase.value = activeSub.value === null ? 0 : countGroupMessages(activeSub.value)
+  /**
+   * 关掉某会话的浮窗,并把计数基线挪到"此刻"
+   *
+   * @param targetSub 目标会话下标(缺省 = 当前会话;null 表示清空全部,
+   *                  与原实现"没有选中会话时整体复位"的语义一致)
+   */
+  function resetGroupContinue(targetSub?: number): void {
+    const sub = targetSub === undefined ? activeSub.value : targetSub
+    if (sub === null) {
+      groupContinueOpenBySub.value = {}
+      groupAckBases.value = {}
+      return
+    }
+    if (groupContinueOpenBySub.value[sub]) {
+      const open = { ...groupContinueOpenBySub.value }
+      delete open[sub]
+      groupContinueOpenBySub.value = open
+    }
+    groupAckBases.value = { ...groupAckBases.value, [sub]: countGroupMessages(sub) }
   }
 
   /**
@@ -1595,11 +1716,21 @@ export const useChatStore = defineStore('chat', () => {
    * `if (result.done) break` 之后 —— 轮流模式(以及任何后端一次就收束的轮次)
    * done 恒为 true,那一句永远执行不到,于是"攒够 20 条也毫无反应"。
    * 现在改成盯着条数:第 20 条一落进聊天区就浮窗,与发言模式、与循环结构都无关。
+   *
+   * 判据只看**当前这一段会话**的条数,并且记住"上一次观察的是哪一段":
+   * 切换会话时计算值会突变,那不是"又说了几条",不能据此弹窗。
    */
-  watch(activeGroupCharCount, (next, prev) => {
+  let nudgeProbe: { sub: number | null; count: number } = { sub: null, count: 0 }
+  watch(activeGroupCharCount, (next) => {
+    const sub = activeSub.value
+    if (sub === null) return
+    const prev = nudgeProbe.sub === sub ? nudgeProbe.count : next
+    nudgeProbe = { sub, count: next }
     if (next <= prev) return
-    if (groupContinueOpen.value) return
-    if (next - groupAckBase.value >= GROUP_CONTINUE_EVERY) groupContinueOpen.value = true
+    if (isGroupContinueOpen(sub)) return
+    if (next - ensureGroupAckBase(sub) >= GROUP_CONTINUE_EVERY) {
+      groupContinueOpenBySub.value = { ...groupContinueOpenBySub.value, [sub]: true }
+    }
   })
 
   /** 玩家点了浮窗里的「继续对话」:关窗 + 重新计数,对话照常往下走 */
@@ -1984,12 +2115,9 @@ export const useChatStore = defineStore('chat', () => {
     collapsed.value = cards.value.map(() => true)
     activeSub.value = null
     activeCardIndex.value = null
-    // 整个卡片集被替换,旧会话下标全部失效:丢弃所有进行中的 AI 响应上下文
-    aiCtxBySub.clear()
-    aiLoadingSubs.value = []
-    aiRespondingSubs.value = []
-    aiEmittedSubs.value = []
-    aiSpeakers.value = {}
+    // 整个卡片集被替换,旧会话下标全部失效:作废所有在途 AI 响应上下文
+    // (统一走 invalidateAllAiCtx:除了清状态,还要 abort 掉在途请求)
+    invalidateAllAiCtx()
     void nextTick(() => {
       activitySealed = false
     })
@@ -2026,14 +2154,20 @@ export const useChatStore = defineStore('chat', () => {
    *
    * 添加一条 mine 侧消息到当前对话,返回消息对象供调用方构建 LLM 请求。
    * 署名取 currentSelfIdentity:群聊中扮演角色时署该角色名(头像随之变为该角色)。
+   *
+   * @param targetSub 目标会话下标(缺省 = 当前选中会话)
+   *                  调用方若在 await 之前就锁定了会话,必须显式传入 —— 否则
+   *                  等待期间玩家切走,这条消息会落进**另一段**对话。
    */
-  function sendUserMessage(text: string): ChatMessage | null {
-    if (activeSub.value === null) return null
+  function sendUserMessage(text: string, targetSub?: number): ChatMessage | null {
+    const sub = targetSub ?? activeSub.value
+    if (sub === null) return null
     const trimmed = text.trim()
     if (!trimmed) return null
-    const conv = conversations.value[activeSub.value]
+    const conv = conversations.value[sub]
+    if (!conv) return null
     const nextId = nextMessageId(conv)
-    const self = currentSelfIdentity()
+    const self = currentSelfIdentity(targetSub)
     const msg: ChatMessage = {
       id: nextId,
       side: 'mine',
@@ -2119,10 +2253,23 @@ export const useChatStore = defineStore('chat', () => {
      * 传入的通常是「被重新生成那一轮的用户消息 id」。
      */
     insertAfterMessageId?: number,
+    /**
+     * 期望的目标会话对象(归属校验入口)
+     *
+     * 调用方在**发起请求之前**就把要写入的那段会话抓在手里,一路传到这里:
+     * 读取人设 / 历史到真正开始写回复之间隔着网络 await,期间结构可能已经
+     * 变了。传入后本函数先校验"这个下标记的还是不是它",不是就直接放弃本轮
+     * (返回 null),避免把 A 的人设写进 B 的会话。不传则退化为只按下标锁定
+     * (与改动前一致,兼容旧调用)。
+     */
+    expectedConversation?: Conversation,
   ): AiResponseCtx | null {
     const sub = targetSub ?? activeSub.value
     if (sub === null || sub === undefined) return null
-    if (!conversations.value[sub]) return null
+    const conv = conversations.value[sub]
+    if (!conv) return null
+    // 归属校验:锁定的会话对象必须仍是这个位置上的那一段
+    if (expectedConversation && conv !== expectedConversation) return null
 
     // 同一会话的旧响应:中止并释放,防止两个请求交替写入同一对话
     const old = aiCtxBySub.get(sub)
@@ -2144,6 +2291,8 @@ export const useChatStore = defineStore('chat', () => {
       insertAfterMessageId,
       // 首条从锚点之后开始排
       lastInsertedId: insertAfterMessageId,
+      // 锁定归属:之后每一次写入都以"这个位置还是这段会话"为前提(见 isCtxActive)
+      lockedConversation: expectedConversation ?? conv,
     }
     aiCtxBySub.set(sub, ctx)
     setAiSpeaker(sub, ctx.speaker)
@@ -2484,10 +2633,17 @@ export const useChatStore = defineStore('chat', () => {
    * 优先使用 contextHistory(独立于可见消息):
    * - contextHistory 已初始化(undefined 以外) → 直接返回它
    * - contextHistory 未初始化(undefined,旧数据) → 从 messages 派生(向后兼容)
+   *
+   * @param targetSub 目标会话下标(缺省 = 当前选中会话)。
+   *                  锁定回合的调用方必须显式传入:AI 回合在发起时锁定的是
+   *                  "那一段会话",不是"此刻选中的那一段" —— 否则等待期间玩家
+   *                  切走,拿到的就是另一段对话的历史(人设与历史错配)。
    */
-  function getChatHistory(): Array<{ side: 'other' | 'mine'; text: string; image?: string }> {
-    if (activeSub.value === null) return []
-    const conv = conversations.value[activeSub.value]
+  function getChatHistory(targetSub?: number): Array<{ side: 'other' | 'mine'; text: string; image?: string }> {
+    const sub = targetSub ?? activeSub.value
+    if (sub === null) return []
+    const conv = conversations.value[sub]
+    if (!conv) return []
     if (conv.contextHistory !== undefined) {
       return conv.contextHistory
     }
@@ -2505,17 +2661,22 @@ export const useChatStore = defineStore('chat', () => {
    *
    * 与 getChatHistory 用同一套定位（activeSub → conversations[i]）。
    * 智能总结用它 + 固定提示词长度，判断是否触及上下文窗口的 80%。
+   *
+   * @param targetSub 目标会话下标（缺省 = 当前选中会话）。锁定回合的调用方
+   *                  必须显式传入，否则等待期间切走会把这个计数记到别人头上。
    */
-  function getSessionOutputTokens(): number {
-    if (activeSub.value === null) return 0
-    return conversations.value[activeSub.value]?.sessionOutputTokens ?? 0
+  function getSessionOutputTokens(targetSub?: number): number {
+    const sub = targetSub ?? activeSub.value
+    if (sub === null) return 0
+    return conversations.value[sub]?.sessionOutputTokens ?? 0
   }
 
-  /** 累加当前会话的输出 token（后端上报的 completion_tokens） */
-  function addSessionOutputTokens(delta: number): void {
-    if (activeSub.value === null) return
+  /** 累加某会话的输出 token（后端上报的 completion_tokens；targetSub 缺省 = 当前会话） */
+  function addSessionOutputTokens(delta: number, targetSub?: number): void {
+    const sub = targetSub ?? activeSub.value
+    if (sub === null) return
     if (!Number.isFinite(delta) || delta <= 0) return
-    const conv = conversations.value[activeSub.value]
+    const conv = conversations.value[sub]
     if (!conv) return
     conv.sessionOutputTokens = (conv.sessionOutputTokens ?? 0) + delta
   }
@@ -2525,10 +2686,13 @@ export const useChatStore = defineStore('chat', () => {
    *
    * 归零是必要的：摘要已替代被总结的那部分历史，继续累加会让计数虚高，
    * 导致每轮都触发总结。
+   *
+   * @param targetSub 目标会话下标（缺省 = 当前选中会话）
    */
-  function resetSessionOutputTokens(): void {
-    if (activeSub.value === null) return
-    const conv = conversations.value[activeSub.value]
+  function resetSessionOutputTokens(targetSub?: number): void {
+    const sub = targetSub ?? activeSub.value
+    if (sub === null) return
+    const conv = conversations.value[sub]
     if (conv) conv.sessionOutputTokens = 0
   }
 
@@ -2568,6 +2732,8 @@ export const useChatStore = defineStore('chat', () => {
     // 群聊「继续对话」浮窗(每 GROUP_CONTINUE_EVERY 条角色消息一次)
     groupMessagesSinceAck,
     groupContinueOpen,
+    /** 某段会话的「继续对话」浮窗是否挂着(群聊回合判定"本回合锁定的那段") */
+    isGroupContinueOpen,
     ackGroupContinue,
     resetGroupContinue,
     setActiveAssignTarget,
@@ -2631,6 +2797,8 @@ export const useChatStore = defineStore('chat', () => {
     setMyGender,
     // 动态命名
     currentConversationMeta,
+    /** 按显式下标取会话展示信息(锁定的 AI 回合取自己那段的名字/头像) */
+    conversationMetaAt,
     // AI 加载
     subPreviewTexts,
     playedMessages,
@@ -2667,6 +2835,8 @@ export const useChatStore = defineStore('chat', () => {
     beginAiSegment,
     endAiSegmentLoading,
     isCtxActive,
+    /** 结构变更(增删会话 / 导入恢复)时作废所有在途 AI 响应上下文 */
+    invalidateAllAiCtx,
     startAiResponse,
     appendAiChunk,
     /** SSE 逐字流式收尾:用 done 帧的权威全文覆盖当前 AI 消息 */

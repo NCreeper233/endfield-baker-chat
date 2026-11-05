@@ -243,7 +243,7 @@ export async function fetchCloudData(
 }
 
 /** 云端当前存放情况（可选） */
-export async function cloudStats(): Promise<{ items: number; bytes: number; max_age_hours: number | null } | null> {
+async function cloudStats(): Promise<{ items: number; bytes: number; max_age_hours: number | null } | null> {
   try {
     const res = await request(`${CLOUD_DATA_URL}/stats`, 'GET', null, 'download', undefined, TIMEOUT_LIGHT_MS)
     if (res.status !== 200) return null

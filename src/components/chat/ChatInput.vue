@@ -356,6 +356,9 @@ const observerRunning = computed(
  *   插话;而"发消息"本身就是打断当前回合的手段,必须始终可用。
  * - 旁观模式且对话进行中:锁定,并提示先暂停 —— 避免玩家在角色们正说着的时候
  *   又塞新话题进去。
+ *
+ * 锁定时输入框走 `readonly` 而不是 `disabled`：disabled 会让已聚焦的控件失焦，
+ * 移动端键盘随之收起（用户体感"点输入框键盘就没了"）。readonly 只挡编辑。
  */
 const inputLocked = computed(() => {
   if (observerRunning.value) return true
@@ -556,9 +559,75 @@ function onAbort() {
   abort()
 }
 
+/** 入库图片的最长边(px):气泡最大只显示 320×240,1280 足够清晰,体积却小一个数量级 */
+const STORE_IMAGE_MAX_EDGE = 1280
+/** 入库图片重编码质量 */
+const STORE_IMAGE_QUALITY = 0.82
+/** 原图已经"够小"时不再重编码,避免无意义的画质损失 */
+const STORE_IMAGE_SKIP_BYTES = 512 * 1024
+
 /**
- * 选择图片后:读取为 dataURL,按自然尺寸等比计算显示尺寸(不超过 CHAT_IMAGE 上限,
- * 小图不放大),作为图片消息发送并触发 AI 回复。
+ * 选图入库前降采样(F16/D1)
+ *
+ * 为什么在入库前做:图片 dataURL 会同时写进 messages 与 contextHistory,
+ * 原图 2~5MB 的话每轮请求都可能背着几 MB 的 base64(与后端"历史图片每轮重发"
+ * 叠加就是"图像识别卡死"的一半原因)。压到最长边 1280 / q0.82 后通常只剩
+ * 100~300KB,发送、落库、导出都轻得多。
+ *
+ * ⚠ 只影响**新选的图**:已经保存在本地的历史图片不会被改动,也不会在启动时
+ * 被重新编码(历史图只在导出时做重编码,见 utils/zipExport)。
+ *
+ * 任何一步失败都回退原图:宁可图大一点,也不能因为压缩失败让用户发不出图。
+ */
+async function downsampleImage(
+  dataUrl: string,
+  img: HTMLImageElement,
+  fileSize: number,
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  const nw = img.naturalWidth || img.width
+  const nh = img.naturalHeight || img.height
+  if (!nw || !nh) return { dataUrl, width: CHAT_IMAGE.w, height: CHAT_IMAGE.h }
+
+  const longest = Math.max(nw, nh)
+  // 像素与体积都已在阈值内 → 原样入库
+  if (longest <= STORE_IMAGE_MAX_EDGE && fileSize <= STORE_IMAGE_SKIP_BYTES) {
+    return { dataUrl, width: nw, height: nh }
+  }
+
+  try {
+    const scale = Math.min(1, STORE_IMAGE_MAX_EDGE / longest)
+    const w = Math.max(1, Math.round(nw * scale))
+    const h = Math.max(1, Math.round(nh * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return { dataUrl, width: nw, height: nh }
+    ctx.drawImage(img, 0, 0, w, h)
+    let out = canvas.toDataURL('image/webp', STORE_IMAGE_QUALITY)
+    if (!out.startsWith('data:image/webp')) {
+      // 不支持 webp 编码:JPEG 没有透明通道,先补白底再重画,否则透明区域会变黑
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, w, h)
+      ctx.drawImage(img, 0, 0, w, h)
+      out = canvas.toDataURL('image/jpeg', STORE_IMAGE_QUALITY)
+    }
+    canvas.width = 0
+    canvas.height = 0
+    // 压缩结果反而更大(小图 / 已高度压缩)→ 保留原图
+    if (!out.startsWith('data:image/') || out.length >= dataUrl.length) {
+      return { dataUrl, width: nw, height: nh }
+    }
+    return { dataUrl: out, width: w, height: h }
+  } catch (err) {
+    devWarn('[ChatInput] 图片降采样失败,按原图入库', err)
+    return { dataUrl, width: nw, height: nh }
+  }
+}
+
+/**
+ * 选择图片后:读取为 dataURL → **入库前降采样** → 按显示上限等比计算尺寸 →
+ * 作为图片消息发送并触发 AI 回复。
  *
  * AI 响应中或 API 未配置时不发送图片。读取完成后重置 input.value,
  * 允许连续选择同一文件。
@@ -596,14 +665,19 @@ function onFileChange(event: Event) {
     if (typeof dataUrl !== 'string') return
     const img = new Image()
     img.onload = async () => {
-      const nw = img.naturalWidth || CHAT_IMAGE.w
-      const nh = img.naturalHeight || CHAT_IMAGE.h
-      if (nw <= CHAT_IMAGE.w && nh <= CHAT_IMAGE.h) {
-        chatStore.sendImage(dataUrl, nw, nh)
-      } else {
-        const scale = Math.min(CHAT_IMAGE.w / nw, CHAT_IMAGE.h / nh)
-        chatStore.sendImage(dataUrl, Math.round(nw * scale), Math.round(nh * scale))
-      }
+      // 1) 入库前降采样(F16/D1):只处理新选的图,历史图保持原样
+      const stored = await downsampleImage(dataUrl, img, file.size)
+      // 2) 显示尺寸仍按 CHAT_IMAGE 上限等比计算(气泡最大 320×240),小图不放大
+      const scale = Math.min(
+        1,
+        CHAT_IMAGE.w / stored.width,
+        CHAT_IMAGE.h / stored.height,
+      )
+      const dw = Math.max(1, Math.round(stored.width * scale))
+      const dh = Math.max(1, Math.round(stored.height * scale))
+      chatStore.sendImage(stored.dataUrl, dw, dh)
+      // 注:历史图片目前仍随 contextHistory 每轮重发给后端(审计 F18/C1),
+      // 那需要改 backend.ts / stores/chat.ts,不在本次改动范围。
       input.value = ''
 
       // 群聊:图片同样是"玩家说的一句话",发完按发言模式让成员接话。
@@ -882,7 +956,8 @@ function onPaste(event: ClipboardEvent) {
       rows="1"
       :aria-label="isObserverGroup ? '话题输入框' : '发消息输入框'"
       :placeholder="observerRunning ? '对话进行中，暂停后可输入新话题' : (isObserverGroup ? '请先输入话题并发送' : '发消息')"
-      :disabled="inputLocked"
+      :readonly="inputLocked"
+      :aria-disabled="inputLocked"
       @keydown="onKeydown"
     ></textarea>
     <div
@@ -892,6 +967,7 @@ function onPaste(event: ClipboardEvent) {
       :class="{ 'chat-input__field--grown': fieldGrown }"
       :style="fieldStyle"
       :contenteditable="!inputLocked"
+      :aria-disabled="inputLocked"
       role="textbox"
       :aria-label="isObserverGroup ? '话题输入框' : '发消息输入框'"
       :data-placeholder="observerRunning ? '对话进行中，暂停后可输入新话题' : (isObserverGroup ? '请先输入话题并发送' : '发消息')"
@@ -1112,7 +1188,9 @@ function onPaste(event: ClipboardEvent) {
         color: rgba(42, 42, 42, 0.5);
       }
 
-      &:disabled {
+      // AI 回复期用 readonly 而不是 disabled：disabled 会让**已聚焦**的控件失焦，
+      // 移动端随即收起键盘（C8）。readonly 只挡编辑，不夺焦；视觉仍压暗。
+      &[readonly] {
         opacity: 0.5;
         pointer-events: none;
       }

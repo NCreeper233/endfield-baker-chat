@@ -200,7 +200,8 @@ export async function streamChat(params: StreamChatParams): Promise<string> {
   // chat_template_kwargs.enable_thinking;不识别的服务商一般会忽略未知字段。
   // legacy 端点不在该协议内,刻意不发送(保持原行为)。
   if (!isLegacy && params.think !== undefined) {
-    requestBody.chat_template_kwargs = { enable_thinking: !!params.think }
+    // 仅开启思考时才带这个扩展字段（未知字段会被部分服务端 400 拒绝）
+    if (params.think) requestBody.chat_template_kwargs = { enable_thinking: true }
   }
 
   // 流式 usage:OpenAI 系需显式 include_usage 才会在最后一个数据块返回 usage。

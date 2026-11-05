@@ -26,6 +26,14 @@ export interface NativeFileBridge {
   writeFileChunked?: (path: string, content: string) => Promise<void>
   /** 读取文本文件,不存在/失败返回 null */
   readFile: (path: string) => Promise<string | null>
+  /**
+   * 文件是否存在（可选）
+   *
+   * 【2026-10-04 数据安全】没有它就无法区分「文件不存在」(首次使用,可以写)
+   * 与「读失败」(文件可能还在,绝不能当空库覆盖)。Capacitor 端用 Filesystem.stat 实现;
+   * Electron 端没实现时退化为 .bak 启发式判断。
+   */
+  exists?: (path: string) => Promise<boolean>
   /** 写入文本文件(覆盖),失败抛出 */
   writeFile: (path: string, content: string) => Promise<void>
 }
@@ -58,6 +66,14 @@ export async function getNativeFileBridge(): Promise<NativeFileBridge | null> {
     try {
       const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem')
       cachedBridge = {
+        exists: async (path) => {
+          try {
+            await Filesystem.stat({ path, directory: Directory.Data })
+            return true
+          } catch {
+            return false
+          }
+        },
         readFile: async (path) => {
           try {
             const r = await Filesystem.readFile({
@@ -79,20 +95,32 @@ export async function getNativeFileBridge(): Promise<NativeFileBridge | null> {
             recursive: true,
           })
         },
-        // 分块写：首块 writeFile，其余 appendFile。
-        // 单块 256KB —— 桥层与 Java 侧的内存峰值就固定在这个量级，
-        // 不再随工程大小线性增长（大数据集自动保存/导出闪退的根因之一）。
+        // 分块写：先写 .tmp 再 rename（原子替换）。
+        //
+        // 为什么必须原子：安卓被系统回收/用户强杀时，分块写到一半会留下
+        // 半截 JSON；旧文件已被覆盖 → 重启后整库判损坏 → 聊天记录消失。
+        // 改成写 .tmp 后，最坏情况只是丢掉本次改动，原文件完好。
+        //
+        // 单块 128KB：Java 桥每次要收一个 JS 字符串并转 UTF-8，
+        // 块越小峰值越低（大数据集自动保存闪退的根因之一）。
         writeFileChunked: async (path, content) => {
-          const CHUNK = 256 * 1024
+          const CHUNK = 128 * 1024
+          const tmp = path + '.tmp'
+
+          // 小文件：同样走 tmp + rename，保证原子
           if (content.length <= CHUNK) {
             await Filesystem.writeFile({
-              path, data: content, directory: Directory.Data,
+              path: tmp, data: content, directory: Directory.Data,
               encoding: Encoding.UTF8, recursive: true,
+            })
+            await Filesystem.rename({
+              from: tmp, to: path, directory: Directory.Data, toDirectory: Directory.Data,
             })
             return
           }
+
           await Filesystem.writeFile({
-            path, data: content.slice(0, CHUNK), directory: Directory.Data,
+            path: tmp, data: content.slice(0, CHUNK), directory: Directory.Data,
             encoding: Encoding.UTF8, recursive: true,
           })
           for (let i = CHUNK; i < content.length; i += CHUNK) {
@@ -101,11 +129,14 @@ export async function getNativeFileBridge(): Promise<NativeFileBridge | null> {
             const last = content.charCodeAt(end - 1)
             if (end < content.length && last >= 0xd800 && last <= 0xdbff) end -= 1
             await Filesystem.appendFile({
-              path, data: content.slice(i, end), directory: Directory.Data,
+              path: tmp, data: content.slice(i, end), directory: Directory.Data,
               encoding: Encoding.UTF8,
             })
             i = end - CHUNK   // 补偿被回退的那一个字符（循环再 +CHUNK）
           }
+          await Filesystem.rename({
+            from: tmp, to: path, directory: Directory.Data, toDirectory: Directory.Data,
+          })
         },
       }
       return cachedBridge
@@ -140,7 +171,7 @@ export function createNativeStore(bridge: NativeFileBridge) {
   //       绝不覆盖,给用户留出手工/工具抢救的机会;③ 每次写前留一代备份。
   const BAK_FILE = NATIVE_DATA_FILE + '.bak'
   const BAK_MIN_INTERVAL_MS = 5 * 60 * 1000
-  let loadedStatus: 'ok' | 'empty' | 'recovered' | 'corrupt' = 'empty'
+  let loadedStatus: 'ok' | 'empty' | 'recovered' | 'corrupt' | 'unreadable' = 'empty'
   let lastGoodText: string | null = null
   let lastBakAt = 0
 
@@ -154,8 +185,19 @@ export function createNativeStore(bridge: NativeFileBridge) {
     }
   }
 
-  async function loadCache(): Promise<Record<string, unknown>> {
-    if (cache !== null) return cache
+  // 单飞：冷启动时 useChatPersistence 会**并发**发起 7 个 get()，
+  // 没有它就会并发读 7 次整文件（30MB 库在低端机上直接 OOM，
+  // 而 readFile 的 catch 会把 OOM 吞成 null → 被判成"没有数据" → 整库被覆盖）。
+  let loading: Promise<Record<string, unknown>> | null = null
+
+  function loadCache(): Promise<Record<string, unknown>> {
+    if (cache !== null) return Promise.resolve(cache)
+    if (loading) return loading
+    loading = loadCacheOnce().finally(() => { loading = null })
+    return loading
+  }
+
+  async function loadCacheOnce(): Promise<Record<string, unknown>> {
     const text = await bridge.readFile(NATIVE_DATA_FILE)
 
     const main = parseOrNull(text)
@@ -180,7 +222,24 @@ export function createNativeStore(bridge: NativeFileBridge) {
 
     cache = {}
     // 主文件"有内容但解析不了" = 损坏 → 拒绝后续写入
-    loadedStatus = text && text.trim() ? 'corrupt' : 'empty'
+    if (text && text.trim()) {
+      loadedStatus = 'corrupt'
+      return cache
+    }
+    // 读出来是 null/空：可能是"真的没有文件"(首次使用)，也可能是"读失败"(文件还在)。
+    // 能 stat 就 stat；不能 stat 时：有 .bak/其它证据说明数据曾存在过 → 按读失败处理，
+    // **绝不当空库写入**，避免把用户数据覆盖掉。
+    if (bridge.exists) {
+      const present = await bridge.exists(NATIVE_DATA_FILE).catch(() => false)
+      if (present) {
+        loadedStatus = 'unreadable'
+        return cache
+      }
+    } else if (bak !== null) {
+      loadedStatus = 'unreadable'
+      return cache
+    }
+    loadedStatus = 'empty'
     return cache
   }
 
@@ -189,18 +248,23 @@ export function createNativeStore(bridge: NativeFileBridge) {
       const obj = await loadCache()
       return obj[key]
     },
-    /** 数据文件是否损坏(损坏时 put 会拒绝写入,避免把用户数据覆盖掉) */
+    /** 数据文件是否不可安全写入(损坏/读不出来时 put 会拒绝,避免覆盖用户数据) */
     isCorrupt(): boolean {
-      return loadedStatus === 'corrupt'
+      return loadedStatus === 'corrupt' || loadedStatus === 'unreadable'
+    },
+    /** 载入状态，供 UI 显示"已暂停保存"提示 */
+    loadStatus(): string {
+      return loadedStatus
     },
     put(key: string, value: unknown): Promise<void> {
       // 串行化:每个 put 排队执行,避免并发写覆盖
       const task = writeChain.then(async () => {
         const obj = await loadCache()
-        if (loadedStatus === 'corrupt') {
+        if (loadedStatus === 'corrupt' || loadedStatus === 'unreadable') {
           throw new Error(
-            `本地数据文件已损坏(${NATIVE_DATA_FILE}),已拒绝写入以免覆盖:` +
-            '请先备份/导出该文件再重试',
+            loadedStatus === 'corrupt'
+              ? `本地数据文件已损坏(${NATIVE_DATA_FILE}),已拒绝写入以免覆盖:请先备份/导出该文件再重试`
+              : `本地数据文件读取失败(${NATIVE_DATA_FILE}),已暂停保存以免覆盖现有数据:请重启应用或导出备份`,
           )
         }
         obj[key] = value
@@ -218,7 +282,13 @@ export function createNativeStore(bridge: NativeFileBridge) {
         if (text.length > 512 * 1024 && bridge.writeFileChunked) {
           await bridge.writeFileChunked(NATIVE_DATA_FILE, text)
         } else {
-          await bridge.writeFile(NATIVE_DATA_FILE, text)
+          // Electron 的 write-file 会带**回读校验**并返回布尔；返回 false 代表没落盘
+          // （磁盘满/被占用/回读不一致）。以前这里丢弃返回值 → 界面正常、重启回旧数据。
+          const wrote = await (bridge.writeFile as unknown as
+            (p: string, c: string) => Promise<boolean | void>)(NATIVE_DATA_FILE, text)
+          if (wrote === false) {
+            throw new Error('本地数据写入未通过回读校验（磁盘空间/权限异常），本次修改没有保存')
+          }
         }
         lastGoodText = text
         loadedStatus = 'ok'

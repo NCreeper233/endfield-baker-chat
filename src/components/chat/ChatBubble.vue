@@ -19,8 +19,9 @@
 //     过渡起点(加载气泡 100 宽)会超界,被裁出"直角边",宽度缩回时才消失
 //   - 容器随 curW 过渡后,rect 任何时刻都在 svg 内,裁切线贴着 rect 边缘,
 //     全程完整圆角
-//   - mine 侧右缘固定:left = props.left + (finalSvgW - svgW)(必为加号)
-//     当前宽 < 最终宽 时左缘位于最终位右侧,过渡中向左滑回
+//   - mine 侧右缘固定:left 锚定最终右缘 = props.left + finalSvgW,
+//     再用 transform: translateX(-当前宽) 把左缘推到正确位置;
+//     当前宽 < 最终宽 时左缘位于最终位右侧,过渡中向左滑回(位置动画走合成器)
 // =============================================================================
 import { computed, inject, onMounted, onUnmounted, ref, toValue, watch } from 'vue'
 import { type BubbleBox, bubbleSvgWidth, BUBBLE_FONT } from '../../utils/measure'
@@ -70,6 +71,15 @@ const props = defineProps<{
  * 注意:inject 必须在 setup 期间立即调用(见 ChatArea 同款注释)。 */
 const injectedGeom = inject(chatGeometryKey, globalChatGeometry) ?? DESKTOP_GEOM
 const geom = computed<ChatGeometry>(() => toValue(injectedGeom))
+
+/**
+ * 内文 HTML(HTML 转义 + 表情 token → <img>)
+ *
+ * 必须走 computed:模板里直接调用 emojiToHtml(text) 会在**每次组件渲染**时
+ * 重新做全量转义 + 正则替换(流式时每个 chunk 都要重算一遍整段文本)。
+ * computed 只在 text 真正变化时重算,其余渲染(尺寸变化等)直接复用结果。
+ */
+const innerHtml = computed(() => emojiToHtml(props.text ?? ''))
 
 /** 当前 rect 尺寸(响应式,过渡用)
  *
@@ -204,23 +214,32 @@ const finalSvgW = computed(() => bubbleSvgWidth(props.box.rectW, props.side))
  *
  * - 宽度跟随 rectW 过渡:rect 任何时刻都在 svg 内,不被 overflow:hidden
  *   直线裁切(不会出现"直角边")
- * - mine 侧右缘固定:left = props.left + (finalSvgW - svgW)
- *   右缘 = left + width = props.left + finalSvgW,任何时刻都锚定 mineBubbleRight,
- *   只让左缘随宽度过渡滑动(右缘不随宽度移动,无"弹跳")
+ * - mine 侧右缘固定:left 锚定最终右缘 = props.left + finalSvgW,
+ *   再用 transform: translateX(-当前宽) 把左缘推到正确位置;
+ *   右缘 = left + translateX + width = props.left + finalSvgW,
+ *   任何时刻都锚定 mineBubbleRight,只让左缘随宽度过渡滑动
  * - other 侧左缘固定,宽度向右伸缩
  */
-const svgStyle = computed(() => ({
-  left: props.side === 'mine'
-    ? `${props.left + (finalSvgW.value - svgW.value)}px`
-    : `${props.left}px`,
-  top: `${props.top}px`,
-  width: `${svgW.value}px`,
-  height: `${svgH.value}px`,
-  transition: `width ${TRANSITION_MS}ms ease-out, left ${TRANSITION_MS}ms ease-out`,
-  // 选中描边画在形状**外侧**,默认的 overflow:hidden 会把它沿 svg 边缘切掉;
-  // 只在选中时放开(此时没有尺寸过渡,不存在原注释里"过渡中被裁出直角边"的问题)
-  overflow: props.picked ? 'visible' : 'hidden',
-}))
+const svgStyle = computed(() => {
+  const mine = props.side === 'mine'
+  return {
+    // mine 侧把**最终右缘**作为 left 锚点,再用 translateX(-当前宽) 把整个 svg
+    // 往左推:宽度过渡时右缘不动、左缘滑动,与原 left = props.left + (finalW - svgW)
+    // 的坐标完全等价,但位置变化改由 transform 承担(合成器插值,不再每帧 layout)。
+    // 注意 left 仍保留 —— 它是静态锚点(mineBubbleRight),不随宽度过渡变化。
+    left: mine ? `${props.left + finalSvgW.value}px` : `${props.left}px`,
+    top: `${props.top}px`,
+    width: `${svgW.value}px`,
+    height: `${svgH.value}px`,
+    transform: mine ? `translateX(-${svgW.value}px)` : undefined,
+    // width/height 必须保留过渡:圆角 rx/ry 固定,用 scale 代替会把圆角拉变形。
+    // 只把位置从 left 换成 transform(见上),避免每帧为 left 重排版。
+    transition: `width ${TRANSITION_MS}ms ease-out, transform ${TRANSITION_MS}ms ease-out`,
+    // 选中描边画在形状**外侧**,默认的 overflow:hidden 会把它沿 svg 边缘切掉;
+    // 只在选中时放开(此时没有尺寸过渡,不存在原注释里"过渡中被裁出直角边"的问题)
+    overflow: props.picked ? 'visible' : 'hidden',
+  }
+})
 
 /**
  * rect 样式
@@ -378,7 +397,7 @@ const textInnerStyle = computed(() => ({
         :style="textStyle"
       >
         <!-- 真正的文字层:flex 容器只留这一个孩子,表情 <img> 在这里按内联流排版 -->
-        <div class="chat-bubble__inner" :style="textInnerStyle" v-html="emojiToHtml(text ?? '')"></div>
+        <div class="chat-bubble__inner" :style="textInnerStyle" v-html="innerHtml"></div>
       </div>
     </foreignObject>
   </svg>
@@ -390,7 +409,15 @@ const textInnerStyle = computed(() => ({
 .chat-bubble {
   position: absolute;
   display: block;
-  // 气泡四周阴影:柔和扩散,与聊天框阴影统一观感
+  // 气泡四周阴影:柔和扩散,与聊天框阴影统一观感。
+  //
+  // 为什么不用 SVG <feDropShadow> 代替:
+  //   ① 每个气泡 SVG 都需要自己的 <defs>+filter,filter id 必须唯一;而
+  //      html-to-image 对 SVG 根是整棵深克隆,引用外部 defs 的写法在导出图里会丢;
+  //   ② CSS drop-shadow 在 sRGB 下合成,feDropShadow 默认 linearRGB,阴影浓淡会变;
+  //   ③ 滤镜区域随 width/height 每帧变化,换成 SVG filter 也省不掉这笔开销。
+  // 位置动画已改为 transform(见 svgStyle),尺寸过渡期间这层小面积滤镜仍在重绘,
+  // 但不再叠加 left 的逐帧排版。
   filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.35));
 
   &__text {

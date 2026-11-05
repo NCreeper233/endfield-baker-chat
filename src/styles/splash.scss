@@ -56,22 +56,27 @@
   top: 0;
   left: 0;
   width: 100%;
-  height: var(--progress);
+  height: 100%;
   background: #f7ff48;
-  transition: height 0.05s linear;
+  // 进度由 rAF 每帧写入 --progress-num(0~100)。只改 transform:
+  // 以前用 height 过渡,2.2 秒里每帧都在改元素高度 → 全屏 layout;
+  // 而 rAF 本身已逐帧插值,再叠 transition 还会拖后一帧、看着发飘。
+  transform: scaleY(calc(var(--progress-num, 0) * 0.01));
+  transform-origin: top;
 }
 
 /* 进度信息 - 跟随进度条 */
 .splash-overlay .splash-progress-info {
   position: absolute;
   left: 24px;
-  top: var(--progress);
-  transform: translateY(-100%);
+  top: 0;
+  // 同样只动 transform:纵向位置 = 进度百分比 × 视口高 - 自身高度,
+  // 与旧版 top:var(--progress) + translateY(-100%) 的位置一致,但不触发布局。
+  transform: translateY(calc(var(--progress-num, 0) * 1vh - 100%));
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
-  transition: top 0.05s linear;
   padding-bottom: 12px;
 }
 
@@ -171,9 +176,9 @@
   }
 
   .splash-overlay .splash-progress-fill {
-    width: var(--progress);
-    height: 100%;
-    transition: width 0.05s linear;
+    // 移动端进度条是横向的:改 scaleX,从左端向右长
+    transform: scaleX(calc(var(--progress-num, 0) * 0.01));
+    transform-origin: left;
   }
 
   .splash-overlay .splash-progress-info {

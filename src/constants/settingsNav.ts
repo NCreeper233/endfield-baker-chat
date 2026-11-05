@@ -27,16 +27,19 @@ export interface SettingsNavIconPart {
 /** 设置页签标识(同时也是侧边栏项的键) */
 export type SettingsTabKey =
   | 'connection'
+  | 'prompts'
   | 'display'
   | 'experimental'
   | 'data'
   | 'disclaimer'
-  | 'about'
 
 /** 一个侧边栏导航项 */
 export interface SettingsNavItem {
   key: SettingsTabKey
+  /** 完整名称(悬浮提示、窗口标题用) */
   label: string
+  /** 页签栏上的短标签(一行放得下,3 个字以内) */
+  short: string
   icon: SettingsNavIconPart[]
 }
 
@@ -63,6 +66,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     key: 'connection',
     label: 'API配置',
+    short: 'API',
     // 六边形 + 内圆(接口/节点)
     icon: [
       { d: 'M24 4L18 10H10V18L4 24L10 30V38H18L24 44L30 38H38V30L44 24L38 18V10H30L24 4Z' },
@@ -74,8 +78,22 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     ],
   },
   {
+    // 提示词单独成页:自定义 API 模式下按角色逐个改提示词 + 全局世界观
+    key: 'prompts',
+    label: '提示词',
+    short: '提示词',
+    // 文档 + 折角 + 两行文字
+    icon: [
+      { d: 'M12 5H28L37 14V43H12Z' },
+      { d: 'M28 5V14H37' },
+      { d: 'M18 24H31' },
+      { d: 'M18 32H27' },
+    ],
+  },
+  {
     key: 'display',
     label: '显示和内容输出',
+    short: '显示',
     // 显示器(底座 + 圆角屏幕 + 屏幕内短线 + 底横线)
     icon: [
       { d: 'M19 32H29V41H19Z' },
@@ -87,6 +105,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     key: 'experimental',
     label: '实验性功能',
+    short: '实验',
     // 试管(斜置)
     icon: [
       {
@@ -101,6 +120,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     key: 'data',
     label: '数据管理',
+    short: '数据',
     // 三层数据库(顶面椭圆用等价的 a 圆弧表示,便于与其余片段同一套渲染)
     icon: [
       {
@@ -116,6 +136,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     key: 'disclaimer',
     label: '免责声明',
+    short: '免责',
     // 圆形外框 + 感叹号
     icon: [
       { d: CIRCLE_D },
@@ -126,22 +147,6 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
         filled: true,
       },
       { d: 'M24 12V28' },
-    ],
-  },
-  {
-    key: 'about',
-    label: '关于',
-    // 圆形外框 + i
-    icon: [
-      { d: CIRCLE_D },
-      {
-        d:
-          'M24 11C25.3807 11 26.5 12.1193 26.5 13.5C26.5 14.8807 25.3807 16 24 16' +
-          'C22.6193 16 21.5 14.8807 21.5 13.5C21.5 12.1193 22.6193 11 24 11Z',
-        filled: true,
-      },
-      { d: 'M24.5 34V20H23.5H22.5' },
-      { d: 'M21 34H28' },
     ],
   },
 ]

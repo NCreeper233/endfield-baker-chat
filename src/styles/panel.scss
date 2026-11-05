@@ -1,0 +1,955 @@
+// =============================================================================
+// 面板设计系统(全局类,`.pn-` 前缀)
+// -----------------------------------------------------------------------------
+// 设置菜单 / 公告页 / 版本弹窗三处共用同一套"深色半透明面板 + 斜纹装饰 +
+// 浅色胶囊控件"的视觉语言。这些元素跨组件复用(子组件里也要用到同一套控件),
+// scoped 样式无法跨组件命中,故统一收敛到本文件,由 main.scss 全局引入。
+//
+// 只放"结构外观",不放任何业务布局(每个页面的栅格各自写在组件里)。
+// =============================================================================
+
+$pn-yellow: #ffee34;
+$pn-yellow-soft: #fcf150;
+$pn-track: #5c5a5d;
+$pn-pill: #edebec;
+// 输入框底色:比胶囊按钮略深一档(聚焦时会回到 $pn-pill 的浅色)
+$pn-field: #d7d5d7;
+$pn-pill-hover: #e0e0e0;
+$pn-pill-ink: #373537;
+$pn-pill-ink-off: #b3b1b4;
+$pn-line: rgba(255, 255, 255, 0.16);
+
+/// 45° 细斜纹底(装饰条 / 页签背板 / 行内色块共用)
+@mixin pn-hatch($color: rgba(255, 255, 255, 0.42), $size: 0.22em) {
+  background-image: linear-gradient(
+    -45deg,
+    $color 0 12.5%,
+    transparent 12.5% 37.5%,
+    $color 37.5% 62.5%,
+    transparent 62.5% 87.5%,
+    $color 87.5% 100%
+  );
+  background-size: $size $size;
+  background-repeat: repeat;
+}
+
+// -----------------------------------------------------------------------------
+// 遮罩 + 窗口
+// -----------------------------------------------------------------------------
+.pn-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  // 背景内容压暗 + 模糊:面板浮在应用之上,但后面的界面仍能看出轮廓
+  background: rgba(10, 12, 13, 0.62);
+  -webkit-backdrop-filter: blur(14px) saturate(0.85);
+  backdrop-filter: blur(14px) saturate(0.85);
+}
+
+.pn-win {
+  position: absolute;
+  inset: 0;
+  z-index: 301;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: #fff;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 15px;
+}
+
+// -----------------------------------------------------------------------------
+// 左上角品牌角标(底纹 + 两行小字)
+// -----------------------------------------------------------------------------
+.pn-brand {
+  position: absolute;
+  left: 20px;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  pointer-events: none;
+  user-select: none;
+
+  &__bg {
+    width: 120px;
+    height: 100px;
+    margin-top: -8px;
+    background-repeat: no-repeat;
+    background-size: contain;
+    opacity: 0.1;
+  }
+
+  &__text {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    line-height: 1;
+    color: #666;
+    font-family: 'Outfit', ui-sans-serif, system-ui, sans-serif;
+    font-size: 9px;
+    letter-spacing: 0.02em;
+  }
+
+  &__slash {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-top: 4px;
+
+    svg {
+      display: block;
+      width: 6px;
+      height: 11px;
+    }
+  }
+
+  &__tag {
+    margin-left: 4px;
+    font-size: 11px;
+    color: #8a8a8a;
+    letter-spacing: 0.16em;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 顶部分类页签
+// -----------------------------------------------------------------------------
+.pn-tabs {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  height: 56px;
+  padding: 0 40px;
+  margin: 0 auto;
+  z-index: 2;
+
+  // 页签背板:横向条纹 + 两端渐隐(整体比正文浅一档)
+  &__backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    @include pn-hatch(rgba(255, 255, 255, 0.34));
+    background-color: rgba(255, 255, 255, 0.07);
+    background-size: 0.22em 0.22em;
+    opacity: 0.55;
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+    mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+  }
+}
+
+.pn-tab {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 66px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  background: none;
+  // 图标用实色 + 整体透明度:半透明色会让交叠的笔画叠加变深(看得出笔画重叠)
+  color: #fff;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+
+  // 分隔线(最后一项不画)
+  &::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 50%;
+    width: 1px;
+    height: 16px;
+    transform: translateY(-50%);
+    background: rgba(255, 255, 255, 0.22);
+  }
+
+  &:last-child::after {
+    display: none;
+  }
+
+  // 未选中靠"整块图标降透明度"变淡(而不是给笔画上半透明色)
+  &:hover .pn-tab__icon {
+    opacity: 0.85;
+  }
+
+  // 选中黄块:自顶向下长满一格,贴在页签底边
+  &__block {
+    position: absolute;
+    top: 0;
+    left: -1px;
+    right: 0;
+    z-index: 0;
+    height: 0;
+    border-bottom-left-radius: 5px;
+    border-bottom-right-radius: 5px;
+    background-color: $pn-yellow-soft;
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: bottom right;
+    opacity: 0;
+    transition: height 150ms ease-out, opacity 130ms linear;
+    pointer-events: none;
+
+    // 两侧的圆角缺口(黄块比页签略宽时补齐接缝)
+    &::before,
+    &::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      width: 6px;
+      height: 6px;
+    }
+
+    &::before {
+      left: -6px;
+      background: radial-gradient(circle at bottom left, transparent 6px, $pn-yellow-soft 6px);
+    }
+
+    &::after {
+      right: -6px;
+      background: radial-gradient(circle at bottom right, transparent 6px, $pn-yellow-soft 6px);
+    }
+  }
+
+  &__icon {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    // 未选中:整块图标半透明(笔画之间不会叠加变深)
+    opacity: 0.5;
+    transition: opacity 0.2s ease, color 0.2s ease;
+
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+  }
+
+  // 页签只留图标(与设计稿一致),名称走 title / aria-label
+  &__label {
+    display: none;
+  }
+
+  &.is-active {
+    color: #33332c;
+
+    .pn-tab__block {
+      height: 100%;
+      opacity: 1;
+    }
+
+    .pn-tab__icon {
+      opacity: 1;
+    }
+  }
+}
+
+.pn-close {
+  position: absolute;
+  top: 14px;
+  right: 26px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: #fefefe;
+  cursor: pointer;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+  transition: color 0.15s ease, transform 0.15s ease;
+
+  svg {
+    display: block;
+    width: 18px;
+    height: 18px;
+  }
+
+  &:hover {
+    color: #c9c9c9;
+  }
+
+  &:active {
+    transform: scale(0.95);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 内容滚动区
+// -----------------------------------------------------------------------------
+.pn-body {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 0 32px;
+  // 滚动条隐藏(面板内滚动不需要可见滚动条)
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 分类标题:竖长条 + 标题 + 文字下方一条通栏细线 + 右端短装饰
+// -----------------------------------------------------------------------------
+.pn-sec {
+  margin: 0 0 12px;
+  padding: 0 44px;
+
+  &__head {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 2px 0 10px;
+    color: $pn-yellow;
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.4;
+
+    // 标题前的黄色竖长条
+    &::before {
+      content: '';
+      display: block;
+      flex: 0 0 4px;
+      width: 4px;
+      height: 20px;
+      background: $pn-yellow;
+    }
+
+    // 文字下方的一条通栏细线
+    &::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 1px;
+      background: rgba(255, 255, 255, 0.32);
+    }
+  }
+
+  &__text {
+    flex: 0 0 auto;
+  }
+
+  &__icon {
+    display: none;
+  }
+
+  // 右端的三段小装饰(压在细线上)
+  &__deco {
+    position: absolute;
+    right: 0;
+    bottom: 3px;
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 3px;
+    color: rgba(255, 255, 255, 0.45);
+
+    i {
+      display: block;
+      height: 1px;
+      background: currentColor;
+
+      &:nth-child(1) {
+        width: 16px;
+      }
+
+      &:nth-child(2) {
+        width: 7px;
+      }
+
+      &:nth-child(3) {
+        width: 4px;
+        height: 4px;
+      }
+    }
+  }
+}
+
+.pn-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+// -----------------------------------------------------------------------------
+// 设置行
+// -----------------------------------------------------------------------------
+.pn-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  min-height: 62px;
+  padding: 10px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+  // 实色(不用透明度):比页面底色浅一档的深灰
+  background: #323234;
+  transition: background-color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+
+  &:hover {
+    background: #3c3c3e;
+    border-color: rgba(255, 255, 255, 0.26);
+  }
+
+  // 行内底纹层:只有左端一小段等高线,极淡地铺在左侧
+  &__deco {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    border-radius: 3px;
+    opacity: 0.12;
+    pointer-events: none;
+
+    .pn-row__deco-b {
+      display: block;
+      width: 360px;
+      height: 100%;
+      background-image: url('../assets/materials/deco_panel_contour.webp');
+      background-repeat: no-repeat;
+      background-size: auto 100%;
+      background-position: left center;
+      -webkit-mask-image: linear-gradient(to right, #000, transparent 92%);
+      mask-image: linear-gradient(to right, #000, transparent 92%);
+    }
+  }
+
+  &__main {
+    position: relative;
+    z-index: 1;
+    flex: 1;
+    min-width: 0;
+    padding: 0 4px;
+  }
+
+  &__label {
+    display: block;
+    color: #fff;
+    font-size: 16.5px;
+    line-height: 1.4;
+  }
+
+  &__desc {
+    display: block;
+    margin-top: 3px;
+    color: rgba(232, 233, 235, 0.5);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  &__ctl {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex: 0 0 340px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  // 行整体置灰(当前配置下不生效的开关)
+  &.is-off {
+    .pn-row__label,
+    .pn-row__desc {
+      color: rgba(255, 255, 255, 0.45);
+    }
+  }
+
+  // 控件独占整行(输入框 / 文本域 / 整行按钮组)
+  &--stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+
+    .pn-row__ctl {
+      flex: 0 0 auto;
+      min-width: 0;
+      width: 100%;
+      justify-content: flex-start;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 分段控件(是/否、模式三选一、多档位)
+// -----------------------------------------------------------------------------
+.pn-seg {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  border-radius: 999px;
+  background: $pn-track;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.27);
+
+  // 只按内容宽度排布(两三个短选项时不铺满整行)
+  &--auto {
+    align-self: flex-start;
+    width: auto;
+    min-width: 240px;
+  }
+
+  &__ind {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: calc(100% / var(--n, 2));
+    height: 100%;
+    border-radius: 999px;
+    background: $pn-pill;
+    box-shadow: 0 0 3px rgba(0, 0, 0, 0.4);
+    transform: translateX(calc(var(--i, 0) * 100%));
+    transition: transform 420ms cubic-bezier(0.3, 1.05, 0.35, 1);
+    pointer-events: none;
+  }
+
+  &__btn {
+    position: relative;
+    z-index: 1;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+    color: $pn-pill-ink-off;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.35;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: color 0.22s ease;
+
+    &:hover:not(:disabled) {
+      color: #e6e6e6;
+    }
+
+    &.is-on {
+      color: $pn-pill-ink;
+      font-weight: 600;
+
+      // 选中项悬停在白色指示块上:必须保持深色字,否则白底白字看不见
+      &:hover:not(:disabled) {
+        color: $pn-pill-ink;
+      }
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.4;
+    }
+  }
+
+  &.is-disabled {
+    opacity: 0.55;
+
+    .pn-seg__btn {
+      cursor: not-allowed;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 胶囊按钮 / 输入框
+// -----------------------------------------------------------------------------
+.pn-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 38px;
+  padding: 6px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: $pn-pill;
+  color: $pn-pill-ink;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.27);
+  transition: background-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+
+  &:hover:not(:disabled) {
+    background: $pn-pill-hover;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  &--primary {
+    background: #2a2728;
+    color: #fefcfc;
+    box-shadow: 0 0 0 0.05em #2a2728, 0 0 0 0.05em #81807f inset;
+
+    &:hover:not(:disabled) {
+      background: #1e1c1c;
+      color: #f3f1f1;
+    }
+  }
+
+  &--ghost {
+    background: rgba(255, 255, 255, 0.1);
+    color: #e8e8e8;
+    box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.28) inset;
+
+    &:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.18);
+    }
+  }
+}
+
+.pn-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: $pn-field;
+  color: #232323;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  outline: none;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.27);
+  transition: box-shadow 0.15s ease;
+
+  &::placeholder {
+    color: rgba(44, 44, 44, 0.45);
+  }
+
+  // 聚焦:不做黄色描边,只把底色提亮到与胶囊按钮同色
+  &:focus {
+    background-color: $pn-pill;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+// 下拉框:外观同胶囊输入框,右侧自绘箭头
+.pn-select {
+  @extend .pn-input;
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 34px;
+  background-image: linear-gradient(45deg, transparent 50%, #4a4a4a 50%),
+    linear-gradient(135deg, #4a4a4a 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+.pn-area {
+  width: 100%;
+  min-height: 96px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: $pn-field;
+  color: #232323;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.7;
+  outline: none;
+  resize: vertical;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.27);
+  transition: box-shadow 0.15s ease;
+
+  &::placeholder {
+    color: rgba(44, 44, 44, 0.45);
+  }
+
+  // 聚焦:不做黄色描边,只把底色提亮到与胶囊按钮同色
+  &:focus {
+    background-color: $pn-pill;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+// 提示行
+.pn-hint {
+  display: block;
+  margin-top: 4px;
+  color: rgba(232, 233, 235, 0.62);
+  font-size: 12px;
+  line-height: 1.55;
+
+  &--ok {
+    color: #9fe0a8;
+  }
+
+  &--warn {
+    color: #fcf33f;
+  }
+
+  &--keep {
+    opacity: 0.85;
+  }
+}
+
+// 行组之间的分隔(视觉呼吸,不加线)
+.pn-gap {
+  height: 2px;
+}
+
+// -----------------------------------------------------------------------------
+// 深色纹理按钮(版本弹窗 / 偏好弹窗的主动作)
+// -----------------------------------------------------------------------------
+.pn-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 112px;
+  min-height: 36px;
+  margin: 1px;
+  padding: 6px 24px;
+  border: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #2a2728;
+  color: #fefcfc;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.25;
+  cursor: pointer;
+  box-shadow: 0 0 0 0.05em #2a2728, 0 0 0 0.05em #81807f inset;
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+
+  &:hover:not(:disabled) {
+    background: #1e1c1c;
+    color: #f3f1f1;
+    box-shadow: 0 0 0 0.05em #1e1c1c, 0 0 0 0.05em #81807f inset;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &__tex {
+    position: absolute;
+    inset: 0;
+    background-image: url('../assets/materials/panel_btn_texture.webp');
+    background-repeat: no-repeat;
+    background-size: 200% auto;
+    background-position: right center;
+    pointer-events: none;
+    opacity: 0.45;
+  }
+
+  &__deco {
+    position: absolute;
+    top: -12px;
+    bottom: -12px;
+    left: 0;
+    right: 0;
+    background-image: url('../assets/materials/panel_btn_deco.webp');
+    background-repeat: no-repeat;
+    background-size: contain;
+    background-position: left center;
+    opacity: 0.3;
+    pointer-events: none;
+  }
+
+  &__label {
+    position: relative;
+    z-index: 1;
+  }
+
+  // 浅色次按钮(稍后 / 不再提示)
+  &--light {
+    background: #f2f1ef;
+    color: #4d4d4d;
+    box-shadow: 0 0 0 0.05em #f2f1ef, 0 0 0 0.05em #a0a2a3 inset;
+
+    &:hover:not(:disabled) {
+      background: #d4d3d1;
+      color: #5a5a5a;
+      box-shadow: 0 0 0 0.05em #d4d3d1, 0 0 0 0.05em #a0a2a3 inset;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 面板开合动画(遮罩淡入 + 窗口轻微缩放)
+// -----------------------------------------------------------------------------
+.pn-fade-enter-active {
+  transition: opacity 0.16s ease-out;
+
+  .pn-win {
+    animation: pn-win-in 0.18s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  }
+}
+
+.pn-fade-leave-active {
+  transition: opacity 0.2s ease-in;
+
+  .pn-win {
+    animation: pn-win-out 0.2s ease-in both;
+  }
+}
+
+.pn-fade-enter-from,
+.pn-fade-leave-to {
+  opacity: 0;
+}
+
+@keyframes pn-win-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pn-win-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+
+  to {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 移动端(≤768px):行内改为上下两段,控件占满整行
+// -----------------------------------------------------------------------------
+@media (max-width: 768px) {
+  .pn-tabs {
+    // 窄屏:页签栏铺满整行,右侧给关闭按钮留出位置
+    width: 100%;
+    height: 44px;
+    padding: 0 40px 0 4px;
+  }
+
+  .pn-tab {
+    width: 100%;
+    flex: 1 1 0;
+    height: 44px;
+    font-size: 9px;
+
+    &__icon {
+      width: 18px;
+      height: 18px;
+    }
+  }
+
+  .pn-close {
+    top: 10px;
+    right: 12px;
+  }
+
+  .pn-brand {
+    display: none;
+  }
+
+  .pn-sec {
+    padding: 0 12px;
+
+    &__head {
+      font-size: 16px;
+    }
+  }
+
+  .pn-row {
+    gap: 8px;
+    min-height: 0;
+    padding: 10px 14px;
+  }
+
+  .pn-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+
+    &__ctl {
+      flex: 0 0 auto;
+      width: 100%;
+      min-width: 0;
+      justify-content: flex-start;
+    }
+
+    &__deco .pn-row__deco-c {
+      flex-basis: 120px;
+    }
+  }
+
+  .pn-seg__btn {
+    padding: 5px 8px;
+    font-size: 12.5px;
+  }
+
+  .pn-pill {
+    padding: 5px 12px;
+    font-size: 12.5px;
+  }
+
+  .pn-body {
+    padding-bottom: 24px;
+  }
+}
+
+// 偏好减少动态:关掉窗口缩放与页签黄块过渡
+@media (prefers-reduced-motion: reduce) {
+  .pn-fade-enter-active .pn-win,
+  .pn-fade-leave-active .pn-win {
+    animation: none !important;
+  }
+
+  .pn-tab__block,
+  .pn-seg__ind {
+    transition: none !important;
+  }
+}

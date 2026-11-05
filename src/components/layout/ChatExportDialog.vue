@@ -12,6 +12,7 @@ import { useChatStore } from '../../stores/chat'
 import { MATERIALS } from '../../constants/materials'
 import { downloadDataUrl } from '../../utils/captureImage'
 import ChatExportStage from '../chat/ChatExportStage.vue'
+import VersionDialogShell from './VersionDialogShell.vue'
 import type { ChatMessage } from '../../types/chat'
 
 const props = defineProps<{
@@ -47,6 +48,15 @@ const error = computed(() => stageRef.value?.error ?? null)
 /** 预览是否按原大查看(默认等比缩小适配面板) */
 const zoomed = ref(false)
 
+/** 保存中(原生端弹出系统保存框期间,防止重复点击) */
+const saving = ref(false)
+
+/** 保存失败原因(截图生成成功但落盘失败时单独提示) */
+const saveError = ref('')
+
+/** 用户主动取消保存(不是错误,用中性提示,不能报成红字"失败") */
+const saveHint = ref('')
+
 /** 下载文件名:{对话标题}-对话截图.png(只导出选中时注明"选中") */
 function filename() {
   const suffix = isSubset.value ? '-选中消息' : '-对话截图'
@@ -63,9 +73,28 @@ const subtitle = computed(() =>
     : props.conversationTitle,
 )
 
-function onDownload() {
+async function onDownload() {
   const src = stageRef.value?.imageSrc
-  if (src) downloadDataUrl(src, filename())
+  if (!src || saving.value) return
+  saving.value = true
+  saveError.value = ''
+  saveHint.value = ''
+  try {
+    // 原生端会走系统保存框(安卓里 <a download> 点了没反应,见 utils/captureImage)
+    await downloadDataUrl(src, filename())
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '保存失败'
+    // 用户在系统保存框点"取消"不是失败：saveExportFileSmart 抛"已取消导出"，
+    // 报成红字会让用户以为导出坏了。
+    if (msg.includes('取消')) {
+      saveError.value = ''
+      saveHint.value = '已取消保存'
+    } else {
+      saveError.value = msg
+    }
+  } finally {
+    saving.value = false
+  }
 }
 
 function toggleZoom() {
@@ -78,56 +107,56 @@ watch(
   (open) => {
     if (open) {
       zoomed.value = false
+      saveError.value = ''
+      saveHint.value = ''
     }
   },
 )
 </script>
 
 <template>
-  <Transition name="ce">
-    <div v-if="open" class="ce" @click.self="emit('close')">
-      <div class="ce__panel">
-        <!-- 右上角 × 关闭按钮 -->
-        <button class="ce__close" type="button" aria-label="关闭" @click="emit('close')">×</button>
-        <h2 class="ce__title">导出聊天截图</h2>
-        <p class="ce__text">{{ subtitle }}</p>
+  <VersionDialogShell :open="open" title="导出聊天截图" kind="notice" @close="emit('close')">
+    <p class="ce__text">{{ subtitle }}</p>
 
-        <!-- 未选中对话:提示先行选中(不渲染离屏画布) -->
-        <p v-if="!hasSub" class="ce__empty-hint">请先在左侧选中一段对话，再导出聊天截图。</p>
+    <!-- 未选中对话:提示先行选中(不渲染离屏画布) -->
+    <p v-if="!hasSub" class="ce__empty-hint">请先在左侧选中一段对话，再导出聊天截图。</p>
 
-        <template v-else>
-          <!-- 预览区:点击在"等比缩小 / 原大(可滚动)"间切换 -->
-          <div
-            class="ce__preview"
-            :class="{ 'ce__preview--zoom': zoomed }"
-            @click="toggleZoom"
-          >
-            <img v-if="imageSrc" class="ce__preview-img" :src="imageSrc" alt="聊天截图预览" />
-            <p v-else class="ce__preview-placeholder">
-              {{ capturing ? '正在生成预览…' : '等待生成预览…' }}
-            </p>
-          </div>
-
-          <p v-if="error" class="ce__error">{{ error }}</p>
-
-          <div class="ce__actions">
-            <button
-              class="ce__btn ce__btn--primary"
-              type="button"
-              :disabled="!imageSrc || capturing"
-              @click="onDownload"
-            >下载 PNG</button>
-          </div>
-        </template>
-
+    <template v-else>
+      <!-- 预览区:点击在"等比缩小 / 原大(可滚动)"间切换 -->
+      <div
+        class="ce__preview"
+        :class="{ 'ce__preview--zoom': zoomed }"
+        @click="toggleZoom"
+      >
+        <img v-if="imageSrc" class="ce__preview-img" :src="imageSrc" alt="聊天截图预览" />
+        <p v-else class="ce__preview-placeholder">
+          {{ capturing ? '正在生成预览…' : '等待生成预览…' }}
+        </p>
       </div>
-    </div>
-  </Transition>
+
+      <p v-if="error" class="ce__error">{{ error }}</p>
+      <p v-if="saveError" class="ce__error">{{ saveError }}</p>
+      <p v-if="saveHint" class="ce__hint">{{ saveHint }}</p>
+    </template>
+
+    <template #actions>
+      <button
+        v-if="hasSub"
+        class="pn-btn"
+        type="button"
+        :disabled="!imageSrc || capturing || saving"
+        @click="onDownload"
+      >
+        <span class="pn-btn__tex" aria-hidden="true"></span>
+        <span class="pn-btn__deco" aria-hidden="true"></span>
+        <span class="pn-btn__label">{{ saving ? '保存中…' : '下载 PNG' }}</span>
+      </button>
+    </template>
+  </VersionDialogShell>
 
   <!-- 离屏画布:仅打开且有选中对话时挂载。
-       必须 Teleport 到 body:若放在 .ce__panel 内,dialog-shell 的
-       `> * { position: relative }` 会覆盖 stage 的 fixed 定位,
-       使离屏画布参与面板布局(高度约 1000px)把弹窗内容挤出视口。 -->
+       必须 Teleport 到 body:若留在弹窗内部,外壳上的定位规则会覆盖 stage 的
+       fixed 定位,使离屏画布参与布局(高度约 1000px)把弹窗内容挤出视口。 -->
   <Teleport to="body">
     <ChatExportStage
       v-if="open && hasSub"
@@ -140,29 +169,33 @@ watch(
 
 <style scoped lang="scss">
 @use '../../styles/variables' as *;
-@use '../../styles/mixins' as *;
 
-// 导出聊天截图弹窗:半透明遮罩 + 居中深色面板(类前缀 ce)
-@include dialog-shell(ce, 720px, 14px, 'text', true);
-
-// 弹窗专属补充:预览区 / 倍率按钮 / 空态提示
+// 导出截图弹窗:正文用进入弹窗的白底外壳,这里只补预览区与提示文字
 .ce {
-  &__empty-hint {
-    margin: 0 0 18px;
+  &__text {
+    margin: 0 0 12px;
+    color: rgba(17, 24, 39, 0.7);
     font-family: $font-harmony;
-    font-size: 15px;
-    color: $color-subcard-text;
+    font-size: 13px;
+    line-height: 1.6;
   }
 
-  // 预览容器:等比缩小适配面板(点击切原大可滚动)
+  &__empty-hint {
+    margin: 0;
+    color: #111827;
+    font-family: $font-harmony;
+    font-size: 14px;
+    line-height: 1.7;
+  }
+
+  // 预览容器:等比缩小适配弹窗(点击切原大可滚动)
   &__preview {
     position: relative;
     max-height: 420px;
-    margin: 0 0 16px;
+    margin: 0 0 12px;
     overflow: hidden;
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(17, 24, 39, 0.14);
+    background: rgba(17, 24, 39, 0.05);
     cursor: zoom-in;
     user-select: none;
     text-align: center;
@@ -189,17 +222,25 @@ watch(
 
   &__preview-placeholder {
     margin: 0;
-    padding: 120px 0;
+    padding: 110px 0;
+    color: rgba(17, 24, 39, 0.55);
     font-family: $font-harmony;
-    font-size: 15px;
-    color: $color-subcard-text;
+    font-size: 14px;
   }
 
   &__error {
-    margin: 0 0 14px;
+    margin: 0 0 10px;
+    color: #c0392b;
     font-family: $font-harmony;
-    font-size: 14px;
-    color: #ff8f8f;
+    font-size: 13px;
+  }
+
+  // 中性提示(如"已取消保存"):与错误同位置,但不使用警示色
+  &__hint {
+    margin: 0 0 10px;
+    color: rgba(17, 24, 39, 0.6);
+    font-family: $font-harmony;
+    font-size: 13px;
   }
 }
 </style>

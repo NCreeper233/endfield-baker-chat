@@ -189,7 +189,7 @@ export class ExportTimeline {
  * 点按钮即开始计时；到点无论内部在等什么，都抛出一个带上**完整时间线**的错误。
  * 这样界面必然显示"卡在哪一步、已经走完哪些步骤"，而不是无限"正在准备数据…"。
  */
-export function withForceTimeout<T>(
+function withForceTimeout<T>(
   p: Promise<T>,
   ms: number,
   tl: ExportTimeline,
@@ -207,7 +207,7 @@ export function withForceTimeout<T>(
   })
 }
 
-export function withHardTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+function withHardTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`${what} 超时（${Math.round(ms / 1000)} 秒无响应）`))
@@ -555,10 +555,17 @@ async function beginFilesystemSession(opts: {
 // 而不是当成"导出成功"糊弄过去。
 // ============================================================================
 
-/** 整串 base64 过桥的安全上限：超过它就必须分块写入 */
-export const BRIDGE_SAFE_BASE64 = 6 * 1024 * 1024
-/** 分块保存时的单块字节数（原生侧上限 4MB） */
-const SAVE_CHUNK_BYTES = 512 * 1024
+/**
+ * 整串 base64 过桥的安全上限：超过它就必须分块写入
+ *
+ * 2026-10-17：6MB → 2MB。
+ * 原因：整串 base64 会被 Capacitor 桥序列化成一个巨大的 JSON 字符串
+ * 传给 Java 层，峰值内存约为原文的 3~4 倍；鸿蒙/低端机上 6MB 就可能
+ * 直接 OOM 闪退。2MB 以内仍是一次调用，体验不变，但峰值砍掉 2/3。
+ */
+export const BRIDGE_SAFE_BASE64 = 2 * 1024 * 1024
+/** 分块保存时的单块字节数（原生侧上限 4MB；取 256KB 降低桥层峰值） */
+const SAVE_CHUNK_BYTES = 256 * 1024
 
 /** base64 → Uint8Array（WebView 内 atob 可用；非法字符直接抛错，不静默产出空数据） */
 export function base64ToBytes(b64: string): Uint8Array {
@@ -590,6 +597,18 @@ export async function saveExportFileSmart(opts: {
   // ---- 小文件：沿用原有 saveFile 通道（直接用本文件已注册的插件句柄，
   //      不 import zipExport 的 getNativeSaveFile —— 那会造成模块循环依赖）----
   if (b64.length <= BRIDGE_SAFE_BASE64) {
+    // Electron(EXE)：必须走 preload 的「另存为」对话框。
+    // 它和 Capacitor 插件是两套东西 —— 直接用 getPlugin() 在 Electron 上恒为 null，
+    // 会把 Windows 的导出变成"未找到系统保存组件"（本次修的就是这个回归）。
+    const electronSave = (window as unknown as {
+      nativeStorage?: { saveFileDialog?: (o: { fileName: string; base64: string }) =>
+        Promise<{ canceled?: boolean } | void> }
+    }).nativeStorage?.saveFileDialog
+    if (electronSave) {
+      const r = await electronSave({ fileName: opts.fileName, base64: b64 })
+      if (r && r.canceled) throw new Error('已取消导出')
+      return { via: 'legacy', bytes: estBytes }
+    }
     const plugin = (await getPlugin()) as unknown as {
       saveFile?: (o: { fileName: string; base64: string; mime?: string }) =>
         Promise<{ canceled?: boolean } | void>
@@ -895,7 +914,7 @@ export function withWatchdog(session: ChunkWriteSession, stallMs = 30_000): Chun
  * 兜底落点（应用外部/私有目录）在部分机型上文件管理器看不到，
  * 这时"分享出去"就是用户把数据拿出来的唯一办法。
  */
-export async function shareExportedFile(opts: {
+async function shareExportedFile(opts: {
   uri?: string
   path?: string
   mime?: string

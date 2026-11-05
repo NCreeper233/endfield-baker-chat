@@ -142,11 +142,11 @@ function leave(event: PointerEvent) {
       @click="onCardClick"
     >
       <div class="card__rect" />
-      <img class="card__texture" :src="MATERIALS.cardTexture" alt="" />
-      <img class="card__faint" :src="MATERIALS.cardFaint" alt="" />
+      <img class="card__texture" :src="MATERIALS.cardTexture" alt="" loading="lazy" decoding="async" />
+      <img class="card__faint" :src="MATERIALS.cardFaint" alt="" loading="lazy" decoding="async" />
       <p class="card__name">{{ character.name }}</p>
-      <img class="card__underline" :src="MATERIALS.underline" alt="" />
-      <img class="card__corner" :src="MATERIALS.cornerDeco" alt="" />
+      <img class="card__underline" :src="MATERIALS.underline" alt="" loading="lazy" decoding="async" />
+      <img class="card__corner" :src="MATERIALS.cornerDeco" alt="" loading="lazy" decoding="async" />
       <div
         class="card__avatar"
         :class="{ 'is-switchable': canSwitchAvatar }"
@@ -161,6 +161,8 @@ function leave(event: PointerEvent) {
             :class="{ 'is-original-scale': isOriginalScaleAvatar(character.name) }"
             :src="avatarUrl"
             alt=""
+            loading="lazy"
+            decoding="async"
           />
         </div>
         <!-- 消息浮标:只有还没聊过的卡才挂(有对话记录的干员不显示) -->
@@ -169,6 +171,8 @@ function leave(event: PointerEvent) {
           class="card__chat-indicator"
           :src="MATERIALS.chatBadge"
           alt=""
+          loading="lazy"
+          decoding="async"
         />
       </div>
       <!-- 折叠按钮:纯视觉(点击已由整卡接管,此处穿透到 .card)。

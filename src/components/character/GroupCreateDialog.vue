@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 // =============================================================================
 // 创建群聊弹窗(GroupCreateDialog) —— 第三版群聊
 // -----------------------------------------------------------------------------
@@ -18,6 +18,7 @@
 //   - 人数不足时创建按钮禁用,点击给出「至少选择两个角色」提示
 // =============================================================================
 import { computed, ref, watch } from 'vue'
+import VersionDialogShell from '../layout/VersionDialogShell.vue'
 import { CHARACTERS } from '../../constants/character'
 import { groupTitle, groupSelfName, GROUP_SPEAK_MODES } from '../../stores/chat'
 import type { GroupSpeakMode } from '../../types/chat'
@@ -137,158 +138,170 @@ function onCreate(): void {
 </script>
 
 <template>
-  <Transition name="gc">
-    <div v-if="props.open" class="gc" @click.self="emit('close')">
-      <div class="gc__panel">
-        <button class="gc__close" type="button" aria-label="关闭" @click="emit('close')">×</button>
-        <h2 class="gc__title">创建群聊</h2>
-        <p class="gc__stats">已选 {{ selected.length }} 人（至少 2 人成组）</p>
+  <VersionDialogShell
+    :open="props.open"
+    title="创建群聊"
+    kind="alert"
+    @close="emit('close')"
+  >
+    <p class="gc__stats">已选 {{ selected.length }} 人（至少 2 人成组）</p>
 
-        <!-- 角色列表:可勾选全部角色,不设人数上限 -->
-        <div class="gc__list">
-          <button
-            v-for="c in CHARACTERS"
-            :key="c.name"
-            class="gc__item"
-            :class="{ 'is-selected': isSelected(c.name) }"
-            type="button"
-            :aria-pressed="isSelected(c.name)"
-            @click="toggle(c.name)"
-          >
-            <span class="gc__avatar">
-              <img class="gc__avatar-img" :src="c.avatar" alt="" />
-            </span>
-            <span class="gc__name">{{ c.name }}</span>
-            <span class="gc__lock" aria-hidden="true">{{ isLockedByRole(c.name) ? '扮演中' : '' }}</span>
-            <span class="gc__check" aria-hidden="true">{{ isSelected(c.name) ? '✓' : '' }}</span>
-          </button>
-        </div>
-
-        <!-- 我的身份:默认管理员;下拉里可选旁观或扮演某个角色 -->
-        <div class="gc__role">
-          <span class="gc__role-label">我的身份</span>
-          <select
-            class="gc__role-select"
-            :value="myRole"
-            @change="onRoleChange(($event.target as HTMLSelectElement).value)"
-          >
-            <option value="admin">管理员（我）</option>
-            <option value="observer">旁观（不参与对话）</option>
-            <option disabled>──────────</option>
-            <option v-for="c in CHARACTERS" :key="c.name" :value="c.name">扮演 {{ c.name }}</option>
-          </select>
-        </div>
-
-        <!-- 聊天形式:轮流 / 智能 / 指定(与群聊设置里同一组,随时可改) -->
-        <div class="gc__mode">
-          <span class="gc__mode-label">聊天形式</span>
-          <div class="gc__modes">
-            <button
-              v-for="m in GROUP_SPEAK_MODES"
-              :key="m.key"
-              class="gc__mode-btn"
-              :class="{ 'is-active': speakMode === m.key }"
-              type="button"
-              :aria-pressed="speakMode === m.key"
-              @click="speakMode = m.key"
-            >
-              <span class="gc__mode-name">{{ m.label }}</span>
-              <span class="gc__mode-desc">{{ m.desc }}</span>
-            </button>
-          </div>
-          <p v-if="speakMode === 'assign'" class="gc__mode-tip">
-            指定谁发言请到聊天区最后一条消息下方的「指定发言」里选择
-          </p>
-        </div>
-
-        <!-- 群聊名预览:与创建后的命名规则同源,所见即所得 -->
-        <p class="gc__preview">
-          <template v-if="titlePreview">将创建：{{ titlePreview }}（我的身份：{{ myRoleLabel }}）</template>
-          <template v-else>请至少选择 2 个角色</template>
-        </p>
-
-        <!-- 提示行 -->
-        <p v-if="hint" class="gc__hint">{{ hint }}</p>
-
-        <div class="gc__actions" @click="onDisabledCreate">
-          <button
-            class="gc__btn gc__btn--primary"
-            type="button"
-            :disabled="!canCreate"
-            @click.stop="onCreate"
-          >创建群聊</button>
-          <button class="gc__btn" type="button" @click.stop="emit('close')">取消</button>
-        </div>
-      </div>
+    <!-- 角色列表:可勾选全部角色,不设人数上限 -->
+    <div class="gc__list">
+      <button
+        v-for="c in CHARACTERS"
+        :key="c.name"
+        class="gc__item"
+        :class="{ 'is-selected': isSelected(c.name) }"
+        type="button"
+        :aria-pressed="isSelected(c.name)"
+        @click="toggle(c.name)"
+      >
+        <span class="gc__avatar">
+          <img class="gc__avatar-img" :src="c.avatar" alt="" />
+        </span>
+        <span class="gc__name">{{ c.name }}</span>
+        <span class="gc__lock" aria-hidden="true">{{ isLockedByRole(c.name) ? '扮演中' : '' }}</span>
+        <span class="gc__check" aria-hidden="true">{{ isSelected(c.name) ? '✓' : '' }}</span>
+      </button>
     </div>
-  </Transition>
+
+    <!-- 我的身份:默认管理员;下拉里可选旁观或扮演某个角色 -->
+    <div class="gc__field">
+      <span class="gc__field-label">我的身份</span>
+      <select
+        class="gc__select"
+        :value="myRole"
+        @change="onRoleChange(($event.target as HTMLSelectElement).value)"
+      >
+        <option value="admin">管理员（我）</option>
+        <option value="observer">旁观（不参与对话）</option>
+        <option disabled>──────────</option>
+        <option v-for="c in CHARACTERS" :key="c.name" :value="c.name">扮演 {{ c.name }}</option>
+      </select>
+    </div>
+
+    <!-- 聊天形式:轮流 / 智能 / 指定(与群聊设置里同一组,随时可改) -->
+    <div class="gc__field">
+      <span class="gc__field-label">聊天形式</span>
+      <div class="gc__modes">
+        <button
+          v-for="m in GROUP_SPEAK_MODES"
+          :key="m.key"
+          class="gc__mode"
+          :class="{ 'is-active': speakMode === m.key }"
+          type="button"
+          :aria-pressed="speakMode === m.key"
+          @click="speakMode = m.key"
+        >
+          <span class="gc__mode-name">{{ m.label }}</span>
+          <span class="gc__mode-desc">{{ m.desc }}</span>
+        </button>
+      </div>
+      <p v-if="speakMode === 'assign'" class="gc__tip">
+        指定谁发言请到聊天区最后一条消息下方的「指定发言」里选择
+      </p>
+    </div>
+
+    <!-- 群聊名预览:与创建后的命名规则同源,所见即所得 -->
+    <p class="gc__preview">
+      <template v-if="titlePreview">将创建：{{ titlePreview }}（我的身份：{{ myRoleLabel }}）</template>
+      <template v-else>请至少选择 2 个角色</template>
+    </p>
+
+    <p v-if="hint" class="gc__hint">{{ hint }}</p>
+
+    <template #actions>
+      <button class="pn-btn pn-btn--light" type="button" @click="emit('close')">
+        <span class="pn-btn__label">取消</span>
+      </button>
+      <button class="pn-btn" type="button" :disabled="!canCreate" @click="onCreate">
+        <span class="pn-btn__tex" aria-hidden="true"></span>
+        <span class="pn-btn__deco" aria-hidden="true"></span>
+        <span class="pn-btn__label">创建群聊</span>
+      </button>
+    </template>
+  </VersionDialogShell>
 </template>
 
 <style scoped lang="scss">
 @use '../../styles/variables' as *;
-@use '../../styles/mixins' as *;
 
-// 遮罩 + 居中深色面板(与设置/数据管理/删除确认同一套外壳)
-@include dialog-shell(gc, 520px, 6px);
-
-// 聊天形式三选一:与「群聊设置」弹窗的发言模式同一份样式(含纯黄底选中态)
-@include speak-mode-options('gc__modes', 'gc__mode-btn', 'gc__mode-name', 'gc__mode-desc');
+// =============================================================================
+// 创建群聊弹窗
+// -----------------------------------------------------------------------------
+// 外观与公告 / 提醒 / 更新弹窗一致(VersionDialogShell:品牌条 + 深色标题栏 +
+// 白底正文 + 灰装饰条),所以正文里的文字与控件都按**浅色底**配色。
+// =============================================================================
 
 .gc {
   &__stats {
     margin: 0 0 10px;
+    color: #6b7280;
     font-family: $font-harmony;
     font-size: 13px;
-    color: rgba(255, 255, 255, 0.55);
   }
 
   // 角色列表:限高滚动,隐藏滚动条
   &__list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    max-height: 44vh;
+    gap: 6px;
+    max-height: 38vh;
     overflow-y: auto;
     padding-right: 4px;
-    scrollbar-width: none;
+    scrollbar-width: thin;
 
     &::-webkit-scrollbar {
-      display: none;
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      border-radius: 3px;
+      background: rgba(0, 0, 0, 0.2);
     }
   }
 
+  // 角色行:白底卡片 + 细边,选中换成黄底
   &__item {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 6px 10px;
-    border: none;
-    background: transparent;
-    color: $color-subcard-text;
+    padding: 8px 12px;
+    border: 1px solid rgba(17, 24, 39, 0.12);
+    border-radius: 4px;
+    background: #f7f7f7;
+    color: #1f2937;
     font-family: $font-harmony;
-    font-size: 15px;
+    font-size: 14px;
     text-align: left;
     cursor: pointer;
-    transition: background 0.15s ease, color 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
 
     &:hover {
-      background: $color-hover-overlay;
+      border-color: rgba(17, 24, 39, 0.28);
+      background: #efefef;
     }
 
     &.is-selected {
-      background: $color-subcard-selected;
-      color: $color-subcard-text-selected;
+      border-color: #d8cf00;
+      background: #fcf33f;
+      color: #241d00;
+
+      .gc__lock {
+        opacity: 0.7;
+      }
     }
   }
 
   &__avatar {
     flex-shrink: 0;
-    width: 36px;
-    height: 36px;
-    border-radius: 4px;
-    border: 1px solid $color-avatar-border;
+    width: 34px;
+    height: 34px;
     overflow: hidden;
-    background: $color-subcard-bg;
+    border-radius: 3px;
+    border: 1px solid rgba(17, 24, 39, 0.16);
+    background: #e6e6e6;
   }
 
   &__avatar-img {
@@ -307,94 +320,134 @@ function onCreate(): void {
     white-space: nowrap;
   }
 
-  // "扮演中"标记
   &__lock {
     flex-shrink: 0;
+    color: #8a6d00;
     font-size: 11px;
-    opacity: 0.75;
+    opacity: 0.85;
   }
 
   &__check {
     flex-shrink: 0;
     width: 18px;
-    font-size: 16px;
-    font-weight: 600;
+    color: #1f2937;
+    font-size: 15px;
+    font-weight: 700;
     text-align: center;
   }
 
-  // ---- 我的身份 ----------------------------------------------------------
-  &__role {
-    margin: 12px 0 0;
-    padding-top: 10px;
-    border-top: 1px solid rgba(134, 134, 133, 0.35);
+  // ---- 表单区 ------------------------------------------------------------
+  &__field {
+    margin: 14px 0 0;
+    padding-top: 12px;
+    border-top: 1px solid rgba(17, 24, 39, 0.1);
   }
 
-  &__role-label {
+  &__field-label {
     display: block;
     margin-bottom: 8px;
-    font-family: $font-harmony;
+    color: #4b5563;
     font-size: 13px;
-    color: rgba(255, 255, 255, 0.55);
   }
 
-  &__role-select {
+  // 下拉:浅灰底 + 细边,与白底正文协调
+  &__select {
     width: 100%;
-    padding: 8px 10px;
-    border: 1px solid $color-dialog-border;
-    background: rgba(0, 0, 0, 0.3);
-    color: $color-subcard-text;
-    font-family: $font-harmony;
-    font-size: 13px;
+    padding: 8px 12px;
+    border: 1px solid rgba(17, 24, 39, 0.18);
+    border-radius: 4px;
+    background: #f2f2f2;
+    color: #1f2937;
+    font-family: inherit;
+    font-size: 13.5px;
     cursor: pointer;
+
+    &:focus {
+      outline: none;
+      border-color: #d8cf00;
+      box-shadow: 0 0 0 2px rgba(252, 243, 63, 0.5);
+    }
   }
 
   // ---- 聊天形式 ----------------------------------------------------------
+  &__modes {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
+
   &__mode {
-    margin: 12px 0 0;
-    padding-top: 10px;
-    border-top: 1px solid rgba(134, 134, 133, 0.35);
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid rgba(17, 24, 39, 0.14);
+    border-radius: 4px;
+    background: #f7f7f7;
+    color: #374151;
+    font-family: inherit;
+    text-align: center;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+
+    &:hover {
+      border-color: rgba(17, 24, 39, 0.3);
+      background: #efefef;
+    }
+
+    &.is-active {
+      border-color: #d8cf00;
+      background: #fcf33f;
+      color: #241d00;
+    }
   }
 
-  // 三个选项的样式与「群聊设置」弹窗的发言模式**完全同源**
-  // (见 styles/_mixins 的 speak-mode-options):横排等距、选中纯黄底 + 黑字。
-  &__mode-label {
+  &__mode-name {
     display: block;
-    margin-bottom: 8px;
-    font-family: $font-harmony;
     font-size: 13px;
-    color: rgba(255, 255, 255, 0.55);
+    font-weight: 600;
   }
 
-  &__mode-tip {
+  &__mode-desc {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 1.35;
+    opacity: 0.75;
+  }
+
+  &__tip {
     margin: 8px 0 0;
-    font-family: $font-harmony;
+    color: #6b7280;
     font-size: 11px;
     line-height: 1.5;
-    color: rgba(255, 255, 255, 0.4);
   }
 
   &__preview {
-    margin: 12px 0 0;
-    font-family: $font-harmony;
+    margin: 14px 0 0;
+    color: #4b5563;
     font-size: 13px;
     line-height: 1.5;
-    color: rgba(255, 255, 255, 0.55);
     // 长群名允许换行,不撑破面板
     word-break: break-all;
   }
 
-  // 提示行(黄字,与强调色一致)
+  // 提示行(黄色强调)
   &__hint {
     margin: 8px 0 0;
-    font-family: $font-harmony;
+    color: #8a6d00;
     font-size: 13px;
-    color: $color-subcard-selected;
   }
+}
 
-  &__actions {
-    display: flex;
-    gap: 12px;
-    margin-top: 14px;
+@media (max-width: 768px) {
+  .gc {
+    &__list {
+      max-height: 34vh;
+    }
+
+    &__modes {
+      flex-direction: column;
+    }
   }
 }
 </style>

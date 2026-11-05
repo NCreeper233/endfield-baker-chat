@@ -187,6 +187,34 @@ const trend = computed(() =>
   })),
 )
 
+/**
+ * 按端点聚合的缓存命中率
+ *
+ * 不同服务商 / 中转对缓存的支持差别很大(有的直接吞掉 cached_tokens,
+ * 有的只在非流式返回)。把 recent 里"服务商确实上报过"的记录按端点分组,
+ * 就能一眼看出某个端点到底有没有在命中缓存。
+ */
+const endpointStats = computed(() => {
+  const map = new Map<string, { input: number; cached: number; calls: number }>()
+  for (const r of usageStore.recent) {
+    if (r.estimated || r.source === 'unknown') continue
+    const key = (r.endpoint || '未知端点').replace(/^https?:\/\//, '')
+    const acc = map.get(key) ?? { input: 0, cached: 0, calls: 0 }
+    acc.input += r.inputTokens
+    acc.cached += r.cachedTokens
+    acc.calls += 1
+    map.set(key, acc)
+  }
+  return [...map.entries()]
+    .map(([name, v]) => ({
+      name,
+      calls: v.calls,
+      rate: v.input > 0 ? (v.cached / v.input) * 100 : 0,
+    }))
+    .sort((a, b) => b.calls - a.calls)
+    .slice(0, 4)
+})
+
 /** 重置全部统计(不影响对话内容) */
 function onReset() {
   usageStore.resetAll()
@@ -448,6 +476,21 @@ async function onCompact() {
             :style="{ height: `${Math.max(3, t.rate)}%` }"
             :title="`${formatPercent(t.rate)}${t.estimated ? '(估算)' : ''}${t.compacted ? ' · 本轮压缩' : ''}`"
           />
+        </div>
+      </div>
+
+      <!-- 各端点命中率:判断某个中转到底有没有真的在缓存 -->
+      <div v-if="endpointStats.length" class="up__section">
+        <div class="up__label">各端点缓存命中率</div>
+        <div class="up__eps">
+          <div v-for="e in endpointStats" :key="e.name" class="up__ep">
+            <span class="up__ep-name" :title="e.name">{{ e.name }}</span>
+            <span class="up__ep-bar">
+              <span class="up__ep-fill" :style="{ width: `${Math.min(100, e.rate)}%` }" />
+            </span>
+            <span class="up__ep-rate">{{ formatPercent(e.rate) }}</span>
+            <span class="up__ep-calls">{{ e.calls }} 次</span>
+          </div>
         </div>
       </div>
 
@@ -847,6 +890,59 @@ async function onCompact() {
     &--compacted {
       background: #ffd45e;
     }
+  }
+
+  // ---- 各端点命中率 ------------------------------------------------------
+  &__eps {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  &__ep {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+  }
+
+  &__ep-name {
+    flex: 0 1 auto;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  &__ep-bar {
+    flex: 1 1 auto;
+    height: 6px;
+    min-width: 40px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  &__ep-fill {
+    display: block;
+    height: 100%;
+    background: #8fe38f;
+  }
+
+  &__ep-rate {
+    flex: 0 0 auto;
+    min-width: 42px;
+    color: $color-subcard-text;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  &__ep-calls {
+    flex: 0 0 auto;
+    min-width: 34px;
+    color: rgba(255, 255, 255, 0.4);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
   }
 
   &__foot {

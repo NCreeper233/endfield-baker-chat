@@ -7,11 +7,11 @@
 //   2. public/easteregg/moon/     —— 模型 moon_small.glb + draco 解码器
 //   3. 产品代码里两处带 ⛔ 标记的接线:
 //        · App.vue            —— 一行 import + 一行 <MoonEgg />
-//        · SettingsDialog.vue —— 关于页那个"兑换码"区块(输入框 + 绿色小字)
+//        · AnnouncementPage.vue —— 公告页「关于」里那个"兑换码"区块(输入框 + 绿色小字)
 // 删除步骤照抄同目录 README.md,不牵连任何其它文件。
 //
 // 出场条件(两个都满足才渲染):
-//   1. 在关于页输入兑换码「中秋快乐」兑换成功(状态在 redeem.ts,只在内存里,
+//   1. 在公告页「关于」里输入兑换码「中秋快乐」兑换成功(状态在 redeem.ts,只在内存里,
 //      刷新即失效 —— 刷新后月亮消失,要重新兑换);
 //   2. 开屏动画已经放完(判据是开屏遮罩 .splash-overlay 从 DOM 里消失;
 //      2.1 的 <SplashOverlay> 是自管理的,App 里没接它的 complete 事件,

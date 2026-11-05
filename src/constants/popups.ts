@@ -37,7 +37,7 @@ export const POPUP_DATA_URL = 'https://notice.peilika.beer/popup.json'
  *
  * 2026-09-28：3.0（与安卓包 versionName 3.0 对齐；正式版仍是 2.1）
  */
-export const APP_VERSION = '3.0'
+export const APP_VERSION = '3.1'
 
 /** 单条提醒 */
 export interface AlertItem {

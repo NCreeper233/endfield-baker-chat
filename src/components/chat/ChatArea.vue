@@ -21,7 +21,7 @@
 // 关键交互:`:key="chatStore.activeSub"` 强制 chat-scroll 重新挂载,
 // 触发 chat-in 入场动画(必须保留)。重挂载时所有气泡首屏无 prevRect。
 // =============================================================================
-import { computed, inject, nextTick, onMounted, ref, toRef, toValue, watch, type Ref } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, toRef, toValue, useId, watch, type Ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
 import { useBubbleMeasure } from '../../composables/useBubbleMeasure'
@@ -84,6 +84,14 @@ const exportFrameH = computed(() => injectedFrameH?.value ?? geom.value.detailH)
 
 /** 聊天框三色装饰条(品红 / 黄 / 青,样式见 .chat-frame__bar--*) */
 const CHAT_FRAME_BARS = ['magenta', 'yellow', 'cyan'] as const
+
+/**
+ * 起始页点阵的 <pattern> id
+ *
+ * 用 useId 生成实例唯一 id:导出模式会再挂一棵 ChatArea(ChatExportStage),
+ * 固定 id 会在同一文档里重复(重复 id 时 url(#…) 的解析结果不确定)。
+ */
+const dotsPatternId = useId()
 
 /**
  * 移动端头图: head_left + head_center + head_right 三片
@@ -457,15 +465,16 @@ const decoTop = computed(() => {
       class="chat-empty-dots"
       :style="pos(geom.detailX, emptyTop, geom.detailW, emptyHeight)"
     >
+      <!-- 点阵用 <pattern> 平铺:1 个可见 <rect> 代替原先的 100 个 <circle>
+           (100 个节点在起始页常驻,DOM/命中测试都白付)。viewBox 仍为 10×10、
+           圆心在 .5 格点、半径 0.08,渲染结果与逐点绘制一致。 -->
       <svg :width="geom.dotsSize" :height="geom.dotsSize" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg">
-        <circle
-          v-for="(_, i) in 100"
-          :key="i"
-          :cx="(i % 10) + 0.5"
-          :cy="Math.floor(i / 10) + 0.5"
-          r="0.08"
-          fill="rgba(255, 255, 255, 0.2)"
-        />
+        <defs>
+          <pattern :id="dotsPatternId" width="1" height="1" patternUnits="userSpaceOnUse">
+            <circle cx="0.5" cy="0.5" r="0.08" fill="rgba(255, 255, 255, 0.2)" />
+          </pattern>
+        </defs>
+        <rect width="10" height="10" :fill="`url(#${dotsPatternId})`" />
       </svg>
     </div>
     <!-- 起始页提示文字:垂直水平居中于占位图区域,两端 - 不透明,中间文字半透明 -->
@@ -501,9 +510,18 @@ const decoTop = computed(() => {
       :style="scrollStyle"
     >
       <!-- 角色名称悬浮功能已注释停用:原先的 :resolve-speaker-name / :show-character-names 属性绑定与加载气泡上方的名称 span 一并停用 -->
+      <!--
+        v-memo:依赖只写 row。
+        useChatRows 按 row.key 复用行对象,**只有渲染字段发生变化时才换新引用**,
+        所以 row 的引用相等 = 这一行的 props 全部相等,Vue 可以整行跳过 patch。
+        不能只写 [row.key, row.displayText, row.box.rectH]:几何变化(移动端键盘
+        弹出、窗口缩放)会改 left/top/showAvatar 而不改文本与高度,漏掉依赖会让
+        这一行停在旧坐标上(且 v-memo 会连子组件 props 一起跳过更新)。
+      -->
       <ChatMessageRow
         v-for="row in rows"
         :key="row.key"
+        v-memo="[row]"
         :row="row"
         :resolve-speaker-avatar="resolveSpeakerAvatar"
         :is-avatar-switchable="isAvatarSwitchable"

@@ -3,8 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <!-- viewport-fit=cover：让页面铺到刘海/圆角区域，使 env(safe-area-inset-*) 生效。
-         没有它时 env() 恒为 0，安全区适配不会起作用。 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+         没有它时 env() 恒为 0，安全区适配不会起作用。
+         interactive-widget=resizes-content：安卓 Chrome/WebView 弹键盘时让**布局视口**
+         一起收缩，配合 APK 的 android:windowSoftInputMode="adjustResize"，输入框才真正
+         落在键盘上方。刻意不写 resizes-visual：那会让布局视口保持全高，与原生
+         adjustResize 互相打架，反而表现为"键盘挡住输入框 / 整体上移"。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>//BAKER/会话消息</title>
     <link rel="icon" type="image/webp" href="/favicon-black.webp" media="(prefers-color-scheme: light)" />
     <link rel="icon" type="image/webp" href="/favicon-white.webp" media="(prefers-color-scheme: dark)" />
@@ -13,10 +17,178 @@
            在手机浏览器（尤其移动网络）上严重挤占首屏加载；
          · @font-face 已声明 `font-display: swap`（见 styles/_base.scss），
            文字会先用系统字体立即渲染，字体就绪后自动替换 —— 不阻塞阅读。
-         去掉 preload 后由 CSS 按常规优先级加载，首屏更快、也不会白屏。 -->
+         去掉 preload 后由 CSS 按常规优先级加载，首屏更快、也不会白屏。
+         main.ts 里字体也只做挂载后的后台预热，不参与 app.mount 的门槛。 -->
+    <!-- 启动骨架与启动失败页的样式内联在这里：
+         Vue 挂载前 / 启动失败时构建产物里的 CSS 还没生效，所以只用纯 CSS +
+         系统字体，不依赖 JS、@font-face 或任何网络请求。 -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #0f1419;
+      }
+
+      #app {
+        height: 100%;
+      }
+
+      /* 静态开屏骨架：数据恢复 + 字体加载期间它就是用户看到的全部。
+         app.mount('#app') 会把这一整块替换掉。 */
+      .boot-splash {
+        position: fixed;
+        /* 不用 inset 简写：这是挂载前最关键的一屏，老旧 WebView 也要能铺满 */
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        background: #0f1419;
+        color: #f7ff48;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      .boot-splash__logo {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.32em;
+        /* 字距会在最后一个字母后多留一格：用负外边距抵消，视觉才真正居中 */
+        margin-right: -0.32em;
+      }
+
+      .boot-splash__bar {
+        position: relative;
+        width: 168px;
+        height: 3px;
+        overflow: hidden;
+        background: rgba(247, 255, 72, 0.16);
+      }
+
+      .boot-splash__bar span {
+        position: absolute;
+        inset: 0;
+        background: #f7ff48;
+        transform-origin: left;
+        animation: boot-splash-progress 1.15s ease-in-out infinite;
+      }
+
+      @keyframes boot-splash-progress {
+        0% {
+          transform: translateX(-100%) scaleX(0.35);
+        }
+        55% {
+          transform: translateX(35%) scaleX(0.55);
+        }
+        100% {
+          transform: translateX(100%) scaleX(0.35);
+        }
+      }
+
+      .boot-splash__status {
+        font-size: 10px;
+        letter-spacing: 0.28em;
+        margin-right: -0.28em;
+        color: rgba(247, 255, 72, 0.55);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .boot-splash__bar span {
+          animation: none;
+          transform: scaleX(0.4);
+        }
+      }
+
+      /* 启动失败页：由 main.ts 的 renderBootError 渲染，样式必须内联，
+         否则启动链路挂了往往连 CSS 都没加载。 */
+      .boot-error {
+        position: fixed;
+        /* 同上：启动失败页可能在任意旧内核上出现，不依赖 inset 简写 */
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        box-sizing: border-box;
+        padding: 24px;
+        background: #0f1419;
+        color: #e8e8e3;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
+        text-align: center;
+      }
+
+      .boot-error__title {
+        margin: 0;
+        font-size: 20px;
+        letter-spacing: 0.08em;
+        color: #f7ff48;
+      }
+
+      .boot-error__hint {
+        margin: 0;
+        max-width: 520px;
+        font-size: 13px;
+        line-height: 1.7;
+        color: rgba(232, 232, 227, 0.72);
+      }
+
+      .boot-error__detail {
+        margin: 0;
+        width: 100%;
+        max-width: 560px;
+        max-height: 30vh;
+        overflow: auto;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border: 1px solid rgba(232, 232, 227, 0.18);
+        background: rgba(0, 0, 0, 0.25);
+        color: rgba(232, 232, 227, 0.85);
+        font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+        text-align: left;
+      }
+
+      .boot-error__retry {
+        margin-top: 4px;
+        padding: 8px 22px;
+        border: 1px solid #f7ff48;
+        background: transparent;
+        color: #f7ff48;
+        font: inherit;
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        cursor: pointer;
+        /* 去掉浏览器默认按钮外观（圆角/内阴影），深色下才不突兀 */
+        appearance: none;
+        -webkit-appearance: none;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <!-- 纯 HTML/CSS 开屏骨架：不依赖 JS 与 @font-face。
+           以前 #app 在 mount 前是空的，等待数据恢复/字体下载时就是纯黑屏，
+           和"卡死"无法区分；现在至少有一个明确的加载状态。 -->
+      <div class="boot-splash" role="status" aria-live="polite" aria-label="正在启动">
+        <div class="boot-splash__logo">//BAKER/</div>
+        <div class="boot-splash__bar"><span></span></div>
+        <div class="boot-splash__status">INITIALIZING</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 // =============================================================================
 // 群聊设置弹窗(GroupSettingsDialog) —— 第三版群聊
 // -----------------------------------------------------------------------------
@@ -16,6 +16,7 @@
 //         自动序列化到本地 JSON(web 端 IndexedDB / 打包端原生文件)。
 // =============================================================================
 import { computed, ref, watch } from 'vue'
+import VersionDialogShell from '../layout/VersionDialogShell.vue'
 import { CHARACTERS, findCharacter, DEFAULT_AVATAR_URL } from '../../constants/character'
 import {
   useChatStore,
@@ -152,216 +153,201 @@ function onClose(): void {
 </script>
 
 <template>
-  <Transition name="gs">
-    <div v-if="props.open" class="gs" @click.self="onClose">
-      <div class="gs__panel">
-        <button class="gs__close" type="button" aria-label="关闭" @click="onClose">×</button>
-        <h2 class="gs__title">群聊设置</h2>
+  <VersionDialogShell
+    :open="props.open"
+    title="群聊设置"
+    kind="alert"
+    @close="onClose"
+  >
+    <!-- 群聊不存在(被删除 / 下标失效)时的兜底 -->
+    <p v-if="!info" class="gs__empty">该群聊已不存在</p>
 
-        <!-- 群聊不存在(被删除 / 下标失效)时的兜底 -->
-        <p v-if="!info" class="gs__empty">该群聊已不存在</p>
+    <template v-else>
+      <!-- ═══ 1. 群聊名称 ═══ -->
+      <section class="gs__field">
+        <label class="gs__label" for="gs-name">群聊名称</label>
+        <input
+          id="gs-name"
+          v-model="nameDraft"
+          class="gs__input"
+          type="text"
+          maxlength="40"
+          placeholder="输入群聊名称"
+          @blur="commitName"
+          @keydown.enter.prevent="commitName"
+        />
+        <p class="gs__tip">留空则自动按成员生成</p>
+      </section>
 
-        <template v-else>
-          <!-- ═══ 1. 群聊名称 ═══ -->
-          <section class="gs__field">
-            <label class="gs__label" for="gs-name">群聊名称</label>
-            <input
-              id="gs-name"
-              v-model="nameDraft"
-              class="gs__input"
-              type="text"
-              maxlength="40"
-              placeholder="输入群聊名称"
-              @blur="commitName"
-              @keydown.enter.prevent="commitName"
-            />
-            <p class="gs__hint-text">留空则自动按成员生成</p>
-          </section>
+      <!-- ═══ 2. 群聊成员 ═══ -->
+      <section class="gs__field">
+        <span class="gs__label">群聊成员</span>
 
-          <!-- ═══ 2. 群聊成员 ═══ -->
-          <section class="gs__field">
-            <span class="gs__label">群聊成员</span>
-
-            <!-- 成员列表:头像 + 名字,右侧「×」移除 -->
-            <div class="gs__members">
-              <div v-for="m in members" :key="m" class="gs__member">
-                <span class="gs__member-avatar">
-                  <img :src="avatarOf(m)" :alt="m" />
-                </span>
-                <span class="gs__member-name">{{ m }}</span>
-                <span v-if="isLocked(m)" class="gs__member-lock">扮演中</span>
-                <button
-                  v-else
-                  class="gs__member-del"
-                  type="button"
-                  :disabled="!canRemove"
-                  :aria-label="`移除 ${m}`"
-                  @click="removeMember(m)"
-                >×</button>
-              </div>
-
-              <!-- 添加成员入口 -->
-              <button
-                class="gs__add"
-                type="button"
-                :class="{ 'is-open': pickerOpen }"
-                @click="togglePicker"
-              >
-                <span class="gs__add-icon" aria-hidden="true">＋</span>
-                <span>添加成员</span>
-              </button>
-            </div>
-
-            <!-- 角色挑选列表 -->
-            <div v-if="pickerOpen" class="gs__picker">
-              <p v-if="candidates.length === 0" class="gs__picker-empty">所有角色都已在群聊中</p>
-              <button
-                v-for="c in candidates"
-                :key="c.name"
-                class="gs__picker-item"
-                type="button"
-                @click="addMember(c.name)"
-              >
-                <span class="gs__picker-avatar">
-                  <img :src="c.avatar" alt="" />
-                </span>
-                <span class="gs__picker-name">{{ c.name }}</span>
-                <span class="gs__picker-plus" aria-hidden="true">＋</span>
-              </button>
-            </div>
-          </section>
-
-          <!-- ═══ 3. 发言模式 ═══ -->
-          <section class="gs__field">
-            <span class="gs__label">发言模式</span>
-            <div class="gs__modes">
-              <button
-                v-for="m in GROUP_SPEAK_MODES"
-                :key="m.key"
-                class="gs__mode"
-                :class="{ 'is-active': speakMode === m.key }"
-                type="button"
-                :aria-pressed="speakMode === m.key"
-                @click="setSpeakMode(m.key)"
-              >
-                <span class="gs__mode-label">{{ m.label }}</span>
-                <span class="gs__mode-desc">{{ m.desc }}</span>
-              </button>
-            </div>
-
-            <!-- 指定模式下"指定谁发言"的入口不在这里:
-                 它和旁观模式的「开启/暂停对话」统一放在聊天区最后一条消息
-                 下方的小方框里(见 components/chat/GroupFlowControl.vue),
-                 跟随消息滚动、点一下就改。 -->
-            <p v-if="speakMode === 'assign'" class="gs__hint-text">
-              指定谁发言请到聊天区最后一条消息下方的「指定发言」里选择
-            </p>
-          </section>
-
-          <!-- ═══ 4. 我的身份(只读) ═══ -->
-          <section class="gs__field">
-            <span class="gs__label">我的身份</span>
-            <p class="gs__readonly">{{ info.myRoleLabel }}</p>
-          </section>
-
-          <!-- 操作提示 -->
-          <p v-if="hint" class="gs__hint">{{ hint }}</p>
-
-          <!-- ═══ 5. 删除群聊 ═══
-               已移除:删除入口收敛到角色列表上方操作带的那个删除按钮
-               (DeleteConfirmDialog 在群聊模式下会显示「删除群聊」),
-               这里不再放第二个入口。 -->
-
-          <div class="gs__actions">
-            <button class="gs__btn gs__btn--primary" type="button" @click="onClose">完成</button>
+        <!-- 成员列表:头像 + 名字,右侧「×」移除 -->
+        <div class="gs__members">
+          <div v-for="m in members" :key="m" class="gs__member">
+            <span class="gs__member-avatar">
+              <img :src="avatarOf(m)" :alt="m" />
+            </span>
+            <span class="gs__member-name">{{ m }}</span>
+            <span v-if="isLocked(m)" class="gs__member-lock">扮演中</span>
+            <button
+              v-else
+              class="gs__member-del"
+              type="button"
+              :disabled="!canRemove"
+              :aria-label="`移除 ${m}`"
+              @click="removeMember(m)"
+            >×</button>
           </div>
-        </template>
-      </div>
-    </div>
-  </Transition>
+
+          <!-- 添加成员入口 -->
+          <button
+            class="gs__add"
+            type="button"
+            :class="{ 'is-open': pickerOpen }"
+            @click="togglePicker"
+          >
+            <span class="gs__add-icon" aria-hidden="true">＋</span>
+            <span>添加成员</span>
+          </button>
+        </div>
+
+        <!-- 角色挑选列表 -->
+        <div v-if="pickerOpen" class="gs__picker">
+          <p v-if="candidates.length === 0" class="gs__picker-empty">所有角色都已在群聊中</p>
+          <button
+            v-for="c in candidates"
+            :key="c.name"
+            class="gs__picker-item"
+            type="button"
+            @click="addMember(c.name)"
+          >
+            <span class="gs__picker-avatar">
+              <img :src="c.avatar" alt="" />
+            </span>
+            <span class="gs__picker-name">{{ c.name }}</span>
+            <span class="gs__picker-plus" aria-hidden="true">＋</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- ═══ 3. 发言模式 ═══ -->
+      <section class="gs__field">
+        <span class="gs__label">发言模式</span>
+        <div class="gs__modes">
+          <button
+            v-for="m in GROUP_SPEAK_MODES"
+            :key="m.key"
+            class="gs__mode"
+            :class="{ 'is-active': speakMode === m.key }"
+            type="button"
+            :aria-pressed="speakMode === m.key"
+            @click="setSpeakMode(m.key)"
+          >
+            <span class="gs__mode-name">{{ m.label }}</span>
+            <span class="gs__mode-desc">{{ m.desc }}</span>
+          </button>
+        </div>
+
+        <p v-if="speakMode === 'assign'" class="gs__tip">
+          指定谁发言请到聊天区最后一条消息下方的「指定发言」里选择
+        </p>
+      </section>
+
+      <!-- ═══ 4. 我的身份(只读) ═══ -->
+      <section class="gs__field">
+        <span class="gs__label">我的身份</span>
+        <p class="gs__readonly">{{ info.myRoleLabel }}</p>
+      </section>
+
+      <p v-if="hint" class="gs__hint">{{ hint }}</p>
+    </template>
+
+    <template #actions>
+      <button class="pn-btn" type="button" @click="onClose">
+        <span class="pn-btn__tex" aria-hidden="true"></span>
+        <span class="pn-btn__deco" aria-hidden="true"></span>
+        <span class="pn-btn__label">完成</span>
+      </button>
+    </template>
+  </VersionDialogShell>
 </template>
 
 <style scoped lang="scss">
 @use '../../styles/variables' as *;
-@use '../../styles/mixins' as *;
 
-// 遮罩 + 居中深色面板(与创建群聊/设置/数据管理同一套外壳)
-@include dialog-shell(gs, 560px, 6px);
-
-// 发言模式按钮组:与「创建群聊」弹窗同一份样式(含选中态),只是类名不同
-@include speak-mode-options('gs__modes', 'gs__mode', 'gs__mode-label', 'gs__mode-desc');
+// =============================================================================
+// 群聊设置弹窗
+// -----------------------------------------------------------------------------
+// 与创建群聊 / 公告 / 提醒 / 更新弹窗同一副外壳(VersionDialogShell),
+// 正文是白底,所以文字与控件统一按浅色底配色。
+// =============================================================================
 
 .gs {
   &__empty {
-    margin: 12px 0 0;
+    margin: 4px 0 0;
+    color: #6b7280;
     font-family: $font-harmony;
     font-size: 14px;
-    color: rgba(255, 255, 255, 0.55);
-  }
-
-  // 面板限高滚动:五块内容在窄屏 / 移动端也能完整查看
-  &__panel {
-    max-height: calc(100vh - 48px);
-    overflow-y: auto;
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar {
-      display: none;
-    }
   }
 
   // ---- 通用字段 ----------------------------------------------------------
   &__field {
-    margin-top: 16px;
-    padding-top: 14px;
-    border-top: 1px solid rgba(134, 134, 133, 0.35);
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(17, 24, 39, 0.1);
 
-    &--danger {
-      margin-top: 18px;
+    &:first-child {
+      margin-top: 0;
+      padding-top: 0;
+      border-top: 0;
     }
   }
 
   &__label {
     display: block;
     margin-bottom: 8px;
+    color: #4b5563;
     font-family: $font-harmony;
     font-size: 13px;
-    color: rgba(255, 255, 255, 0.55);
   }
 
-  &__hint-text {
+  &__tip {
     margin: 6px 0 0;
+    color: #9ca3af;
     font-family: $font-harmony;
     font-size: 12px;
-    color: rgba(255, 255, 255, 0.35);
+    line-height: 1.5;
   }
 
   &__hint {
     margin: 12px 0 0;
+    color: #8a6d00;
     font-family: $font-harmony;
     font-size: 13px;
-    color: $color-subcard-selected;
   }
 
   // ---- 1. 群聊名称 -------------------------------------------------------
   &__input {
     width: 100%;
     padding: 9px 12px;
-    border: 1px solid $color-dialog-border;
-    border-radius: 0;
-    background: rgba(0, 0, 0, 0.3);
-    color: $color-subcard-text;
+    border: 1px solid rgba(17, 24, 39, 0.18);
+    border-radius: 4px;
+    background: #f2f2f2;
+    color: #1f2937;
     font-family: $font-harmony;
     font-size: 14px;
     box-sizing: border-box;
 
     &::placeholder {
-      color: rgba(255, 255, 255, 0.3);
+      color: #9ca3af;
     }
 
     &:focus {
       outline: none;
-      border-color: $color-subcard-selected;
+      border-color: #d8cf00;
+      box-shadow: 0 0 0 2px rgba(252, 243, 63, 0.5);
     }
   }
 
@@ -369,25 +355,27 @@ function onClose(): void {
   &__members {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 6px;
   }
 
   &__member {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 4px 8px 4px 4px;
-    background: rgba(255, 255, 255, 0.04);
+    padding: 6px 10px;
+    border: 1px solid rgba(17, 24, 39, 0.12);
+    border-radius: 4px;
+    background: #f7f7f7;
   }
 
   &__member-avatar {
     flex-shrink: 0;
-    width: 34px;
-    height: 34px;
-    border: 1px solid $color-avatar-border;
-    border-radius: 50%;
+    width: 32px;
+    height: 32px;
     overflow: hidden;
-    background: $color-subcard-bg;
+    border: 1px solid rgba(17, 24, 39, 0.16);
+    border-radius: 50%;
+    background: #e6e6e6;
 
     img {
       width: 100%;
@@ -404,37 +392,37 @@ function onClose(): void {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: #1f2937;
     font-family: $font-harmony;
     font-size: 14px;
-    color: $color-subcard-text;
   }
 
   // "扮演中"标记(该成员不可移除)
   &__member-lock {
     flex-shrink: 0;
+    color: #8a6d00;
     font-family: $font-harmony;
     font-size: 11px;
-    color: $color-subcard-selected;
-    opacity: 0.85;
+    opacity: 0.9;
   }
 
   &__member-del {
     flex-shrink: 0;
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     padding: 0;
     border: none;
     border-radius: 3px;
     background: transparent;
-    color: rgba(255, 255, 255, 0.45);
+    color: #6b7280;
     font-size: 16px;
     line-height: 1;
     cursor: pointer;
     transition: background 0.15s ease, color 0.15s ease;
 
     &:hover:not(:disabled) {
-      background: rgba(255, 255, 255, 0.12);
-      color: $color-text-primary;
+      background: rgba(17, 24, 39, 0.08);
+      color: #111827;
     }
 
     &:disabled {
@@ -448,20 +436,21 @@ function onClose(): void {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-top: 4px;
-    padding: 6px 8px;
-    border: 1px dashed rgba(134, 134, 133, 0.55);
+    padding: 7px 10px;
+    border: 1px dashed rgba(17, 24, 39, 0.28);
+    border-radius: 4px;
     background: transparent;
-    color: rgba(255, 255, 255, 0.55);
+    color: #4b5563;
     font-family: $font-harmony;
     font-size: 14px;
     cursor: pointer;
-    transition: border-color 0.15s ease, color 0.15s ease;
+    transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
 
     &:hover,
     &.is-open {
-      border-color: $color-subcard-selected;
-      color: $color-subcard-selected;
+      border-color: #d8cf00;
+      background: rgba(252, 243, 63, 0.18);
+      color: #6b5800;
     }
   }
 
@@ -475,20 +464,18 @@ function onClose(): void {
     margin-top: 6px;
     max-height: 200px;
     overflow-y: auto;
-    border: 1px solid rgba(134, 134, 133, 0.35);
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar {
-      display: none;
-    }
+    border: 1px solid rgba(17, 24, 39, 0.14);
+    border-radius: 4px;
+    background: #fff;
+    scrollbar-width: thin;
   }
 
   &__picker-empty {
     margin: 0;
     padding: 10px 12px;
+    color: #9ca3af;
     font-family: $font-harmony;
     font-size: 13px;
-    color: rgba(255, 255, 255, 0.4);
   }
 
   &__picker-item {
@@ -496,10 +483,10 @@ function onClose(): void {
     align-items: center;
     gap: 10px;
     width: 100%;
-    padding: 5px 10px;
+    padding: 6px 10px;
     border: none;
     background: transparent;
-    color: $color-subcard-text;
+    color: #1f2937;
     font-family: $font-harmony;
     font-size: 14px;
     text-align: left;
@@ -507,17 +494,17 @@ function onClose(): void {
     transition: background 0.15s ease;
 
     &:hover {
-      background: $color-hover-overlay;
+      background: rgba(252, 243, 63, 0.22);
     }
   }
 
   &__picker-avatar {
     flex-shrink: 0;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
+    width: 26px;
+    height: 26px;
     overflow: hidden;
-    background: $color-subcard-bg;
+    border-radius: 50%;
+    background: #e6e6e6;
 
     img {
       width: 100%;
@@ -537,65 +524,68 @@ function onClose(): void {
 
   &__picker-plus {
     flex-shrink: 0;
-    color: rgba(255, 255, 255, 0.45);
+    color: #9ca3af;
   }
 
   // ---- 3. 发言模式 -------------------------------------------------------
-  // 按钮组样式与「创建群聊」弹窗共用(见 styles/_mixins 的 speak-mode-options)
-  // 传的是本组件的类名,所以两边外观必然一致,不会各改各的。
+  &__modes {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  &__mode {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid rgba(17, 24, 39, 0.14);
+    border-radius: 4px;
+    background: #f7f7f7;
+    color: #374151;
+    font-family: inherit;
+    text-align: center;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+
+    &:hover {
+      border-color: rgba(17, 24, 39, 0.3);
+      background: #efefef;
+    }
+
+    &.is-active {
+      border-color: #d8cf00;
+      background: #fcf33f;
+      color: #241d00;
+    }
+  }
+
+  &__mode-name {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  &__mode-desc {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 1.35;
+    opacity: 0.75;
+  }
 
   // ---- 4. 我的身份(只读) ------------------------------------------------
   &__readonly {
     margin: 0;
+    color: #1f2937;
     font-family: $font-harmony;
     font-size: 14px;
-    color: $color-subcard-text;
   }
+}
 
-  // ---- 5. 删除群聊 -------------------------------------------------------
-  // 样式随删除入口一并移除(见模板注释):删除改由操作带的删除按钮承担。
-
-  // ---- 底部动作 ----------------------------------------------------------
-  &__actions {
-    display: flex;
-    justify-content: flex-end;
-    margin-top: 18px;
-  }
-
-  &__btn {
-    padding: 8px 22px;
-    border: 1px solid $color-dialog-border;
-    background: transparent;
-    color: $color-subcard-text;
-    font-family: $font-harmony;
-    font-size: 14px;
-    cursor: pointer;
-    transition: background 0.15s ease;
-
-    &:hover {
-      background: $color-hover-overlay;
-    }
-
-    &--primary {
-      border-color: $color-subcard-selected;
-      background: $color-subcard-selected;
-      color: $color-subcard-text-selected;
-
-      &:hover {
-        filter: brightness(0.92);
-        background: $color-subcard-selected;
-      }
-    }
-
-    &--danger {
-      border-color: #d75a5a;
-      background: #d75a5a;
-      color: #fff;
-
-      &:hover {
-        filter: brightness(0.92);
-        background: #d75a5a;
-      }
+@media (max-width: 768px) {
+  .gs {
+    &__modes {
+      flex-direction: column;
     }
   }
 }

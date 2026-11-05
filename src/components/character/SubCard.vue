@@ -111,17 +111,17 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
     <div class="subcard__rect" />
     <!-- 删除模式:被勾选的对话在左缘挂一条悬浮黄条 -->
     <span v-if="isDeleteSelected" class="subcard__del-bar" />
-    <img class="subcard__texture" :src="MATERIALS.cardTexture" alt="" />
-    <img class="subcard__faint" :src="MATERIALS.subFaint" alt="" />
+    <img class="subcard__texture" :src="MATERIALS.cardTexture" alt="" loading="lazy" decoding="async" />
+    <img class="subcard__faint" :src="MATERIALS.subFaint" alt="" loading="lazy" decoding="async" />
     <div class="subcard__icon-box" />
-    <img class="subcard__arrow" :src="MATERIALS.subArrow" alt="" />
-    <img class="subcard__arrow subcard__arrow--second" :src="MATERIALS.subArrow" alt="" />
-    <img class="subcard__icon" :src="badgeIcon" alt="" />
+    <img class="subcard__arrow" :src="MATERIALS.subArrow" alt="" loading="lazy" decoding="async" />
+    <img class="subcard__arrow subcard__arrow--second" :src="MATERIALS.subArrow" alt="" loading="lazy" decoding="async" />
+    <img class="subcard__icon" :src="badgeIcon" alt="" loading="lazy" decoding="async" />
     <p class="subcard__text" v-html="previewHtml"></p>
     <!-- 小方块装饰:原 deco_sns_tweet_decorate_06.webp 只是 21×21 画布左上角
          4×4 的一小块,已弃用素材,改为直接绘制(见样式里的 &__deco-badge) -->
     <span class="subcard__deco-badge" />
-    <img class="subcard__deco-wing" :src="MATERIALS.decoWing" alt="" />
+    <img class="subcard__deco-wing" :src="MATERIALS.decoWing" alt="" loading="lazy" decoding="async" />
     <div class="subcard__line" />
   </div>
 </template>

@@ -17,6 +17,7 @@ import {
   isCards,
   sanitizeCards,
   PROJECT_VERSION,
+  restoreCardsLoose,
 } from '../utils/zipExport'
 import { getNativeFileBridge, createNativeStore } from '../utils/nativeStorage'
 import type { Card } from '../types/chat'
@@ -61,8 +62,9 @@ const flushReady = new Set<() => void>()
  * 立即冲刷所有挂起的防抖写库。
  * 页面隐退与导入/清空后调用,把防抖窗口内的编辑即刻落盘。
  */
-export function flushPendingWrites(): void {
-  for (const flush of [...flushReady]) flush()
+export async function flushPendingWrites(): Promise<void> {
+  // 【2026-10-04】可等待：Electron 关窗前必须等真实落盘，否则窗口销毁时在途写入一起消失。
+  await Promise.all([...flushReady].map((f) => Promise.resolve(f())))
 }
 
 /** 是否已安装页面隐退监听(单例) */
@@ -190,8 +192,14 @@ export function useChatPersistence(
   store: ReturnType<typeof useChatStore>,
   settingsStore: ReturnType<typeof useSettingsStore>,
 ) {
-  /** 载入时实际恢复出来的卡片数(用于"空覆盖"护栏) */
+  /** 载入时实际恢复出来的卡片数 */
   let loadedCardCount = 0
+  /**
+   * 载入状态（决定能否写库）
+   * unknown = 还没载入完 / 载入过程抛错（**禁止写**，防空库覆盖）
+   * ok      = 成功恢复出数据 · empty = 确实没有记录（首次使用）· invalid = 结构异常（只读保护）
+   */
+  let loadState: 'unknown' | 'ok' | 'empty' | 'invalid' = 'unknown'
 
   /**
    * 防抖写库器:schedule(延迟写) + flush(立即写)
@@ -200,7 +208,7 @@ export function useChatPersistence(
   const debounceWrite = (key: string, get: () => unknown) => {
     let timer: number | undefined
 
-    const doWrite = async () => {
+    const doWrite = async (): Promise<void> => {
       try {
         const snapshot = get()
         // 数据层护栏:get() 返回 {__skipWrite:true} 时本次不写(见 scheduleCards)
@@ -224,13 +232,13 @@ export function useChatPersistence(
       }, SAVE_DEBOUNCE_MS)
     }
 
-    const flush = () => {
-      if (blockWrites) return
+    const flush = (): Promise<void> => {
+      if (blockWrites) return Promise.resolve()
       if (timer !== undefined) {
         window.clearTimeout(timer)
         timer = undefined
       }
-      void doWrite()
+      return doWrite()
     }
 
     flushReady.add(flush)
@@ -242,11 +250,11 @@ export function useChatPersistence(
   // 卡片写库:错误消息(请求失败占位气泡)只显示、绝不持久化——写库前剥离 isError 消息
   const scheduleCards = debounceWrite(KEY_CARDS, () => {
     const cards = store.cards
-    // 【2026-10-04 护栏】载入时本来有卡、现在却空了 → 一定是加载没完成/异常,
-    // 绝不能把空列表写回去(那等于删档)。宁可这次不保存,等下次真实变化再写。
-    if (cards.length === 0 && loadedCardCount > 0) {
-      devWarn(`[persist] 跳过写库:内存里 0 张卡,但载入时有 ${loadedCardCount} 张` +
-              '(疑似启动未完成,拒绝空覆盖)')
+    // 【2026-10-04 护栏·重做】原判据 `cards.length === 0` 永远不成立
+    // （cards 恒含内置角色），等于没护栏。真正的危险是"载入失败 → 只剩空内置卡"，
+    // 所以改用载入状态：只有确实"恢复了数据"或"确实没有记录"时才允许写。
+    if (loadState === 'unknown' || loadState === 'invalid') {
+      devWarn(`[persist] 跳过写库:载入状态=${loadState}(未成功恢复/结构异常),拒绝覆盖`)
       return { __skipWrite: true }
     }
     return cards.map((c) => ({
@@ -309,16 +317,17 @@ export function useChatPersistence(
    */
   async function loadProject(): Promise<void> {
     try {
-      const [cardsRaw, versionRaw, myGenderRaw, stripVariantRaw, settingsRaw, usageRaw, cardActivityRaw] =
-        await Promise.all([
-          getRecordUnified(KEY_CARDS),
-          getRecordUnified(KEY_VERSION),
-          getRecordUnified(KEY_MY_GENDER),
-          getRecordUnified(KEY_STRIP_VARIANT),
-          getRecordUnified(KEY_SETTINGS),
-          getRecordUnified(KEY_USAGE),
-          getRecordUnified(KEY_CARD_ACTIVITY),
-        ])
+      // 【2026-10-04 数据安全】改成**串行**读取。
+      // 以前 Promise.all 并发 7 个读取：原生端 loadCache 未命中缓存时每个都整文件读一次
+      // → 30MB 库并发读 7 次 → 低端机 OOM → 异常被吞成 null → 被判成"没有数据"
+      // → 随后整库被覆盖。串行只真读一次，其余命中缓存。
+      const cardsRaw = await getRecordUnified(KEY_CARDS)
+      const versionRaw = await getRecordUnified(KEY_VERSION)
+      const myGenderRaw = await getRecordUnified(KEY_MY_GENDER)
+      const stripVariantRaw = await getRecordUnified(KEY_STRIP_VARIANT)
+      const settingsRaw = await getRecordUnified(KEY_SETTINGS)
+      const usageRaw = await getRecordUnified(KEY_USAGE)
+      const cardActivityRaw = await getRecordUnified(KEY_CARD_ACTIVITY)
       // v6: 恢复设置快照(api配置/提示词覆盖/开关等),缺失时跳过
       if (settingsRaw && typeof settingsRaw === 'object') {
         settingsStore.applySettingsSnapshot(settingsRaw as Record<string, unknown>)
@@ -345,10 +354,23 @@ export function useChatPersistence(
       if (typeof stripVariantRaw === 'number') {
         store.setStripVariant(stripVariantRaw)
       }
-      if (isCards(cardsRaw)) {
-        const restored = sanitizeCards(cardsRaw as Card[])
-        store.replaceAllCards(restored)
-        loadedCardCount = restored.length
+      // 【2026-10-04 数据安全】逐卡恢复：以前 isCards 是"全有或全无"，
+      // 一条坏消息就会让整库不被恢复（随后被空库覆盖 = 数据全丢）。
+      if (Array.isArray(cardsRaw) && cardsRaw.length > 0) {
+        const { cards: restored, dropped } = restoreCardsLoose(cardsRaw)
+        if (restored.length > 0) {
+          store.replaceAllCards(restored)
+          loadedCardCount = restored.length
+          loadState = 'ok'
+        }
+        if (dropped > 0) {
+          devWarn(`[persist] 恢复时跳过 ${dropped} 条无法解析的卡片数据（其余已恢复）`)
+        }
+      } else if (cardsRaw === undefined || cardsRaw === null) {
+        loadState = 'empty'      // 确实没有记录（首次使用）
+      } else {
+        loadState = 'invalid'    // 有记录但结构完全不对 → 只读保护
+        devWarn('[persist] 卡片数据结构异常，已进入只读保护（不会覆盖）')
       }
       // 列表排序记录必须**在卡片树装好之后**恢复:replaceAllCards 会清空它
       // (换数据集时旧的活跃记录没有意义),这里再把落盘的那份盖回去。

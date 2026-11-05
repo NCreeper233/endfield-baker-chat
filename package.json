@@ -1,7 +1,7 @@
 {
   "name": "vue-chat-ui",
   "private": true,
-  "version": "0.0.0",
+  "version": "3.1.0",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -18,7 +18,6 @@
     "cannon-es": "^0.20.0",
     "html-to-image": "^1.11.13",
     "jszip": "^3.10.1",
-    "lz-string": "^1.5.0",
     "pinia": "^3.0.3",
     "three": "^0.160.1",
     "vue": "^3.5.17"

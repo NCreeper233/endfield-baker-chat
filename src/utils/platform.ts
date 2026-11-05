@@ -82,7 +82,7 @@ export function isAndroid(): boolean {
   return getPlatform() === 'android'
 }
 
-export function isIOS(): boolean {
+function isIOS(): boolean {
   return getPlatform() === 'ios'
 }
 
@@ -96,7 +96,7 @@ export function isElectron(): boolean {
  * 注意：网页版**可能跑在手机浏览器上**（Android Chrome / iOS Safari），
  * 所以这里只表示"没有原生壳"，不代表是桌面浏览器。
  */
-export function isWeb(): boolean {
+function isWeb(): boolean {
   return getPlatform() === 'web'
 }
 
@@ -105,7 +105,7 @@ export function isWeb(): boolean {
  *
  * 与平台解耦：手机浏览器也是触屏，桌面浏览器也可能窄窗口。
  */
-export function isTouchLike(): boolean {
+function isTouchLike(): boolean {
   try {
     return typeof window !== 'undefined'
       && (('ontouchstart' in window) || (navigator?.maxTouchPoints ?? 0) > 0)

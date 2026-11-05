@@ -9,8 +9,8 @@
 import { ref, computed, inject, provide, toValue, watch, onMounted, onBeforeUnmount } from 'vue'
 import type { ChatMessage, GroupSpeakMode } from './types/chat'
 import AppBackground from './components/layout/AppBackground.vue'
+import AppHeader from './components/layout/AppHeader.vue'
 import DesignCanvas from './components/layout/DesignCanvas.vue'
-import HeaderTop from './components/header/HeaderTop.vue'
 import CharacterCardList from './components/character/CharacterCardList.vue'
 import ChatArea from './components/chat/ChatArea.vue'
 import DeleteModeBar from './components/character/DeleteModeBar.vue'
@@ -26,13 +26,15 @@ import AlertDialog from './components/layout/AlertDialog.vue'
 import NoticeDialog from './components/layout/NoticeDialog.vue'
 import StylePreferenceDialog from './components/layout/StylePreferenceDialog.vue'
 import UpdateDialog from './components/layout/UpdateDialog.vue'
+import VersionDialogShell from './components/layout/VersionDialogShell.vue'
+import AnnouncementPage from './components/layout/AnnouncementPage.vue'
 import SplashOverlay from './components/splash/SplashOverlay.vue'
 // ⛔ 临时彩蛋(可删):月亮物理玩具 —— 开屏动画放完后整屏出场。
 //    删法见 src/easteregg/moon/README.md(本行与下方模板里的 <MoonEgg /> 一起删)。
 import MoonEgg from './easteregg/moon/MoonEgg.vue'
 import { useChatStore } from './stores/chat'
 import { useSettingsStore } from './stores/settings'
-import { useMobile } from './composables/useMobile'
+import { useMobile, hasEditableFocus } from './composables/useMobile'
 import {
   chatGeometryKey,
   globalChatGeometry,
@@ -46,6 +48,7 @@ import { flushPendingWrites } from './composables/useChatPersistence'
 import { isLegacyDemoGroupShell } from './utils/groupMeta'
 import { deleteBarH } from './composables/useDeleteBar'
 import { devInfo, devWarn } from './utils/logger'
+import { getPlatform } from './utils/platform'
 const chatStore = useChatStore()
 const settingsStore = useSettingsStore()
 
@@ -158,8 +161,14 @@ const stylePrefAsked = ref(readStylePrefAsked())
  */
 const stylePrefSnoozed = ref(false)
 
-/** 开屏动画是否播完 —— 播完之前不弹,否则会被全屏遮罩盖住 2~3 秒 */
-const splashDone = ref(false)
+/**
+ * 开屏遮罩是否已**完全退场**
+ *
+ * 入场弹窗(公告 / 提醒 / 更新)与首次使用偏好都等这个信号。
+ * 进度到 100% 之后还有扫屏 + 淡出约 0.8 秒,只等"进度满"的话,
+ * 弹窗会在这期间隔着半透明的遮罩出现,看起来像"和加载动画一起冒出来"。
+ */
+const splashGone = ref(false)
 
 /**
  * 是否显示首次使用偏好弹窗
@@ -174,7 +183,7 @@ const stylePrefOpen = computed(
   () =>
     !stylePrefAsked.value &&
     !stylePrefSnoozed.value &&
-    splashDone.value &&
+    splashGone.value &&
     popupKind.value === null,
 )
 
@@ -298,8 +307,15 @@ function nativeBridge(): NativeBridge | undefined {
  */
 const onFlushRequest = () => {
   requestExit(
-    () => {
-      flushPendingWrites()
+    async () => {
+      // 【2026-10-04 数据安全】必须**等**落盘完成再通知主进程关闭窗口。
+      // 以前是 fire-and-forget，主进程收到 flushDone 立刻 destroy，
+      // 在途写入随之消失 —— "关掉就丢"的直接原因。
+      try {
+        await flushPendingWrites()
+      } catch (err) {
+        devWarn('[App] 关闭前保存失败', err)
+      }
       nativeBridge()?.flushDone?.()
     },
     () => {
@@ -406,8 +422,8 @@ const MOBILE_LIST_W = 526
  * 页面下方内容被切掉一截。
  */
 const MOBILE_LIST_H = 1019.84
-/** 移动端列表页顶部预留(px,视口坐标):避开 fixed 工具栏,容纳 HeaderTop 标题 */
-const MOBILE_LIST_TOP_PAD = 40
+/** 移动端列表页顶部预留(px,视口坐标):让出 AppHeader 那条固定顶栏(52px) */
+const MOBILE_LIST_TOP_PAD = 14
 /**
  * 卡片居中修正(设计值,zoom 自动缩放):
  * 卡片在设计稿 526 坐标系内从 x=47.42 起(左侧空 47.42,右侧空 20.3),
@@ -505,6 +521,11 @@ function checkChatVisible() {
       r.top >= -10 &&
       r.bottom <= vh + 10
     if (!visible) {
+      // 键盘打开期间**绝不**重挂载:销毁 textarea 会让键盘立刻收起。
+      // 安卓 adjustResize 下 innerHeight 与 visualViewport 一起变矮,
+      // isKeyboardOpen() 的高度差信号会消失,所以再用"可编辑元素仍聚焦"兜一层;
+      // 宁可这次不自愈,等失焦(键盘收起)后的下一轮检测再修。
+      if (isKeyboardOpen() || hasEditableFocus()) return
       // 连续误判保护:同一次键盘会话最多自愈 3 次
       if (healCount >= 3) {
         devWarn('[App] 聊天区不可见且自愈已达上限,停止尝试', {
@@ -533,20 +554,29 @@ function checkChatVisible() {
 }
 
 /**
- * 是否是 WebKit(iOS Safari / 所有 iOS 浏览器 / 桌面 Safari)
+ * 是否运行在 iOS 上(原生壳或网页版)
  *
- * 自愈重挂载针对的是 Chromium(Edge/夸克)合成层残留 bug,WebKit 上没有这个问题,
- * 反而会因为"销毁输入框 → 键盘收起 → 再聚焦"造成键盘闪烁。iOS 上直接关掉。
+ * 自愈重挂载针对的是 Chromium(Edge/夸克)合成层残留 bug;iOS 上 Safari /
+ * Chrome / Edge / 夸克都用 WebKit,没有这个问题,而重挂载会销毁输入框
+ * (键盘随之收起),所以 iOS 上整体关掉自愈。
+ *
+ * 平台优先走 utils/platform;但它在网页版返回 'web',platform 的 isIOS()
+ * 目前只认 Capacitor 原生壳且未对外导出,因此这里用 getPlatform() 加 UA
+ * 兜住网页版 —— 只匹配 AppleWebKit 会漏掉套着 Chromium UA 的 iOS 浏览器
+ * (Chrome / Edge / 夸克),正是之前自愈误触发的来源。
  */
-const isWebKit = (() => {
+const isIOS = (() => {
+  if (getPlatform() === 'ios') return true
   if (typeof navigator === 'undefined') return false
   const ua = navigator.userAgent
-  return /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg\//.test(ua)
+  if (/iPad|iPhone|iPod/.test(ua)) return true
+  // iPadOS 13+ 默认请求桌面版 UA,只能靠触点数与 Mac 区分
+  return /Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1
 })()
 
 /** 键盘/视口变化监听(自愈触发源):输入聚焦/失焦 + visualViewport 变化 */
 function onHealSignal(event?: Event) {
-  if (isWebKit) return
+  if (isIOS) return
   const type = event?.type
   // 记录输入框焦点状态(重挂载后恢复用)
   const t = event?.target as Node | null
@@ -674,6 +704,22 @@ function onCloseExport(): void {
 /** 设置弹窗是否展开(API 配置 + 提示词编辑 + 数据管理 + 背景) */
 const settingsOpen = ref(false)
 
+// ---- 公告页 -----------------------------------------------------------------
+/**
+ * 公告页是否展开
+ *
+ * 入口有两处:角色列表上方操作带的公告按钮,以及公告弹窗的「全部公告」。
+ * 与三类进入弹窗(公告 / 提醒 / 更新)互斥:关掉队首那颗弹窗再开本页,
+ * 避免两层全屏叠在一起。
+ */
+const announceOpen = ref(false)
+
+/** 从公告弹窗跳进公告页:先把弹窗确认掉(推进队列),再打开页面 */
+function onNoticeAll(): void {
+  onNoticeConfirm()
+  announceOpen.value = true
+}
+
 /**
  * Token 用量 / 缓存命中面板是否展开(操作带上的用量按钮 toggle)
  *
@@ -743,11 +789,12 @@ function onChatNew() {
   <!-- ==================== 桌面端(>768px):1920 设计稿等比画布 ==================== -->
   <template v-if="!isMobile">
     <DesignCanvas>
-      <HeaderTop />
+      <AppHeader variant="desktop" :mode="chatStore.chatMode" @update:mode="chatStore.setChatMode" />
       <CharacterCardList
         @add="onAdd"
         @group-settings="onOpenGroupSettings"
         @open-settings="settingsOpen = true"
+        @open-announce="announceOpen = true"
         @open-delete="onToggleDeleteMode"
         @open-usage="usageOpen = !usageOpen"
       />
@@ -758,9 +805,11 @@ function onChatNew() {
   <!-- ==================== 移动端(≤768px):列表 ↔ 聊天 双视图 ==================== -->
   <template v-else>
     <!-- 列表视图:对话列表等比缩放铺满视口(选中对话后自动切到聊天视图)。
-         含 HeaderTop(//BAKER/会话消息 标题 + 装饰图)与卡片列表,
+         顶栏由 AppHeader 固定承担(标题 + 单聊/群聊页签),列表本身只画卡片;
          负 margin 抵消卡片设计坐标右偏,使内容视觉居中 -->
     <div v-if="mobileView === 'list'" class="m-list">
+      <!-- 移动端顶栏:标题 + 单聊/群聊页签(贴视口顶端,不随列表缩放) -->
+      <AppHeader variant="mobile" :mode="chatStore.chatMode" @update:mode="chatStore.setChatMode" />
       <div class="m-list__stage">
         <div
           class="m-list__zoom"
@@ -771,12 +820,12 @@ function onChatNew() {
             marginLeft: MOBILE_LIST_MARGIN_X + 'px',
           }"
         >
-          <HeaderTop />
           <CharacterCardList
             :bottom-pad="listBottomPad"
-            @add="onAdd"
+                @add="onAdd"
             @group-settings="onOpenGroupSettings"
             @open-settings="settingsOpen = true"
+            @open-announce="announceOpen = true"
             @open-delete="onToggleDeleteMode"
             @open-usage="usageOpen = !usageOpen"
           />
@@ -851,15 +900,24 @@ function onChatNew() {
     :messages="exportMessages"
     @close="onCloseExport"
   />
-  <!-- 通用提示弹窗(新建对话未选角色 / 群聊流程控制条提示等) -->
-  <Transition name="ns">
-    <div v-if="hintOpen" class="ns" @click.self="closeHint">
-      <div class="ns__panel">
-        <p class="ns__text">{{ hintText }}</p>
-        <button class="ns__btn" type="button" @click="closeHint">确定</button>
-      </div>
-    </div>
-  </Transition>
+  <!-- 通用提示弹窗(新建对话未选角色 / 群聊流程控制条提示等)
+       外观与公告 / 提醒 / 更新弹窗完全一致:共用 VersionDialogShell -->
+  <VersionDialogShell
+    :open="hintOpen"
+    title="提示"
+    kind="alert"
+    @close="closeHint"
+  >
+    <p class="hint__text">{{ hintText }}</p>
+
+    <template #actions>
+      <button class="pn-btn" type="button" @click="closeHint">
+        <span class="pn-btn__tex" aria-hidden="true"></span>
+        <span class="pn-btn__deco" aria-hidden="true"></span>
+        <span class="pn-btn__label">确定</span>
+      </button>
+    </template>
+  </VersionDialogShell>
   <!-- 设置弹窗:API 配置 + 系统提示词 + 角色提示词编辑 + 数据管理 + 背景 -->
   <!-- 创建群聊弹窗(第三版群聊) -->
   <GroupCreateDialog
@@ -880,6 +938,9 @@ function onChatNew() {
     @close="settingsOpen = false"
   />
 
+  <!-- 公告页:操作带的公告按钮 / 公告弹窗的「全部公告」进入 -->
+  <AnnouncementPage :open="announceOpen" @close="announceOpen = false" />
+
   <!-- Token 用量 / 缓存命中面板:非模态浮层,可拖动,位置持久化。
        入口在角色列表上方的操作带(仅自定义 API 模式渲染)。 -->
   <UsagePanel :open="usageOpen" @close="usageOpen = false" />
@@ -889,24 +950,26 @@ function onChatNew() {
     当前渲染哪一个,同一时刻只有一个;关掉队首后自动出下一个
     (队列推进见 composables/usePopups)。
   -->
-  <!-- 公告弹窗(每次启动弹,直到点「不再提醒」;服务端公告正文变化会自动重置该标记) -->
+  <!-- 公告弹窗(每次启动弹,直到点「不再提醒」;服务端公告正文变化会自动重置该标记)
+       开屏遮罩彻底退场后才允许出现(见 splashGone)。 -->
   <NoticeDialog
-    :open="popupKind === 'notice'"
+    :open="splashGone && popupKind === 'notice'"
     :title="noticeTitle"
     :content="noticeContent"
     @confirm="onNoticeConfirm"
     @dismiss="onNoticeDismiss"
+    @all="onNoticeAll"
   />
   <!-- 提醒弹窗(可能多条:同窗内左右滑动查看,点「确定」一次性确认全部)
        由 usePopups 的 enableAlert 控制当前是否进入队列(现为开启)。 -->
   <AlertDialog
-    :open="popupKind === 'alert'"
+    :open="splashGone && popupKind === 'alert'"
     :alerts="alerts"
     @confirm="confirmAlerts"
   />
   <!-- 更新弹窗(忽略此版本 / 前往下载;网页端不会进入队列) -->
   <UpdateDialog
-    :open="popupKind === 'update'"
+    :open="splashGone && popupKind === 'update'"
     :version="latestVersion"
     :download-url="downloadUrl()"
     :platform="platform"
@@ -928,9 +991,9 @@ function onChatNew() {
     @cancel="onExitCancel"
   />
 
-  <!-- 开屏动画(启动时全屏覆盖,2-3 秒后自动淡出,不阻塞数据加载/公告弹窗)。
-       @complete → splashDone:首次使用偏好弹窗等它播完再弹,否则被遮罩盖住。 -->
-  <SplashOverlay @complete="splashDone = true" />
+  <!-- 开屏动画(启动时全屏覆盖,约 3 秒后自动淡出,不阻塞数据加载)。
+       @done → splashGone:公告 / 提醒 / 更新 / 首次使用偏好全部等遮罩彻底退场后再出现。 -->
+  <SplashOverlay @done="splashGone = true" />
 
   <!-- ⛔ 临时彩蛋(可删):月亮物理玩具。
        自己盯开屏遮罩消失后才出场,所以刻意排在 <SplashOverlay /> 之后;
@@ -942,26 +1005,22 @@ function onChatNew() {
 @use './styles/variables' as *;
 @use './styles/mixins' as *;
 
-// "请先选中会话"提示弹窗:复用 dialog-shell 基础面板 + 过渡
-@include dialog-shell(ns, 280px, 0);
-
-.ns {
-  &__text {
-    text-align: center;
-    color: $color-text-primary;
-    font-size: 16px;
-  }
-
-  &__btn {
-    display: block;
-    margin: 0 auto;
-  }
+// "请先选中角色" 等通用提示:内容 styles(外壳由 VersionDialogShell 提供)
+.hint__text {
+  margin: 0;
+  color: #1f1f1f;
+  font-size: 14px;
+  line-height: 1.7;
 }
+
+// ---- 聊天页顶部页签(单聊 / 群聊) ------------------------------------------
+// 已并入 AppHeader(components/layout/AppHeader.vue):标题与页签同处一条顶栏,
+// 页签相对整页居中。这里不再有独立的定位容器。
 
 
 // ---- 移动端列表视图 --------------------------------------------------------
 // 对话列表(526×897 设计稿)等比缩放铺满手机视口;列表自身可滚动。
-// stage 顶部预留 MOBILE_LIST_TOP_PAD 空间(fixed 工具栏 + HeaderTop 标题区)。
+// stage 顶部留一条 14px 的呼吸缝(AppHeader 固定顶栏:标题 + 页签)。
 .m-list {
   position: fixed;
   inset: 0;
@@ -974,10 +1033,10 @@ function onChatNew() {
     display: flex;
     align-items: flex-start;
     justify-content: center;
-    // 顶部预留 fixed 工具栏空间；刘海/挖孔屏再补上安全区，
-    // 避免列表标题被状态栏或摄像头区域遮住。
+    // 顶部预留 AppHeader 的高度;刘海/挖孔屏再补上安全区,
+    // 避免列表被状态栏或摄像头区域遮住。
     // --safe-top 默认 0px（见 styles/_base.scss），普通设备布局零变化。
-    padding-top: calc(40px + var(--safe-top, 0px));
+    padding-top: calc(14px + var(--safe-top, 0px));
   }
 
   &__zoom {

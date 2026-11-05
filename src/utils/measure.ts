@@ -107,13 +107,30 @@ export function measureBubble(
 export const BUBBLE_FONT = `"HarmonyOS Sans SC Medium", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif`
 
 /**
+ * 全局唯一的字体等待任务(单飞)
+ *
+ * 字体只加载/等待一次:后续调用直接返回同一个 promise,不再每次新建
+ * promise + 3s 定时器(旧实现每个测量未命中的文本都会建一套)。
+ * 该任务永不 reject(失败/超时都按"放行"处理),见 waitBubbleFont。
+ */
+let bubbleFontPromise: Promise<void> | null = null
+
+/**
  * 显式等待气泡字体真正装入(font-display: swap 时 fonts.ready 可能早于换行测量)
  *
- * 气泡宽度用 BUBBLE_FONT_STACK 在 ruler/canvas 里测量:若字体未就绪会回退
+ * 气泡宽度用 BUBBLE_FONT 在 ruler/canvas 里测量:若字体未就绪会回退
  * Microsoft YaHei,字形宽度不同导致换行数/边距与导出(HarmonyOS)不一致。
- * 截图与测量前都应先 await 本函数。
+ *
+ * 只在**截图/导出**前 await 一次(captureImage 调用);测量路径刻意不等待
+ * (见 measureWith 注释)—— 等字体是截图路径的事,不该拖慢每个 chunk。
  */
-export async function ensureBubbleFont(): Promise<void> {
+export function ensureBubbleFont(): Promise<void> {
+  if (!bubbleFontPromise) bubbleFontPromise = waitBubbleFont()
+  return bubbleFontPromise
+}
+
+/** 真正等字体的任务(3s 上限;任何异常都吞掉,只作为"尽量等一下") */
+async function waitBubbleFont(): Promise<void> {
   // 加超时：字体(4.3MB woff2)加载慢/挂起时不再阻塞截图，3s 后放行
   try {
     await Promise.race([
@@ -245,7 +262,10 @@ function measureWith(config: MeasureConfig, text: string): BubbleBox {
   const ctx = getCanvasCtx(config.fontSize)
 
   // 第一轮:canvas 估算
-  ensureBubbleFont().catch(() => {})
+  // 这里刻意**不**等待/触发字体加载:测量是同步高频路径(流式每个 chunk 都要跑),
+  // 字体就绪只影响字形宽度的细微差异,而等待属于截图路径(captureImage 会
+  // await ensureBubbleFont)。旧实现每次都在这里 fire-and-forget 一次,
+  // 等于每个新文本都新建 promise + 3s 定时器。
   let innerW = 0
   let canvasLines = 1
   for (const seg of text.split('\n')) {

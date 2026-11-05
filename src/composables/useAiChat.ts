@@ -17,11 +17,18 @@
 //   - 头像与角色名取自 ctx,不会被其他会话的请求覆盖
 //   - 用 isCtxActive(ctx) 判断本轮是否已失效(用户点停止,或同会话又发起了
 //     新请求):失效后迟到的内容一律丢弃,不污染新请求
+//   - ctx 还锁定了**会话对象本身**:删/建/导入会让同一个下标记上另一段会话,
+//     那时写入同样作废(下标只是位置,不是身份)
+//
+// 【目标会话锁定】每个入口都在第一个 await 之前抓 { sub, conv } 并一路透传
+// (见 AiTurnTarget):人设、历史、写入位置必须来自同一段会话 —— 中间隔着
+// 网络(智能总结最长几十秒),等 await 回来再读 activeSub 就晚了。
 // =============================================================================
 
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import { streamChat, buildMessages } from '../utils/llm'
+import { buildRagContext } from '../utils/rag'
 import {
   buildBackendRequest,
   fetchBackendReply,
@@ -31,9 +38,13 @@ import {
   BACKEND_HISTORY_LIMIT,
   CHARACTER_ID_MAP,
 } from '../utils/backend'
-import { EMPHASIS_RULE } from '../constants/prompts'
-import { splitAiSegments } from '../utils/aiText'
+import { applyLengthPolicy, buildEmphasisRule } from '../constants/prompts'
+import {
+  splitAiSegments,
+  splitAiSegmentsStreaming,
+} from '../utils/aiText'
 import { stripImmersive, ImmersiveFilter } from '../utils/immersive'
+import type { Conversation } from '../types/chat'
 import {
   customChatCompletion,
   parseSuggestionList,
@@ -104,6 +115,22 @@ interface BackendInput {
   history: ChatHistoryEntry[]
 }
 
+/**
+ * 一轮 AI 回复**锁定的目标会话**
+ *
+ * 为什么要对象而不是下标:下标只是"扁平数组里的位置"。从读取人设/历史到真正
+ * 把回复写回会话之间隔着网络 await(智能总结最长可能等几十秒),期间玩家完全
+ * 可能切走、甚至删掉/新建会话 —— 那时再读 `activeSub`,拿到的是另一段会话
+ * (A 的人设配 B 的历史,回复写进 B)。因此每个入口都在**第一个 await 之前**
+ * 把 { 下标, 会话对象 } 一起抓下来,后面所有读写都显式带上它。
+ *
+ * 会话对象用于归属校验:写入前确认"这个下标记的还是不是同一段会话"。
+ */
+interface AiTurnTarget {
+  sub: number
+  conv: Conversation
+}
+
 /** 延迟工具(ms):分段显示模拟"对方正在输入"的节奏 */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -126,6 +153,13 @@ async function applySmartSummary(
   history: ChatHistoryEntry[],
   settingsStore: ReturnType<typeof useSettingsStore>,
   chatStore: ReturnType<typeof useChatStore>,
+  /**
+   * 目标会话下标(缺省 = 当前会话)
+   *
+   * 会话累计输出 token 的读写必须落在**这一段**会话上:本函数里的总结请求是
+   * 网络 await,期间玩家切走后若仍按 activeSub 记账,就把用量记到了别人头上。
+   */
+  targetSub?: number,
 ): Promise<ChatHistoryEntry[]> {
   // 旧版模式不限制历史:直接返回全部历史
   if (settingsStore.legacyUnlimitedHistory && settingsStore.apiConfig.apiMode === 'legacy') {
@@ -142,7 +176,7 @@ async function applySmartSummary(
   //   ① 固定提示词长度 + 本会话累计输出 token（后端 usage.completion_tokens 累加）
   //   ② 固定提示词长度 + 本地估算的待发送历史体积
   // 任一达到「上下文窗口 × 80%」就总结；剩下 20% 留给 RAG 语料库。
-  const sessionOutputTokens = chatStore.getSessionOutputTokens()
+  const sessionOutputTokens = chatStore.getSessionOutputTokens(targetSub)
   const contextWindow = (cfg.contextWindow ?? 0) > 0
     ? cfg.contextWindow
     : DEFAULT_SUMMARY_CONTEXT_WINDOW
@@ -202,7 +236,7 @@ async function applySmartSummary(
       text: `【对话总结】\n${summary}`,
     }
     // 前段历史已被摘要取代 → 会话 token 计数归零，避免下一轮立刻又触发总结
-    chatStore.resetSessionOutputTokens()
+    chatStore.resetSessionOutputTokens(targetSub)
     return [summaryEntry, ...recent]
   } catch (err) {
     // 总结失败:降级为最近 50 条原始消息,不阻断聊天
@@ -232,9 +266,11 @@ async function planHistory(
   history: ChatHistoryEntry[],
   settingsStore: ReturnType<typeof useSettingsStore>,
   chatStore: ReturnType<typeof useChatStore>,
+  /** 目标会话下标(缺省 = 当前会话),见 applySmartSummary 的同名参数 */
+  targetSub?: number,
 ): Promise<ChatHistoryEntry[] | undefined> {
   if (settingsStore.apiConfig.apiMode === 'custom') return undefined
-  return applySmartSummary(history, settingsStore, chatStore)
+  return applySmartSummary(history, settingsStore, chatStore, targetSub)
 }
 
 /** 群聊里"让某个指定角色发言"时的说话人覆盖 */
@@ -289,8 +325,9 @@ async function requestCustomSuggestions(
     lines.push(`${m.side === 'mine' ? '我' : who}：${content}`)
   }
   const convo = lines.join('\n') || '(暂无对话)'
-  // 角色设定摘要:与单聊请求同一条角色提示词(沉浸式已在其中处理)
-  const persona = settingsStore.getCharacterMessage(who).slice(0, 2000)
+  // 角色设定摘要:与单聊请求同一条角色提示词(沉浸式已在其中处理);
+  // 长度占位符也要填掉 —— 递给模型的提示词里不该出现模板痕迹
+  const persona = applyLengthPolicy(settingsStore.getCharacterMessage(who), who).slice(0, 2000)
 
   const user = `【角色】${who}\n`
     + `【角色设定摘要】\n${persona || '(无)'}\n\n`
@@ -337,6 +374,37 @@ export function useAiChat() {
   const { appendStaged } = useReplyReveal()
 
   /**
+   * 把"此刻这一段会话"抓成锁定目标
+   *
+   * 每个 AI 入口都必须在**第一个 await 之前**调用:构建请求要读人设/历史,
+   * 而中间隔着网络(智能总结最长几十秒)。等 await 回来再读 activeSub,拿到的
+   * 可能已经是另一段会话 —— A 的人设配 B 的历史,回复还会写进 B。
+   */
+  function lockTarget(): AiTurnTarget | null {
+    const sub = chatStore.activeSub
+    if (sub === null) return null
+    const conv = chatStore.conversations[sub]
+    if (!conv) return null
+    return { sub, conv }
+  }
+
+  /**
+   * 找回锁定会话**现在**的下标
+   *
+   * 结构变更(删一段 / 新建子对话 / 导入合并)会让会话在扁平数组里的位置整体
+   * 位移。锁的是对象,所以能按对象找回它现在的位置 —— 回复仍写回同一段对话,
+   * 而不是因为"下标变了"就把玩家刚发的消息丢掉。
+   *
+   * @returns 现在的下标;null = 这段会话已经被删除/替换,整轮应当放弃
+   */
+  function resolveTargetSub(target: AiTurnTarget): number | null {
+    const list = chatStore.conversations
+    if (list[target.sub] === target.conv) return target.sub
+    const idx = list.indexOf(target.conv)
+    return idx === -1 ? null : idx
+  }
+
+  /**
    * 触发 AI 流式回复(内部公共逻辑)
    *
    * 从当前对话读取角色信息 + 历史消息,构建请求。
@@ -352,6 +420,9 @@ export function useAiChat() {
    * @param summaryHistory 经过智能总结的 history(非后端模式使用;为 undefined 时从 store 获取)
    * @param speakerOverride 指定说话人(群聊"让某角色发言一次"用;缺省 = 会话名,
    *                        单聊行为完全不变)
+   * @param target         锁定目标会话(见 AiTurnTarget)。调用方若在 await 之前
+   *                       抓过目标就必须传入;不传则退化为"此刻的当前会话"
+   *                       (与改动前一致,兼容旧调用)
    */
   async function triggerAiResponse(
     backendInput?: BackendInput,
@@ -365,24 +436,52 @@ export function useAiChat() {
      * 常规发送不传 → 走追加行为，与改动前完全一致。
      */
     insertAfterMessageId?: number,
+    target?: AiTurnTarget,
   ): Promise<void> {
-    if (chatStore.activeSub === null) return
-    const conv = chatStore.conversations[chatStore.activeSub]
+    // 目标会话:优先用调用方锁定的那段。锁定后才读人设/历史,并在写入前校验
+    // 归属 —— "读取身份"和"写入位置"必须是同一段会话。
+    const sub = target ? resolveTargetSub(target) : chatStore.activeSub
+    if (sub === null) return
+    const conv = target?.conv ?? chatStore.conversations[sub]
     if (!conv) return
+    // 归属校验:锁定的会话已被删除 / 替换(不是"位移",位移会被 resolveTargetSub
+    // 找回来)→ 整轮作废,绝不把回复写进同下标下的另一段会话
+    if (chatStore.conversations[sub] !== conv) return
     // 群聊的会话名是群名(如「A、B和C的群聊」),不是角色名;
     // 有 speakerOverride 时必须用被点名的角色,否则会拿群名去查角色人设。
     const characterName = speakerOverride?.name ?? conv.name
 
-    // 构建角色头像/名称
-    const meta = chatStore.currentConversationMeta
+    // 构建角色头像/名称:按**目标会话**取,不按"此刻选中的那段"取 ——
+    // 等待回复期间玩家切走后,回复仍写回原会话,头像也该是原会话角色的
+    const meta = chatStore.conversationMetaAt(sub)
     const speakerName = characterName
     const speakerAvatar = speakerOverride?.avatar ?? meta?.avatar ?? ''
 
     // 创建第一个 loading 气泡,并锁定本轮响应上下文:
-    // 目标会话与说话人在此刻固定,之后切换会话 / 其他会话并发请求都不会串台
+    // 目标会话与说话人在此刻固定,之后切换会话 / 其他会话并发请求都不会串台。
+    // 末位传 conv:store 会把它记为归属,后续每次写入都要求"还是这段会话"
     const ctx = chatStore.beginAiResponse(
-      speakerName, speakerAvatar, undefined, insertAfterMessageId)
+      speakerName, speakerAvatar, sub, insertAfterMessageId, conv)
     if (!ctx) return
+
+    /**
+     * 落字前的"空回复"守卫
+     *
+     * 只拦**彻底空白**这一种:上游返回空、或被沉浸式过滤器整条吃掉。
+     * 曾经还拦"只有动作/神态描写、没有台词"的回复(直接丢弃 + 报错),
+     * 现已移除 —— 那属于角色的表达自由,不该由前端判死并吞掉内容。
+     *
+     * @returns true = 已按错误处理,调用方应立即 return
+     */
+    const rejectIfUnplayable = (): boolean => {
+      if (fullText.trim()) return false
+      chatStore.appendAiError(
+        '回复内容为空(可能被沉浸式过滤掉或上游返回空),可点「重新生成」重试',
+        userMsgId,
+        ctx,
+      )
+      return true
+    }
 
     // ---- 请求并缓冲完整回复(loading 动画持续,不实时显示文字) -------------
     let fullText = ''
@@ -421,9 +520,9 @@ export function useAiChat() {
               : (() => {
                   const fixed = settingsStore.getFullSystemPrompt()
                   const role = settingsStore.getCharacterPrompt(characterName)
-                  const roleWithRule = role
-                    ? `${role}\n\n${EMPHASIS_RULE}`
-                    : EMPHASIS_RULE
+                  // 通用规则里的长度占位符必须按角色填好再发(见 constants/prompts)
+                  const rule = buildEmphasisRule(characterName)
+                  const roleWithRule = role ? `${role}\n\n${rule}` : rule
                   return fixed ? `${fixed}\n\n【角色设定】\n${roleWithRule}` : roleWithRule
                 })(),
             think: settingsStore.thinkEnabled,
@@ -448,11 +547,14 @@ export function useAiChat() {
           // 为什么不把 delta 原样直出:上游生成很快(实测一封 136 字的回复,95 个
           // 增量段全部在 1.03 秒内到达),直出在视觉上等于"一次性全出",反而丢掉
           // 了关闭 SSE 时逐拍显示的手感。
-          // 做法:delta 先进缓冲;一旦缓冲里能切出**完整的一段**(splitAiSegments
-          // 返回 ≥2 段 ⇒ 第一段已经定稿,边界不会再变),就立刻用与关闭 SSE 时
-          // 完全相同的那套机制播出去(appendStaged + 段间停顿 + "正在输入"),
-          // 剩下的段在 done 之后按同一套规则播完 —— 观感一致,只是第一段不必等
-          // 整封回复就能出现。
+          // 做法:delta 先进缓冲;一旦缓冲里能切出**已经定稿**的段,就立刻用与
+          // 关闭 SSE 时完全相同的那套机制播出去(appendStaged + 段间停顿 +
+          // "正在输入"),剩下的段在 done 之后按权威全文补完。
+          //
+          // "定稿"的判据交给 splitAiSegmentsStreaming,不能再用 splitAiSegments:
+          // 缓冲是半截的,未闭合括号里的句号会被当成句末断点,于是先播出一句
+          // "（她笑了。"—— 这句话还会写进历史;等右括号到达后权威分段变少,
+          // playedCount 多计,后半段就永远不显示了。
           let revealBuf = ''
           let streamDone = false
           let pacerStop = false
@@ -488,16 +590,18 @@ export function useAiChat() {
                 await delay(30)
                 continue
               }
-              // 能切出 ≥2 段 ⇒ 第一段已经定稿(后面还有内容,边界不会再变)
-              const segs = splitAiSegments(revealBuf, settingsStore.smartSplit)
-              if (segs.length >= 2) {
-                const idx = revealBuf.indexOf(segs[1])
-                if (idx > 0) {
-                  const head = segs[0]
-                  revealBuf = revealBuf.slice(idx)
-                  await playSegment(head, false)
-                  continue
+              // 只播已定稿的段(未闭合括号内部、以及可能继续增长的末段都不播),
+              // consumed 是"这几个段在缓冲里占了多少字符",据此切缓冲 ——
+              // 不用 indexOf 猜位置(文本里有重复片段时会切错地方)。
+              const { segments, consumed } = splitAiSegmentsStreaming(
+                revealBuf, settingsStore.smartSplit)
+              if (consumed > 0) revealBuf = revealBuf.slice(consumed)
+              if (segments.length > 0) {
+                for (const seg of segments) {
+                  if (!chatStore.isCtxActive(ctx)) return
+                  await playSegment(seg, false)
                 }
+                continue
               }
               if (streamDone) return
               await delay(30)
@@ -548,10 +652,22 @@ export function useAiChat() {
           }
           await pacer
 
+          // done 帧全文为空、但已经实时播过内容(后端异常):以已落下的字为准。
+          // 各段在播放时已经各自 finishAiSegment 入了历史,这里只收尾 ——
+          // 若交给下面的"空回复"守卫,玩家会看到"有内容 + 一条空回复错误"。
+          if (streamedLive && !fullText.trim() && playedCount > 0) {
+            if (chatStore.isCtxActive(ctx)) chatStore.finishAiResponse(ctx)
+            return
+          }
+
+          if (streamedLive && rejectIfUnplayable()) return
+
           if (streamedLive) {
             // ---- 收尾:按权威全文补完剩余段 ----------------------------------
-            // 已经播过 playedCount 段(它们的文本取自流式缓冲,定稿口径与权威分条
-            // 一致);剩下的段一律以 done 帧的权威全文为准,首段气泡补上 mood。
+            // 已经播过 playedCount 段 —— 它们的文本逐字等于权威分段的前缀:
+            // splitAiSegmentsStreaming 只消费"已经定稿"的分组(未闭合括号内部、
+            // 以及可能被后续增量改写的末段都不消费)。剩下的段一律取自 done 帧
+            // 的权威全文,首段气泡补上 mood。
             const finalSegs = splitAiSegments(fullText, settingsStore.smartSplit)
             const rest = finalSegs.slice(playedCount)
             chatStore.setFirstAiMood(pendingMood, ctx)
@@ -579,7 +695,11 @@ export function useAiChat() {
         // 原有模式:系统提示词 + 全局世界观 + 角色提示词 + 历史消息,SSE 流式调用
         // 两条 system 消息统一由 settings store 产出,保证与用量面板的统计口径一致
         const systemMessage = settingsStore.getSystemMessage()
-        const characterMessage = settingsStore.getCharacterMessage(characterName)
+        // 通用回复规则(EMPHASIS_RULE)由 settings 拼在角色提示词末尾,里面带着
+        // 长度占位符 {LENGTH_TARGET}:必须在此按角色填好,否则模型收到的是一串
+        // 模板痕迹。custom / legacy 直连没有后端兜底,这里是最后一道。
+        const characterMessage = applyLengthPolicy(
+          settingsStore.getCharacterMessage(characterName), characterName)
 
         const isCustom = settingsStore.apiConfig.apiMode === 'custom'
 
@@ -589,15 +709,54 @@ export function useAiChat() {
 
         // custom 模式:预算检查 + 批量压缩,保证"未超预算时一条都不丢"
         // (legacy 沿用它原有的 50 条窗口 + 智能总结策略,由 summaryHistory 传入,不在此处理)
-        if (isCustom) {
+        // 压缩器按"当前会话"读写历史(useContextCompaction 只认 activeSub):
+        // 玩家已经切走时不要压 —— 否则会把**另一段**对话的历史截短。
+        // 跳过只意味着这次少回收一点预算,不丢内容。
+        if (isCustom && chatStore.activeSub === sub) {
           compacted = (await compact(`${systemMessage}\n\n${characterMessage}`, 'auto')) !== null
         }
 
         // 使用经过智能总结的 history(如果提供),否则从 store 取实时历史。
         // custom 模式不传 summaryHistory → 取到的历史已含本轮输入(调用方先落消息),
         // 且顺序恒为 [system, system, ...历史] → 天然满足"前缀只追加"。
-        const history = summaryHistory ?? chatStore.getChatHistory()
+        // 必须按**锁定**的会话下标取:人设与历史要来自同一段对话
+        const history = summaryHistory ?? chatStore.getChatHistory(sub)
         const messages = buildMessages(systemMessage, characterMessage, history)
+
+        // ---- 后端 RAG 检索(仅自定义 API 模式)-------------------------------
+        // 默认 API 的检索在网关里做(use_rag);旧版模式不接检索(它走内置端点,
+        // 没有对应能力);自定义模式直连用户端点,于是这里直接调后端检索服务,
+        // 把命中语料注入请求。语料库与默认模式同一套。
+        // 开关在设置的「实验性功能 → 知识源」里,默认开启;检索失败静默跳过。
+        //
+        // 位置:插在**本轮 user 消息之前**,而不是"提示词之后、历史之前"。
+        //   原因:服务商的前缀缓存(DeepSeek / OpenAI 等)按"完全一致的前缀"命中,
+        //   语料每轮都不一样 —— 放在历史之前会让整段历史都落在变动区内,每轮全量
+        //   重新计费;放在本轮 user 之前,固定前缀(两段提示词 + 之前的历史)保持
+        //   不变,能一路命中缓存,只有本轮新增的语料与提问需要付费。
+        //   提示词依旧在最前面(它们本身就是 messages 的第 0、1 条)。
+        if (isCustom && settingsStore.ragEnabled) {
+          const lastMine = [...history].reverse().find((m) => m.side === 'mine')
+          const ragBlock = lastMine?.text
+            ? await buildRagContext(
+              lastMine.text,
+              chatStore.getAiSignal(ctx),
+              settingsStore.ragTopK,
+            )
+            : ''
+          if (ragBlock) {
+            // 从后往前找最后一条 user(= 本轮提问),插在它前面;
+            // 一条 user 都没有(例如重新生成时历史只剩 assistant)就接在末尾。
+            let insertAt = messages.length
+            for (let i = messages.length - 1; i >= 0; i--) {
+              if (messages[i].role === 'user') {
+                insertAt = i
+                break
+              }
+            }
+            messages.splice(insertAt, 0, { role: 'system', content: ragBlock })
+          }
+        }
 
         // 本地估算(未校准),服务商未上报 usage 时由 usage store 乘以校准比值后展示
         estimatedInputTokens = estimateMessages(messages)
@@ -626,7 +785,11 @@ export function useAiChat() {
           },
           onDone: (full) => {
             // 以权威全文为准再过滤一次(immersive=false 时原样返回)
-            fullText = stripImmersive(full, immersive)
+            const filtered = stripImmersive(full, immersive)
+            // 过滤成空时回退原文:沉浸式把整条回复都判定成"动作描写"时,
+            // 玩家看到空气泡等于"对方没说话",比看到带括号的原文更糟。
+            // 回退的原文若确实没有台词,会被下面的无台词守卫拦成可重试的错误。
+            fullText = filtered || full
           },
         })
       }
@@ -662,6 +825,9 @@ export function useAiChat() {
 
     // 本轮响应已失效(用户点停止,或同一会话又发起了新请求):不继续分段显示
     if (!chatStore.isCtxActive(ctx)) return
+
+    // ---- "无台词 / 空回复"守卫:分段落字之前拦一次 --------------------------
+    if (rejectIfUnplayable()) return
 
     // ---- 分段 --------------------------------------------------------------
     // 规则(换行 / 左括号前切断 + 纯括号段合并)的唯一实现处是 utils/aiText,
@@ -740,7 +906,10 @@ export function useAiChat() {
    * @throws API 未配置时抛出错误
    */
   async function sendAndWaitForAi(text: string): Promise<void> {
-    if (chatStore.activeSub === null) return
+    // 锁定目标会话(第一个 await 之前):下面的智能总结可能要等几十秒,
+    // 期间玩家切走的话,人设/历史/写入位置都必须仍然是"发起时那一段"
+    const target = lockTarget()
+    if (!target) return
 
     // 检查 API 配置
     if (!settingsStore.isApiConfigured) {
@@ -748,8 +917,8 @@ export function useAiChat() {
     }
 
     // 获取历史并按模式决定是否裁剪(custom 模式返回 undefined,见 planHistory)
-    const rawHistory = chatStore.getChatHistory()
-    const trimmedHistory = await planHistory(rawHistory, settingsStore, chatStore)
+    const rawHistory = chatStore.getChatHistory(target.sub)
+    const trimmedHistory = await planHistory(rawHistory, settingsStore, chatStore, target.sub)
 
     // 根据模式构建请求参数
     const isBackend = settingsStore.apiConfig.apiMode === 'backend'
@@ -764,11 +933,17 @@ export function useAiChat() {
       summaryHistory = trimmedHistory
     }
 
-    // 1. 添加用户消息(含上下文历史同步),记录其 id 供错误重试使用
-    const userMsg = chatStore.sendUserMessage(text)
+    // 等待期间那段会话可能已位移(删了别的对话)或被删掉:按对象找回它现在的位置。
+    // 找不回来 = 这段对话已经没了,什么都不写(总好过写进别人的对话)
+    const sub = resolveTargetSub(target)
+    if (sub === null) return
 
-    // 2. 触发 AI 响应
-    await triggerAiResponse(backendInput, userMsg?.id ?? undefined, summaryHistory)
+    // 1. 添加用户消息(含上下文历史同步),记录其 id 供错误重试使用
+    const userMsg = chatStore.sendUserMessage(text, sub)
+
+    // 2. 触发 AI 响应(目标仍锁定同一个会话对象,由 triggerAiResponse 再解析一次)
+    await triggerAiResponse(backendInput, userMsg?.id ?? undefined, summaryHistory,
+      undefined, undefined, { sub, conv: target.conv })
   }
 
   /**
@@ -783,14 +958,16 @@ export function useAiChat() {
    * "没有新话题,继续"。若后端需要专门的群聊协议,这里是唯一的对接点。
    */
   async function speakAsCharacter(name: string, avatar: string): Promise<void> {
-    if (chatStore.activeSub === null) return
+    // 锁定目标会话(见 lockTarget):远程总结调用之后,人设与历史仍须同源
+    const target = lockTarget()
+    if (!target) return
 
     if (!settingsStore.isApiConfigured) {
       throw new Error('API 未配置：请先在设置中填写 Base URL、API Key 和模型名')
     }
 
-    const rawHistory = chatStore.getChatHistory()
-    const trimmedHistory = await planHistory(rawHistory, settingsStore, chatStore)
+    const rawHistory = chatStore.getChatHistory(target.sub)
+    const trimmedHistory = await planHistory(rawHistory, settingsStore, chatStore, target.sub)
     const isBackend = settingsStore.apiConfig.apiMode === 'backend'
 
     const backendInput: BackendInput | undefined = isBackend
@@ -798,7 +975,8 @@ export function useAiChat() {
       : undefined
     const summaryHistory = isBackend ? undefined : trimmedHistory
 
-    await triggerAiResponse(backendInput, undefined, summaryHistory, { name, avatar })
+    await triggerAiResponse(backendInput, undefined, summaryHistory, { name, avatar },
+      undefined, target)
   }
 
   /**
@@ -810,7 +988,9 @@ export function useAiChat() {
    * @throws API 未配置时抛出错误
    */
   async function respondAfterImage(): Promise<void> {
-    if (chatStore.activeSub === null) return
+    // 锁定目标会话:非后端模式下面还要等智能总结,期间切走会拿错历史
+    const target = lockTarget()
+    if (!target) return
 
     // 检查 API 配置
     if (!settingsStore.isApiConfigured) {
@@ -818,7 +998,7 @@ export function useAiChat() {
     }
 
     // 获取历史(图片消息已写入 contextHistory)
-    const rawHistory = chatStore.getChatHistory()
+    const rawHistory = chatStore.getChatHistory(target.sub)
 
     // 根据模式构建请求参数
     const isBackend = settingsStore.apiConfig.apiMode === 'backend'
@@ -834,13 +1014,12 @@ export function useAiChat() {
       }
     } else {
       // 非后端模式:按模式裁剪(custom 模式返回 undefined → 由内部压缩后现取)
-      summaryHistory = await planHistory(rawHistory, settingsStore, chatStore)
+      summaryHistory = await planHistory(rawHistory, settingsStore, chatStore, target.sub)
     }
 
     // 图片消息已由 sendImage 添加,直接触发 AI 响应(定位刚发送的图片消息 id)
-    const conv2 = chatStore.conversations[chatStore.activeSub]
-    const lastMine = conv2 ? [...conv2.messages].reverse().find((m) => m.side === 'mine') : undefined
-    await triggerAiResponse(backendInput, lastMine?.id, summaryHistory)
+    const lastMine = [...target.conv.messages].reverse().find((m) => m.side === 'mine')
+    await triggerAiResponse(backendInput, lastMine?.id, summaryHistory, undefined, undefined, target)
   }
 
   /**
@@ -855,9 +1034,11 @@ export function useAiChat() {
    * @param userMsgId 本轮用户消息 id
    */
   async function regenerate(userMsgId: number): Promise<void> {
-    if (chatStore.activeSub === null) return
-    const conv = chatStore.conversations[chatStore.activeSub]
-    const userMsg = conv.messages.find((m) => m.id === userMsgId)
+    // 锁定目标会话:重新生成同样要等总结 API,期间切走会让"重生成某一条"落到
+    // 另一段会话(而且锚点消息 id 在那边根本不存在)
+    const target = lockTarget()
+    if (!target) return
+    const userMsg = target.conv.messages.find((m) => m.id === userMsgId)
     if (!userMsg) return
 
     const isBackend = settingsStore.apiConfig.apiMode === 'backend'
@@ -865,7 +1046,7 @@ export function useAiChat() {
 
     if (isBackend) {
       // 后端模式:message 与 history 分离
-      let history = chatStore.getChatHistory()
+      let history = chatStore.getChatHistory(target.sub)
       if (!isImage) {
         // 文字消息:移除末尾的用户消息条目(与正常发送流程一致:message 与 history 分离)
         if (history.length > 0 && history[history.length - 1].side === 'mine') {
@@ -873,7 +1054,7 @@ export function useAiChat() {
         }
       }
       // 图片消息:保留图片条目在 history 中(与 respondAfterImage 行为一致,让后端能识别图片)
-      const trimmed = await applySmartSummary(history, settingsStore, chatStore)
+      const trimmed = await applySmartSummary(history, settingsStore, chatStore, target.sub)
       await triggerAiResponse(
         { message: isImage ? '[图片]' : userMsg.text, history: trimmed },
         userMsgId,
@@ -882,13 +1063,14 @@ export function useAiChat() {
         // 关键：新回复插回这条用户消息之后（prepareRegenerate 已删掉旧回复），
         // 否则会 append 到对话末尾 —— 重新生成第 1 条却跑到第 3 条下面。
         userMsgId,
+        target,
       )
     } else {
       // 非后端模式:用户消息已在 contextHistory 中,按模式裁剪后重新触发
       // (custom 模式返回 undefined → 由内部压缩后现取,否则压缩结果会被盖掉)
-      const rawHistory = chatStore.getChatHistory()
-      const summaryHistory = await planHistory(rawHistory, settingsStore, chatStore)
-      await triggerAiResponse(undefined, userMsgId, summaryHistory, undefined, userMsgId)
+      const rawHistory = chatStore.getChatHistory(target.sub)
+      const summaryHistory = await planHistory(rawHistory, settingsStore, chatStore, target.sub)
+      await triggerAiResponse(undefined, userMsgId, summaryHistory, undefined, userMsgId, target)
     }
   }
 

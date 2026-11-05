@@ -32,7 +32,7 @@ export function panelTop(height: number): number {
 }
 
 /** 遮罩横条坐标:与面板同宽,底边对齐面板上边缘,向上延展 EDGE_MASK_H */
-export const PANEL_EDGE_MASK = {
+const PANEL_EDGE_MASK = {
   left: PANEL.left,
   width: PANEL.width,
   height: PANEL_EDGE_MASK_H,

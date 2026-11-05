@@ -1,24 +1,22 @@
-# 依赖与构建产物
+# Node Modules
 node_modules/
 dist/
-release/
 
-# 备份 / 临时文件
+#备份
 backup/
-_src_backups/
-*.bak
-*.bak_*
-*.zip
 
-# 本地模拟后端
+# 本地模拟后端 LLM 
 mock/
 
-# 工具目录
+#dsh-vision-router
 .dsh-vision-router/
 
-# 系统 / 编辑器
-.DS_Store
-Thumbs.db
-*.local
-.vscode/*
-!.vscode/settings.json
+# ---- 仓库瘦身(2026-10-04 审计)：这些目录/文件要么是构建产物、要么是本地巨物 ----
+release/
+_src_backups/
+hbuilderx/assets/
+cloudflared-linux-amd64
+*.bak_*
+*.bak_before_*
+*.tmpdir/
+# 保留原有的 node_modules/ dist/ backup/ mock/ 等条目

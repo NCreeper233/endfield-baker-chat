@@ -171,7 +171,7 @@ function isAbortError(err: unknown): boolean {
 // ⚠ 已废弃：本常量写死了 primary 域名，不跟随用户在设置里选择的备用域名。
 //   实际请求走 resolveBackendUrl()/gatewayUrl()（见下方调用点），保留仅为兼容旧引用。
 //   新代码请勿使用这个常量，否则备用域名会失效。
-export const GATEWAY_URL = API_BASES.primary + '/chat'
+const GATEWAY_URL = API_BASES.primary + '/chat'
 
 /**
  * 角色中文名 → character_id 映射表(硬编码,29 个干员)
@@ -210,8 +210,9 @@ export const CHARACTER_ID_MAP: Record<string, string> = {
   聂菲斯: 'niefeisi',
   阿达希尔: 'adaxier',
   提弗洛斯: 'tifuluosi',
-  祀: 'si',
   // 新加的角色(整张列表在 character.ts 里也是排最前)
+  明河: 'minghe',
+  祀: 'si',
   噗切娜: 'puqiena',
   管理员: 'endministrator',
 }
@@ -247,7 +248,9 @@ export const BACKEND_HISTORY_LIMIT = BACKEND_HISTORY_ROUNDS * 2
  *
  * 将前端历史({side, text, image?})映射为后端格式:
  *   - mine → user / other → assistant
- *   - 图片消息:content 用 "[图片]" 占位,不传 base64 dataURL(避免请求膨胀)
+ *   - 图片消息:content 用 "[图片]" 占位
+ *     ⚠ 现状:history 条目仍会把 image(base64 dataURL) 一起带上(`image: h.image || undefined`),
+ *     弱网/多图时请求体很大 —— 待办:历史图片只传 id 或只在本轮发送(docs/AUDIT-2026-10-04.md F18/C1)
  *   - 仅截取最近 25 轮(50 条),从旧到新;不足则全部发送
  *   - 当前输入单独放 message,不在 history 中
  *

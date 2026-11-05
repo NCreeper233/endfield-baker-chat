@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 // 素材集中导入
 // -----------------------------------------------------------------------------
 // 所有素材在此处一次性导入,组件统一通过 MATERIALS 表引用,避免跨组件重复 import。
@@ -47,6 +47,27 @@ import iconUsageStats from '../assets/materials/icon_usage_stats.svg'
 import prefBracketColorOn from '../assets/materials/pref_bracket_color_on.webp'
 import prefBracketColorOff from '../assets/materials/pref_bracket_color_off.webp'
 import prefBracketCenterOff from '../assets/materials/pref_bracket_center_off.webp'
+
+// 面板设计系统素材(设置菜单 / 公告页 / 版本弹窗共用)
+//   contour  —— 设置行左侧的等高线底纹
+//   logoBg   —— 面板左上角的品牌底纹
+//   tabTex   —— 分类页签的选中黄块纹理
+//   btnTex   —— 深色按钮的斜纹纹理(主纹理)
+//   btnDeco  —— 深色按钮左缘的斜切装饰
+import decoPanelContour from '../assets/materials/deco_panel_contour.webp'
+import decoPanelLogoBg from '../assets/materials/deco_panel_logo_bg.webp'
+import panelTabTexture from '../assets/materials/panel_tab_texture.webp'
+import panelBtnTexture from '../assets/materials/panel_btn_texture.webp'
+import panelBtnDeco from '../assets/materials/panel_btn_deco.webp'
+
+// 公告页素材(顶部横幅 / 分类页签 / 列表选中条 / 未读角标)
+import announceItemOn from '../assets/materials/announce_item_on.webp'
+import announceTabOn from '../assets/materials/announce_tab_on.webp'
+import announceTabOff from '../assets/materials/announce_tab_off.webp'
+import announceUnread from '../assets/materials/announce_unread.webp'
+
+// 首次使用偏好弹窗右上角的 Q 版立绘
+import prefChibi from '../assets/materials/pref_chibi.webp'
 
 /**
  * 内置素材 URL 表。
@@ -104,4 +125,17 @@ export const MATERIALS = {
   prefBracketColorOn,
   prefBracketColorOff,
   prefBracketCenterOff,
+  // 首次使用偏好弹窗右上角的 Q 版立绘
+  prefChibi,
+  // 面板设计系统素材(设置菜单 / 公告页 / 版本弹窗)
+  decoPanelContour,
+  decoPanelLogoBg,
+  panelTabTexture,
+  panelBtnTexture,
+  panelBtnDeco,
+  // 公告页素材
+  announceItemOn,
+  announceTabOn,
+  announceTabOff,
+  announceUnread,
 } as const

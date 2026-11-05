@@ -12,6 +12,8 @@
 //
 // 设计理由:
 //   - 纯计算 + store 驱动,无 DOM 操作,可独立测试
+//   - rows 按 row.key 复用上一次的行对象(仅当渲染等价时复用引用):
+//     流式回复每个 chunk 只让变化的那一行产生新引用,其余行在 patch 时整行跳过
 //   - freshContext 以可变对象注入(非响应式),由 ChatArea 的 watcher 翻转,
 //     避免将布局上下文做成响应式导致 rows 额外重算
 //   - 几何(chatGeometryKey)由注入提供:桌面 = 设计稿常量,移动端 = 视口推导;
@@ -30,6 +32,7 @@ import {
   avatarBubbleTop,
   avatarStack,
   avatarTopToBubble,
+  type AvatarStack,
 } from '../constants/design'
 import {
   chatGeometryKey,
@@ -96,6 +99,91 @@ function computeGap(
   // 2. 跨方向:cross 间距
   return geom.gapCross
 }
+
+// ---- 行对象复用(值比较) ------------------------------------------------------
+// avatarStack / 错误气泡的 box / 图片消息的 box 每次计算都会新建对象,
+// 不能按引用判断"有没有变";这里统一逐字段比值。
+
+/** 头像槽位逐值相等 */
+type AvatarSlot = AvatarStack['bg']
+
+function sameSlot(a: AvatarSlot, b: AvatarSlot): boolean {
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h
+}
+
+/** 头像三层槽位逐值相等 */
+function sameStack(a: AvatarStack, b: AvatarStack): boolean {
+  return sameSlot(a.bg, b.bg) && sameSlot(a.ring, b.ring) && sameSlot(a.portrait, b.portrait)
+}
+
+/** 过渡起始尺寸逐值相等(undefined = 首屏无过渡) */
+function sameRect(a?: RectSize, b?: RectSize): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.w === b.w && a.h === b.h
+}
+
+/** 测量结果逐值相等(measure 命中缓存时是同一对象,图片/错误气泡则是新对象) */
+function sameBox(a: BubbleBox, b: BubbleBox): boolean {
+  return a.rectW === b.rectW && a.rectH === b.rectH && a.innerW === b.innerW
+}
+
+/**
+ * 两行是否**渲染等价**
+ *
+ * 必须覆盖 ChatRow 的每个字段:任何一处变化都要返回 false,
+ * 否则复用旧对象会让子组件拿到过期 props(行对象是普通对象,不是响应式的,
+ * 就地改字段不会触发更新)。新增 ChatRow 字段时这里要同步加。
+ */
+function sameRow(a: ChatRow, b: ChatRow): boolean {
+  return (
+    a.msg === b.msg
+    && a.key === b.key
+    && a.displayText === b.displayText
+    && a.left === b.left
+    && a.bubbleTop === b.bubbleTop
+    && a.avatarTop === b.avatarTop
+    && a.avatarX === b.avatarX
+    && a.showAvatar === b.showAvatar
+    && a.bottom === b.bottom
+    && a.isTopic === b.isTopic
+    && a.isCentered === b.isCentered
+    && a.centerColor === b.centerColor
+    && a.moodRow === b.moodRow
+    && sameBox(a.box, b.box)
+    && sameStack(a.stack, b.stack)
+    && sameRect(a.prevRect, b.prevRect)
+  )
+}
+
+/**
+ * 编译期护栏:上面比较到的字段必须覆盖 ChatRow 的全部字段
+ *
+ * ChatRow 将来新增字段而这里没补 → `Exclude` 非 never → 下面赋值在编译期报错,
+ * 逼着改的人回去给 sameRow 加比较。缺了它,复用旧行会让新字段永远停在旧值,
+ * 而这种回归在浏览器里极难发现。
+ */
+type ComparedRowField =
+  | 'msg'
+  | 'key'
+  | 'displayText'
+  | 'box'
+  | 'left'
+  | 'bubbleTop'
+  | 'avatarTop'
+  | 'avatarX'
+  | 'showAvatar'
+  | 'stack'
+  | 'prevRect'
+  | 'bottom'
+  | 'isTopic'
+  | 'isCentered'
+  | 'centerColor'
+  | 'moodRow'
+
+type MissingRowField = Exclude<keyof ChatRow, ComparedRowField>
+const _rowFieldsAllCompared: MissingRowField extends never ? true : MissingRowField = true
+void _rowFieldsAllCompared
 
 /**
  * 聊天区消息布局管线
@@ -242,9 +330,38 @@ export function useChatRows(options: ChatRowsOptions) {
    */
   const frozenPrevRects = new Map<string, RectSize | undefined>()
 
+  /**
+   * 行对象缓存(行键 → 上一次输出的行对象)
+   *
+   * 为什么需要:AI 流式回复每个 chunk 都会让 playedMessages 变化 → 本 computed
+   * 全量重算。若每次都为每一条消息新建行对象,v-for 里每一行的 prop 引用都变,
+   * Vue 只能逐行走 patch(ChatMessageRow 子树随之重渲染),200 条消息的会话
+   * 每个 token 都要重渲染整张表。
+   *
+   * 复用规则:候选行与缓存行**渲染等价**(sameRow 全字段比较)时返回缓存对象,
+   * 引用不变 → Vue 的 patch 直接跳过该行;有任何字段变化才换成新对象。
+   * 不能就地改缓存对象的字段:行对象是普通对象(非响应式),就地改不会触发
+   * 子组件更新,props 引用不变还会被 patch 跳过,界面就停在旧值上。
+   *
+   * 键是 row.key(`消息 id#部件序号`),与 v-for 的 key 同源;切会话时清空
+   * (消息 id 是会话内自增,跨会话会撞键;清空也避免持有旧会话的消息对象)。
+   */
+  const rowCache = new Map<string, ChatRow>()
+
+  /** 提交一行:与上次等价则复用旧引用,否则用新对象覆盖缓存 */
+  const commitRow = (next: ChatRow): ChatRow => {
+    const prev = rowCache.get(next.key)
+    const row = prev && sameRow(prev, next) ? prev : next
+    rowCache.set(next.key, row)
+    return row
+  }
+
   watch(
     () => chatStore.activeSub,
-    () => frozenPrevRects.clear(),
+    () => {
+      frozenPrevRects.clear()
+      rowCache.clear()
+    },
     { immediate: true },
   )
 
@@ -368,7 +485,7 @@ export function useChatRows(options: ChatRowsOptions) {
         const top = list.length === 0
           ? g.anchorAvatarTop - g.scrollY
           : cursor + gap
-        list.push({
+        list.push(commitRow({
           msg,
           key: `${msg.id}#0`,
           displayText,
@@ -382,7 +499,7 @@ export function useChatRows(options: ChatRowsOptions) {
           stack: avatarStack(g.otherAvatarX - g.scrollX, 0, g.avatarBox),
           bottom: top + tBox.rectH,
           isTopic: true,
-        })
+        }))
         cursor = top + tBox.rectH
         continue
       }
@@ -421,7 +538,7 @@ export function useChatRows(options: ChatRowsOptions) {
           const top = list.length === 0
             ? g.anchorAvatarTop - g.scrollY
             : cursor + g.gapCross
-          list.push({
+          list.push(commitRow({
             msg,
             key: rowKey,
             displayText: part.text,
@@ -438,7 +555,7 @@ export function useChatRows(options: ChatRowsOptions) {
             centerColor: centerColorFor(msg),
             moodRow: pi === moodRowIndex,
             bottom: top + cBox.rectH,
-          })
+          }))
           cursor = top + cBox.rectH
           // 打断对话流:后面的气泡按"换侧"起排(cross 间距 + 重新带头像)
           prevSide = null
@@ -482,7 +599,7 @@ export function useChatRows(options: ChatRowsOptions) {
         // prevRect:每行首次布局时冻结快照,之后永不再变。
         const prevRect = prevRectOf(rowKey)
 
-        list.push({
+        list.push(commitRow({
           msg,
           key: rowKey,
           displayText: text,
@@ -496,10 +613,19 @@ export function useChatRows(options: ChatRowsOptions) {
           prevRect,
           moodRow: pi === moodRowIndex,
           bottom: bubbleTop + box.rectH,
-        })
+        }))
         cursor = bubbleTop + box.rectH
         prevSide = msg.side
         prevSpeakerKey = speakerKey
+      }
+    }
+    // 行数变少(删消息 / 关掉「括号描写居中」)时清掉不再出现的行,
+    // 避免缓存一直持有已删除消息的行对象。rowCache 的键都刚被 commitRow 覆盖过,
+    // 所以 size 相等就说明没有多余键,无需再建 Set。
+    if (rowCache.size !== list.length) {
+      const aliveKeys = new Set(list.map((row) => row.key))
+      for (const key of rowCache.keys()) {
+        if (!aliveKeys.has(key)) rowCache.delete(key)
       }
     }
     return list

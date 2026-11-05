@@ -19,11 +19,10 @@
 //   - 选项即按钮:点任意一项立刻生效并关闭,没有"确定/取消"两步
 //   - 第一步选「不开启」时,第二步的样式选项**根本不会渲染**(不是隐藏而是 v-if 卸载),
 //     所以那三张示意图也不会被请求
-//   - 三张示意图是聊天截图(宽高比约 2.7:1),桌面端「图左文右」并排,
-//     移动端(≤768px)自动改成「图上文下」,面板可整屏滚动 —— 见文件末尾样式
-//   - 一次性:选完置标记,之后不再弹出;想改随时去 设置 →「显示和内容输出」
+//   - 外观是一张"小工具卡片":贴在右上角、无遮罩,不打断阅读。
+//     左上角有一枚 Q 版立绘从卡片顶端探出(见样式里的 .sp__chibi)
 // =============================================================================
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { MATERIALS } from '../../constants/materials'
 
 /**
@@ -63,6 +62,9 @@ watch(
   },
 )
 
+/** 卡片标题随步骤变化 */
+const cardTitle = computed(() => (step.value === 'ask' ? '动作 / 神态描写' : '显示样式'))
+
 /** 第二步的样式选项(顺序 = 展示顺序;图与文案一一对应) */
 const OPTIONS: Array<{
   mode: StylePreference
@@ -74,76 +76,122 @@ const OPTIONS: Array<{
     mode: 'color',
     image: MATERIALS.prefBracketColorOn,
     title: '彩色居中文字',
-    desc: '描写居中显示，并按角色的属性上色（物理灰 / 灼热红 / 电磁黄 / 寒冷青 / 自然绿 / 超域紫）',
+    desc: '描写居中显示，并按角色的属性上色',
   },
   {
     mode: 'mono',
     image: MATERIALS.prefBracketColorOff,
     title: '灰色居中文字',
-    desc: '仍居中显示，但所有描写都用统一的半透明白，不区分属性',
+    desc: '仍居中显示，统一用半透明白',
   },
   {
     mode: 'off',
     image: MATERIALS.prefBracketCenterOff,
     title: '默认括号样式',
-    desc: '括号描写留在气泡里（旧版显示效果），不单独成行',
+    desc: '括号留在气泡里（旧版效果）',
   },
 ]
 </script>
 
 <template>
   <Transition name="sp">
-    <div v-if="open" class="sp">
-      <div class="sp__panel">
-        <!-- ================= 第一步:是否开启动作 / 神态描写 ================= -->
-        <template v-if="step === 'ask'">
-          <h2 class="sp__title">是否开启「动作 / 神态描写」？</h2>
-          <p class="sp__text">
-            角色有时会在括号里写动作与神态，例如「（微微一笑）交给我吧」。开启后可以再挑它的显示样式；不开启则让角色只输出台词。之后随时可以在「设置 → 显示和内容输出」里更改。
-          </p>
-
-          <div class="sp__ask">
-            <button type="button" class="sp__ask-btn" @click="step = 'style'">
-              <span class="sp__ask-name">开启</span>
-              <span class="sp__ask-desc">角色会写括号里的动作 / 神态，下一步挑选显示样式</span>
-            </button>
-            <button type="button" class="sp__ask-btn" @click="emit('choose', 'none')">
-              <span class="sp__ask-name">不开启</span>
-              <span class="sp__ask-desc">只保留台词，不再出现括号描写（仅默认 API 模式 / 群聊生效）</span>
-            </button>
+    <div v-if="open" class="sp" role="dialog" aria-modal="false" :aria-label="cardTitle">
+      <div class="sp__card">
+        <!-- ================= 顶部:品牌条 + 斜切标题栏 ================= -->
+        <header class="sp__head">
+          <div class="sp__strip">
+            <span class="sp__strip-y" aria-hidden="true"></span>
+            <span class="sp__strip-g">
+              <svg class="sp__brand" viewBox="0 0 120 10" aria-hidden="true">
+                <polygon points="0,2 7,2 3.5,8" fill="#363636"></polygon>
+                <text x="7" y="7" font-size="7" font-style="italic" fill="#363636" font-weight="bold" font-family="Outfit">//</text>
+                <text x="16" y="7" font-size="7" fill="#363636" font-weight="bold" font-family="Outfit">ARKNIGHTS:ENDFIELD</text>
+              </svg>
+              <svg class="sp__plus" viewBox="0 0 10 10" aria-hidden="true">
+                <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="#363636" stroke-width="1"></rect>
+                <line x1="5" y1="2.5" x2="5" y2="7.5" stroke="#363636" stroke-width="1"></line>
+                <line x1="2.5" y1="5" x2="7.5" y2="5" stroke="#363636" stroke-width="1"></line>
+              </svg>
+            </span>
           </div>
 
-          <p class="sp__foot">点击任意一项即生效，此后不再询问</p>
-        </template>
-
-        <!-- ================= 第二步:显示样式三选一 ================= -->
-        <template v-else>
-          <h2 class="sp__title">选择「动作 / 神态描写」的显示样式</h2>
-          <p class="sp__text">之后随时可以在「设置 → 显示和内容输出」里更改。</p>
-
-          <div class="sp__options">
-            <button
-              v-for="opt in OPTIONS"
-              :key="opt.mode"
-              type="button"
-              class="sp__option"
-              @click="emit('choose', opt.mode)"
-            >
-              <img class="sp__thumb" :src="opt.image" :alt="opt.title" />
-              <span class="sp__texts">
-                <span class="sp__name">{{ opt.title }}</span>
-                <span class="sp__desc">{{ opt.desc }}</span>
-              </span>
-            </button>
+          <div class="sp__titlebar">
+            <div class="sp__slant"><span class="sp__dots" aria-hidden="true"></span></div>
+            <div class="sp__title">{{ cardTitle }}</div>
+            <span class="sp__watermark" aria-hidden="true">ENDFIELD</span>
           </div>
 
-          <p class="sp__foot">点击任意一项即生效，此后不再询问</p>
-        </template>
+          <button class="sp__close" type="button" aria-label="关闭" @click="emit('later')">
+            <svg viewBox="0 0 205 205" fill="currentColor" fill-rule="evenodd" aria-hidden="true">
+              <path d="M0 25L25 0L205 180L180 205ZM25 205L0 180L180 0L205 25Z"></path>
+            </svg>
+          </button>
 
-        <!-- 稍后再说:不写标记,下次进入还会问一次(只是本次会话内不再打扰) -->
-        <div class="sp__later">
-          <button type="button" class="sp__later-btn" @click="emit('later')">稍后再说</button>
+          <!-- Q 版立绘:从卡片顶端探出 -->
+          <div class="sp__chibi" aria-hidden="true">
+            <img :src="MATERIALS.prefChibi" alt="" />
+          </div>
+
+          <div class="sp__rule" aria-hidden="true"></div>
+        </header>
+
+        <!-- ================= 正文 ================= -->
+        <div class="sp__body">
+          <div class="sp__pad">
+            <!-- ---------- 第一步 ---------- -->
+            <template v-if="step === 'ask'">
+              <p class="sp__hint">是否开启「动作 / 神态描写」？</p>
+              <p class="sp__sub">
+                角色有时会在括号里写动作与神态，例如「（微微一笑）交给我吧」。开启后可以再挑显示样式；不开启则让角色只输出台词。之后随时可以在「设置 → 显示和内容输出」里更改。
+              </p>
+
+              <div class="sp__actions">
+                <button class="ma-btn ma-btn--dark" type="button" @click="step = 'style'">
+                  <span class="ma-btn__label">开启</span>
+                </button>
+                <button class="ma-btn ma-btn--light" type="button" @click="emit('choose', 'none')">
+                  <span class="ma-btn__label">不开启</span>
+                </button>
+              </div>
+            </template>
+
+            <!-- ---------- 第二步 ---------- -->
+            <template v-else>
+              <p class="sp__hint">选择「动作 / 神态描写」的显示样式</p>
+
+              <div class="sp__options">
+                <button
+                  v-for="opt in OPTIONS"
+                  :key="opt.mode"
+                  class="sp__opt"
+                  type="button"
+                  @click="emit('choose', opt.mode)"
+                >
+                  <img class="sp__thumb" :src="opt.image" :alt="opt.title" />
+                  <span class="sp__opt-name">{{ opt.title }}</span>
+                  <span class="sp__opt-desc">{{ opt.desc }}</span>
+                </button>
+              </div>
+            </template>
+
+            <p class="sp__foot">点击任意一项即生效，此后不再询问</p>
+          </div>
         </div>
+
+        <!-- ================= 底部:浅色次按钮 → 三色线 → 灰装饰条 ================= -->
+        <div class="sp__later">
+          <button class="ma-btn ma-btn--light" type="button" @click="emit('later')">
+            <span class="ma-btn__label">稍后再说</span>
+          </button>
+        </div>
+
+        <div class="sp__tricolor" aria-hidden="true"></div>
+
+        <footer class="sp__footer" aria-hidden="true">
+          <span class="sp__deco-solid"></span>
+          <span class="sp__deco-outline"></span>
+          <span class="sp__deco-hatch"></span>
+        </footer>
       </div>
     </div>
   </Transition>
@@ -151,208 +199,557 @@ const OPTIONS: Array<{
 
 <style scoped lang="scss">
 @use '../../styles/variables' as *;
-@use '../../styles/mixins' as *;
 
-// 外壳沿用站内统一弹窗样式(深色直角面板 + 网格纹理 + 遮罩)
-// 面板给 640px:第二步三行「图左文右」刚好排得下,窄屏由 dialog-shell 的
-// max-width:100% + 本文件末尾的移动端规则接管
-@include dialog-shell(sp, 640px, 10px);
+$ma-yellow: #ffff21;
+$ma-ink: #363636;
+$ma-strip-gray: #999;
+$ma-footer-gray: #ababab;
+$ma-deco: #838383;
 
 .sp {
-  // ---- 第一步:两个按钮并排 ----
-  &__ask {
-    display: flex;
-    gap: 12px;
-    margin-top: 4px;
-  }
+  position: fixed;
+  top: 96px;
+  right: 16px;
+  z-index: 320;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  // 无遮罩:卡片之外仍可正常操作聊天界面
+  pointer-events: none;
+}
 
-  &__ask-btn {
-    flex: 1 1 0;
-    padding: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    background: rgba(255, 255, 255, 0.04);
-    cursor: pointer;
-    text-align: left;
-    transition: border-color $anim-fast $ease-default, background-color $anim-fast $ease-default;
+.sp__card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: calc(100vh - 128px);
+  pointer-events: auto;
+  filter: drop-shadow(0 10px 26px rgba(0, 0, 0, 0.4));
+}
 
-    &:hover,
-    &:focus-visible {
-      border-color: $color-subcard-selected;
-      background: rgba(255, 239, 0, 0.08);
-      outline: none;
-    }
-  }
+// ---------------------------------------------------------------------------
+// 顶部品牌条 + 标题栏
+// ---------------------------------------------------------------------------
+.sp__head {
+  position: relative;
+  flex-shrink: 0;
+}
 
-  &__ask-name {
+.sp__strip {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  height: 0.9375rem;
+  transform-origin: left center;
+}
+
+.sp__strip-y {
+  flex: 0 0 1.7rem;
+  background: $ma-yellow;
+}
+
+.sp__strip-g {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0.2rem;
+  background: $ma-strip-gray;
+}
+
+.sp__brand {
+  display: block;
+  width: auto;
+  height: 0.5rem;
+}
+
+.sp__plus {
+  display: block;
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+}
+
+.sp__titlebar {
+  position: relative;
+  display: flex;
+  min-height: 2.75rem;
+  overflow: hidden;
+  background: $ma-ink;
+}
+
+// 左侧黄色平行四边形(右侧斜切)
+.sp__slant {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 26%;
+  background: $ma-yellow;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 18px) 100%, 0 100%);
+}
+
+// 斜块上的圆点纹理(自下而上渐隐)
+.sp__dots {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 67%;
+  background-image: radial-gradient(circle, $ma-ink 0.8px, transparent 1px);
+  background-size: 4px 4px;
+  opacity: 0.45;
+  -webkit-mask-image: linear-gradient(to top, #000, transparent);
+  mask-image: linear-gradient(to top, #000, transparent);
+  pointer-events: none;
+}
+
+.sp__title {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  padding: 0.5rem 2.6rem 0.5rem 0.6rem;
+  overflow: hidden;
+  color: #fff;
+  font-family: $font-harmony;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.25;
+  word-break: break-word;
+}
+
+.sp__watermark {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.05);
+  font-family: 'Outfit', sans-serif;
+  font-size: 5.4rem;
+  font-weight: 700;
+  letter-spacing: -0.6rem;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
+.sp__close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  place-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 0;
+  background: $ma-yellow;
+  color: $ma-ink;
+  cursor: pointer;
+
+  svg {
     display: block;
-    font-family: $font-harmony;
-    font-size: 18px;
-    color: $color-text-primary;
+    width: 0.7rem;
+    height: 0.7rem;
   }
+}
 
-  &__ask-desc {
-    display: block;
-    margin-top: 8px;
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.5;
-    color: $color-subcard-text;
-  }
+// Q 版立绘:向左上探出卡片(不拦截点击)
+.sp__chibi {
+  position: absolute;
+  top: -45px;
+  left: 8px;
+  z-index: 20;
+  width: 88px;
+  height: 88px;
+  pointer-events: none;
 
-  // ---- 第二步:三行选项,行内「图左文右」 ----
-  &__options {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin-top: 4px;
-  }
-
-  &__option {
-    display: flex;
-    align-items: center;
-    gap: 14px;
+  img {
+    position: absolute;
+    inset: 0;
     width: 100%;
-    padding: 10px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    background: rgba(255, 255, 255, 0.04);
-    cursor: pointer;
-    text-align: left;
-    transition: border-color $anim-fast $ease-default, background-color $anim-fast $ease-default;
-
-    // 悬停/聚焦用站内标识色(子卡选中黄)呼应,不做花哨动效
-    &:hover,
-    &:focus-visible {
-      border-color: $color-subcard-selected;
-      background: rgba(255, 239, 0, 0.08);
-      outline: none;
-    }
+    height: 100%;
+    object-fit: contain;
   }
+}
 
-  // 示意图:定宽 + 保持原始比例(三张截图比例略有差异,不做裁剪,避免切掉文字)
-  &__thumb {
+// 黄/灰分隔线 + 黄三角(比大弹窗的小一号)
+.sp__rule {
+  position: relative;
+  z-index: 10;
+  height: 0.375rem;
+  background: linear-gradient(90deg, #ffff1b 0 50%, #d3d3d3 50% 100%);
+  filter: drop-shadow(0 0 0.1875rem rgba(0, 0, 0, 0.5));
+  transform-origin: left center;
+
+  &::after {
+    content: '';
+    position: absolute;
+    left: 40px;
+    bottom: -8px;
     display: block;
-    flex: none;
-    width: 300px;
-    height: auto;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-left: 9px solid transparent;
+    border-right: 9px solid transparent;
+    border-top: 9px solid #ffff1b;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 正文(白底斜纹)
+// ---------------------------------------------------------------------------
+.sp__body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  background: #fff;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 2px,
+    rgba(204, 204, 204, 0.133) 2px,
+    rgba(204, 204, 204, 0.133) 3px
+  );
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.sp__pad {
+  padding: 0.75rem;
+}
+
+.sp__hint {
+  margin: 0;
+  padding: 0.15rem 0;
+  color: #111827;
+  font-family: $font-harmony;
+  font-size: 0.95rem;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.sp__sub {
+  margin: 6px 0 0;
+  color: rgba(17, 24, 39, 0.66);
+  font-family: $font-harmony;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.sp__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.85rem;
+}
+
+// 三个样式选项:浅色卡片,纵向「图 + 标题 + 说明」
+.sp__options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.sp__opt {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  padding: 0.4rem 0.4rem 0.5rem;
+  border: 0;
+  background: #f2f1ef;
+  box-shadow: 0 0 0 0.05em #f2f1ef, 0 0 0 0.05em #a0a2a3 inset;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+
+  &:hover {
+    background: #e4e3e1;
+    box-shadow: 0 0 0 0.05em #e4e3e1, 0 0 0 0.05em #8d8f90 inset;
   }
 
-  &__texts {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0; // 允许长描述换行而不是撑破行
+  &:focus-visible {
+    outline: 2px solid #b8a800;
+    outline-offset: 1px;
+  }
+}
+
+.sp__thumb {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-bottom: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.sp__opt-name {
+  padding: 0 0.2rem;
+  color: #2f2f2f;
+  font-family: $font-harmony;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sp__opt-desc {
+  padding: 0 0.2rem;
+  color: rgba(47, 47, 47, 0.66);
+  font-family: $font-harmony;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.sp__foot {
+  margin: 10px 0 0;
+  color: rgba(17, 24, 39, 0.5);
+  font-family: $font-harmony;
+  font-size: 11px;
+  text-align: center;
+}
+
+// 三色渐变条:放在「稍后再说」下面、灰装饰条上面,右端对齐
+.sp__tricolor {
+  flex-shrink: 0;
+  height: 0.25rem;
+  background-color: #fff;
+  background-image: linear-gradient(90deg, #00ffa2 0 42.5%, $ma-yellow 42.5% 79.2%, #ff00f0 79.2% 100%);
+  background-repeat: no-repeat;
+  background-size: 8rem 100%;
+  background-position: right 0.9rem top;
+  pointer-events: none;
+}
+
+// ---------------------------------------------------------------------------
+// 底部条
+// ---------------------------------------------------------------------------
+.sp__later {
+  flex-shrink: 0;
+  padding: 0.5rem 0.75rem;
+  background: #fff;
+  border-top: 1px solid #e5e7eb;
+}
+
+.sp__footer {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 0.9375rem;
+  padding: 0 0.75rem;
+  background: $ma-footer-gray;
+}
+
+.sp__deco-solid {
+  width: 0.4rem;
+  height: 0.4rem;
+  background: $ma-deco;
+}
+
+.sp__deco-outline {
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-left: 2px;
+  border: 1px solid $ma-deco;
+  -webkit-mask-image: linear-gradient(#fff, #fff 0.1rem, transparent 0.1rem, transparent 0.3rem, #fff 0.3rem);
+  mask-image: linear-gradient(#fff, #fff 0.1rem, transparent 0.1rem, transparent 0.3rem, #fff 0.3rem);
+}
+
+.sp__deco-hatch {
+  width: 2rem;
+  height: 0.4rem;
+  margin-left: 3px;
+  background-image: repeating-linear-gradient(-45deg, transparent, transparent 1px, $ma-deco 1px, $ma-deco 2px);
+}
+
+// ---------------------------------------------------------------------------
+// 卡片内按钮(深色主按钮 / 浅色次按钮)
+// ---------------------------------------------------------------------------
+.ma-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.35rem;
+  padding: 0.4rem 1rem;
+  border: 0;
+  overflow: hidden;
+  cursor: pointer;
+  font-family: $font-harmony;
+  font-size: 0.875rem;
+  line-height: 1.25;
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+
+  &--dark {
+    background: #2a2728;
+    color: #fefcfc;
+    box-shadow: 0 0 0 0.05em #2a2728, 0 0 0 0.05em #81807f inset;
+
+    &:hover {
+      background: #1e1c1c;
+      color: #f3f1f1;
+      box-shadow: 0 0 0 0.05em #1e1c1c, 0 0 0 0.05em #81807f inset;
+    }
   }
 
-  &__name {
-    font-family: $font-harmony;
-    font-size: 17px;
-    color: $color-text-primary;
-  }
+  &--light {
+    background: #f2f1ef;
+    color: #4d4d4d;
+    box-shadow: 0 0 0 0.05em #f2f1ef, 0 0 0 0.05em #a0a2a3 inset;
 
-  &__desc {
-    font-family: $font-harmony;
-    font-size: 13px;
-    line-height: 1.5;
-    color: $color-subcard-text;
-  }
-
-  &__foot {
-    margin: 16px 0 0;
-    font-family: $font-harmony;
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.45);
-    text-align: center;
-  }
-
-  // 稍后再说:黄色按钮(站内标识色;不写标记,下次进入还会问)
-  &__later {
-    margin-top: 18px;
-    text-align: center;
-  }
-
-  &__later-btn {
-    min-width: 132px;
-    padding: 10px 18px;
-    border: none;
-    background: $color-subcard-selected;
-    color: #1c1c1c;
-    font-family: $font-harmony;
-    font-size: 16px;
-    cursor: pointer;
-    transition: filter 0.15s ease;
-
-    &:hover,
-    &:focus-visible {
-      filter: brightness(0.92);
-      outline: none;
+    &:hover {
+      background: #d4d3d1;
+      color: #5a5a5a;
+      box-shadow: 0 0 0 0.05em #d4d3d1, 0 0 0 0.05em #a0a2a3 inset;
     }
   }
 
-  // ---- 移动端(≤768px) ----
-  //   1. 第一步的两个按钮竖排(并排会挤成两个窄条)
-  //   2. 第二步每项改成纵向布局,图片铺满面板宽度
-  //   3. 收紧面板内边距与行距,尽量一屏内看完
-  //   4. 外层 dialog-shell 已是"整屏可滚 + 面板限高滚动",这里不再锁高
-  @media (max-width: 768px) {
-    &__panel {
-      padding: 20px 14px 14px;
-    }
+  &__label {
+    position: relative;
+    z-index: 1;
+  }
+}
 
-    &__title {
-      font-size: 17px;
-      line-height: 1.4;
-    }
+// ---------------------------------------------------------------------------
+// 入场 / 出场(与大弹窗同款补间:缩放 + 淡入淡出)
+// ---------------------------------------------------------------------------
+.sp-enter-active {
+  transition-duration: 0.18s;
 
-    &__text {
-      margin-bottom: 14px;
-      font-size: 13px;
-      line-height: 1.5;
-    }
+  .sp__card {
+    animation: sp-in 0.18s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  }
 
-    &__ask {
-      flex-direction: column;
-      gap: 10px;
-    }
+  .sp__strip {
+    animation: sp-strip 0.18s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  }
 
-    &__ask-btn {
-      padding: 12px;
-    }
+  .sp__rule {
+    animation: sp-rule 0.22s 0.06s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  }
 
-    &__ask-name {
-      font-size: 16px;
-    }
+  .sp__footer {
+    animation: sp-rule 0.24s 0.1s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  }
+}
 
-    &__ask-desc {
-      margin-top: 6px;
-      font-size: 12.5px;
-    }
+.sp-leave-active {
+  transition-duration: 0.35s;
 
-    &__options {
-      gap: 10px;
-    }
+  .sp__card {
+    animation: sp-out 0.35s cubic-bezier(0.55, 0.06, 0.68, 0.19) both;
+  }
 
-    &__option {
-      flex-direction: column;
-      align-items: stretch;
-      gap: 8px;
-      padding: 8px;
-    }
+  .sp__strip {
+    animation: sp-strip-out 0.35s cubic-bezier(0.55, 0.06, 0.68, 0.19) both;
+  }
+}
 
-    &__thumb {
-      width: 100%;
-    }
+@keyframes sp-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
 
-    &__name {
-      font-size: 16px;
-    }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
 
-    &__desc {
-      font-size: 12.5px;
-    }
+@keyframes sp-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
 
-    &__foot {
-      margin-top: 12px;
+  to {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+@keyframes sp-strip {
+  from {
+    transform: scaleX(0.85);
+    opacity: 0;
+  }
+
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes sp-strip-out {
+  0% {
+    transform: none;
+    opacity: 1;
+  }
+
+  60% {
+    transform: scaleX(0.4);
+    opacity: 1;
+  }
+
+  to {
+    transform: scaleX(0);
+    opacity: 0;
+  }
+}
+
+@keyframes sp-rule {
+  from {
+    transform: scaleX(0);
+  }
+
+  to {
+    transform: none;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 移动端:卡片铺满宽度,贴在顶部
+// ---------------------------------------------------------------------------
+@media (max-width: 768px) {
+  .sp {
+    top: auto;
+    right: 10px;
+    bottom: 12px;
+    left: 10px;
+    width: auto;
+    max-width: none;
+  }
+
+  .sp__card {
+    max-height: min(72vh, calc(100vh - 90px));
+  }
+
+  .sp__chibi {
+    width: 72px;
+    height: 72px;
+    top: -38px;
+  }
+
+  .sp__title {
+    font-size: 0.98rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sp-enter-active,
+  .sp-leave-active {
+    .sp__card,
+    .sp__strip,
+    .sp__rule,
+    .sp__footer {
+      animation: none !important;
     }
   }
 }

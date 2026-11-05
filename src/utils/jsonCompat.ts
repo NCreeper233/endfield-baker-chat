@@ -31,10 +31,13 @@ import { CHAT_IMAGE } from '../constants/design'
 import { resolveCardGroupMeta, toCardGroupFields } from './groupMeta'
 import {
   PROJECT_VERSION,
+  applyImageBudget,
+  assertExportSizeWithinLimit,
   downloadBlob,
   EXPORT_BUDGET_BYTES,
-  EXPORT_MAX_IMAGE_BYTES,
   estimateExportBytes,
+  reencodeOversizedImages,
+  timestamp,
   type ProjectPayload,
 } from './zipExport'
 import type { ExportOutcome } from './nativeExport'
@@ -331,34 +334,25 @@ function pickExportableCards(cards: Card[]): Card[] {
 }
 
 /**
- * 超预算时才做的图片过滤（就地改动传入的卡片副本）
+ * 字符串的 UTF-8 真实字节数
  *
- * 只有在真的超预算时调用，且调用方已经把卡片深拷贝好 —— 常规导出
- * （绝大多数用户）一次深拷贝都不做。
+ * 落盘的是 UTF-8：一个汉字 3 字节，用 `text.length`（UTF-16 码元数）冒充
+ * 体积会低估一半以上。这里逐码元计算，避免为了量体积再造一份 60MB 的
+ * TextEncoder 数组或 Blob 副本。
  */
-function filterHugeImages(cardsCopy: Card[]): number {
-  let filteredImages = 0
-  for (const card of cardsCopy) {
-    for (const conv of card.conversations) {
-      for (const msg of conv.messages) {
-        if (msg.image && Math.round(msg.image.length * 0.75) > EXPORT_MAX_IMAGE_BYTES) {
-          delete msg.image
-          delete msg.imageW
-          delete msg.imageH
-          if (!msg.text) msg.text = '[图片]'
-          filteredImages++
-        }
-      }
-      for (const entry of conv.contextHistory ?? []) {
-        if (entry.image && Math.round(entry.image.length * 0.75) > EXPORT_MAX_IMAGE_BYTES) {
-          delete entry.image
-          if (!entry.text) entry.text = '[图片]'
-          filteredImages++
-        }
-      }
-    }
+function utf8ByteLength(text: string): number {
+  let bytes = 0
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code < 0x80) bytes += 1
+    else if (code < 0x800) bytes += 2
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      // 代理对（emoji 等）→ 4 字节，并吞掉下一个码元
+      bytes += 4
+      i++
+    } else bytes += 3
   }
-  return filteredImages
+  return bytes
 }
 
 /** 组装导出用的顶层字段（cards 单独处理，便于流式写出） */
@@ -391,8 +385,10 @@ function buildJsonHead(
  * 图片以 dataURL 内联(与 ZIP 的独立图片文件相对);
  * 仅导出有消息或有 AI 记忆的对话;设置快照与自定义提示词一并内嵌。
  *
- * 防 OOM:导出前预算检查,超预算时自动过滤超大图片(保留 "[图片]" 占位),
- * 通过返回值 filteredImages 告知调用方。
+ * 防 OOM:导出前预算检查,超预算时按"先大后小"剔除图片(只删到放得下为止,
+ * 保留 "[图片]" 占位),剔除后重新估算;仍超硬上限就抛错并提示清理/分批。
+ * 图片重编码需要 canvas，而本函数是同步的 —— 异步调用方（downloadProjectJson）
+ * 应先调 `reencodeOversizedImages`，这样多数大图根本走不到"剔除"这一步。
  */
 export function exportToJson(
   cards: Card[],
@@ -401,7 +397,7 @@ export function exportToJson(
   promptOverrides: Record<string, string>,
   settingsSnapshot?: Record<string, unknown> | null,
   cardOrder?: string[] | null,
-): { json: string; filteredImages: number; totalBytes: number } {
+): { json: string; filteredImages: number; reencodedImages: number; totalBytes: number } {
   const exportableCards = pickExportableCards(cards)
   if (exportableCards.length === 0) {
     throw new Error('没有可导出的对话数据')
@@ -410,11 +406,14 @@ export function exportToJson(
   const totalBytes = estimateExportBytes(exportableCards)
   let workCards = exportableCards
   let filteredImages = 0
-  // 只有真的超预算才深拷贝 + 过滤图片：常规导出一次深拷贝都不做（闪退主因之一）
+  // 只有真的超预算才过滤：常规导出一次深拷贝都不做（闪退主因之一）
   if (totalBytes > EXPORT_BUDGET_BYTES) {
-    workCards = JSON.parse(JSON.stringify(exportableCards)) as Card[]
-    filteredImages = filterHugeImages(workCards)
+    const budgeted = applyImageBudget(exportableCards)
+    workCards = budgeted.cards
+    filteredImages = budgeted.dropped
   }
+  // 剔除后重新估算：纯文本超限时没有图可删，只能明确拒绝（B6）
+  assertExportSizeWithinLimit(estimateExportBytes(workCards), '导出 JSON')
 
   const head = buildJsonHead(
     workCards, myGender, stripVariantIndex, promptOverrides, settingsSnapshot, cardOrder,
@@ -422,7 +421,12 @@ export function exportToJson(
   const payload = Object.fromEntries(head)
   Object.defineProperty(payload, 'cards', { value: workCards, enumerable: true })
   // 紧凑输出：美化缩进会让 30MB 的包再胖 ~25%，导入端只认 JSON 语义不受影响
-  return { json: JSON.stringify(payload), filteredImages, totalBytes }
+  const json = JSON.stringify(payload)
+  // 真实字节：以 UTF-8 落盘长度为准，不再回估算值（B12）
+  const realBytes = utf8ByteLength(json)
+  assertExportSizeWithinLimit(realBytes, '导出 JSON')
+  // 同步路径没有 canvas，重编码张数恒为 0；调用方自行重编码后再合并计数
+  return { json, filteredImages, reencodedImages: 0, totalBytes: realBytes }
 }
 
 /**
@@ -450,14 +454,22 @@ export async function* exportToJsonChunks(
   let workCards = exportableCards
   let filteredImages = 0
   if (totalBytes > EXPORT_BUDGET_BYTES) {
-    workCards = JSON.parse(JSON.stringify(exportableCards)) as Card[]
-    filteredImages = filterHugeImages(workCards)
+    const budgeted = applyImageBudget(exportableCards)
+    workCards = budgeted.cards
+    filteredImages = budgeted.dropped
   }
+  // 剔除后重新估算，再看硬上限（B6）
+  assertExportSizeWithinLimit(estimateExportBytes(workCards), '导出 JSON')
 
   const head = buildJsonHead(
     workCards, myGender, stripVariantIndex, promptOverrides, settingsSnapshot, cardOrder,
   )
 
+  let emittedBytes = 0
+  const emit = (chunk: string): string => {
+    emittedBytes += utf8ByteLength(chunk)
+    return chunk
+  }
   let buf = '{'
   let first = true
   for (const [k, v] of head) {
@@ -465,7 +477,7 @@ export async function* exportToJsonChunks(
     buf += (first ? '' : ',') + JSON.stringify(k) + ':' + JSON.stringify(v)
     first = false
     if (buf.length >= chunkChars) {
-      yield buf
+      yield emit(buf)
       buf = ''
     }
   }
@@ -474,27 +486,29 @@ export async function* exportToJsonChunks(
     if (i > 0) buf += ','
     buf += JSON.stringify(workCards[i])
     if (buf.length >= chunkChars) {
-      yield buf
+      yield emit(buf)
       buf = ''
     }
   }
   buf += ']}'
-  yield buf
+  yield emit(buf)
 
-  return { filteredImages, totalBytes }
+  // 真实字节总量（B12）：逐片累计 UTF-8 长度，和最终文件同一口径
+  return { filteredImages, totalBytes: emittedBytes }
 }
 
-/** JSON 导出文件名(BAKER-JSON-时间戳.json) */
+/** JSON 导出文件名(BAKER-JSON-本地时间.json) —— 与 ZIP 共用 timestamp()，时区一致（B11） */
 export function jsonExportFileName(): string {
-  const d = new Date()
-  const p = (n: number) => String(n).padStart(2, '0')
-  const ts = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
-  return `BAKER-JSON-${ts}${JSON_EXPORT_EXT}`
+  return `BAKER-JSON-${timestamp()}${JSON_EXPORT_EXT}`
 }
 
 /**
  * 导出 JSON 工程文件(按平台:安装版弹系统保存框 / 浏览器直接下载)。
  * 复用 zipExport 的跨平台下载逻辑(EXE 系统另存为 / APK SAF / 浏览器 <a download>)。
+ *
+ * 大图重编码（B7）只在**会触发预算处理的超大导出**里做：`exportToJson` 是
+ * 同步的，做不了 canvas，所以放到序列化之前。常规导出保留原图（导出是备份，
+ * 用户预期包里就是原图），`reencodedImages` 恒为 0。
  */
 export async function downloadProjectJson(
   cards: Card[],
@@ -503,31 +517,22 @@ export async function downloadProjectJson(
   promptOverrides: Record<string, string>,
   settingsSnapshot?: Record<string, unknown> | null,
   cardOrder?: string[] | null,
-): Promise<{ filteredImages: number; totalBytes: number }> {
-  const { json, filteredImages, totalBytes } = exportToJson(
-    cards, myGender, stripVariantIndex, promptOverrides, settingsSnapshot, cardOrder,
+): Promise<{ filteredImages: number; reencodedImages: number; totalBytes: number }> {
+  // 与 ZIP 同口径：平时不动图片，只有超大导出才先压图（避免剔除/超限）
+  const prepared = estimateExportBytes(cards) > EXPORT_BUDGET_BYTES
+    ? await reencodeOversizedImages(cards)
+    : { cards, reencodedImages: 0 }
+  const { json, filteredImages } = exportToJson(
+    prepared.cards, myGender, stripVariantIndex, promptOverrides, settingsSnapshot, cardOrder,
   )
   const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
-  await downloadBlob(blob, jsonExportFileName())
-  return { filteredImages, totalBytes }
+  // 真实字节（B12）：浏览器端是 blob.size；原生端是 saveExportFileSmart
+  // 回读校验过的落盘字节。两者都比"估算值"更接近用户拿到的文件。
+  const written = await downloadBlob(blob, jsonExportFileName())
+  return {
+    filteredImages,
+    reencodedImages: prepared.reencodedImages,
+    totalBytes: written || blob.size,
+  }
 }
 
-// =============================================================================
-// 分块导出（大数据量 / 应急导出）
-// -----------------------------------------------------------------------------
-// 为什么要有这一套：
-//   旧流程 = 整包拼成一个 JSON 字符串 → Blob → 整包 base64 → 一次过桥。
-//   30MB+ 的工程在手机上做这三步，峰值内存轻松上几百 MB → **导出时闪退**。
-//   分块流程 = 逐张卡拼 JSON → 每 512KB 交给原生插件 → 原生侧校验后落盘 →
-//   最后回读整个文件逐块比对哈希。峰值内存与总大小无关。
-//
-// 应急导出（emergency=true）：
-//   直接写进手机「内部存储/Download/BAKER」，不需要 root、不需要数据线，
-//   文件管理器里就能看到 —— 给"拿不出数据"的用户一条活路。
-// =============================================================================
-
-/**
- * 导出 JSON 工程（Android 走分块 + 校验；其他平台走原有下载）
- *
- * @param emergency true = 应急导出（不弹选择框，直接落到下载目录）
- */

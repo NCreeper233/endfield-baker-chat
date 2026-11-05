@@ -6,13 +6,13 @@
 
 @use 'variables' as *;
 
-@font-face {
-  font-family: 'HarmonyOS Sans SC Medium';
-  src: url('/fonts/HarmonyOS_Sans_SC_Medium.woff2') format('woff2');
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
+// -----------------------------------------------------------------------------
+// 品牌字体「HarmonyOS Sans SC Medium」不在这里声明，改为 main.ts 按平台注入：
+//   · EXE / APK：字体随包分发，本地读取几乎零成本 → 注入，保留品牌观感
+//   · 网页版：全量中文字体 4.3MB，实测在测试链路上单字体就要 ~29 秒，
+//     是首屏最大单项开销 → 不注入，自动回退 MiSans / PingFang / 雅黑
+// @font-face 不再写死，见 src/main.ts 的 registerBrandFont()
+// -----------------------------------------------------------------------------
 
 * {
   margin: 0;

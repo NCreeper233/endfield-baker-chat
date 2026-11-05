@@ -23,7 +23,7 @@ import { API_BASES, groupBaseUrl } from '../constants/apiRoutes'
 // ⚠ 已废弃：本常量写死了 primary 域名，不跟随用户在设置里选择的备用域名。
 //   实际请求走 groupBaseUrl()（见下方调用点），保留仅为兼容旧引用。
 //   新代码请勿使用这个常量，否则备用域名会失效。
-export const GROUP_BASE_URL = API_BASES.primary + '/group'
+const GROUP_BASE_URL = API_BASES.primary + '/group'
 
 /** 群聊发言模式(与后端 VALID_SPEAK_MODES 一致) */
 export type GroupSpeakMode = 'round' | 'smart' | 'assign'

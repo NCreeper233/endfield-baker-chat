@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 // =============================================================================
 // 数据管理弹窗(DataManagerDialog)
 // -----------------------------------------------------------------------------
@@ -24,11 +24,13 @@ import { computed, ref, watch, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
 import { useSettingsStore } from '../../stores/settings'
+import VersionDialogShell from './VersionDialogShell.vue'
 import { MATERIALS } from '../../constants/materials'
 import {
   downloadProject,
   importFromZip,
   getNativeSaveFile,
+  projectExportFileName,
   type ProjectPayload,
 } from '../../utils/zipExport'
 import {
@@ -37,7 +39,7 @@ import {
   exportToJson,
   IMPORT_FILE_ACCEPT,
 } from '../../utils/jsonCompat'
-import { isNativeAndroid } from '../../utils/nativeExport'
+import { isNativeAndroid, saveExportFileSmart } from '../../utils/nativeExport'
 import { isElectron, isNative } from '../../utils/platform'
 import {
   uploadCloudData,
@@ -120,14 +122,32 @@ function isNativePlatform(): boolean {
   return isElectron() || isNative()
 }
 
-/** 导出后提示（大图过滤信息） */
-function applyExportInfo(filteredImages: number, totalBytes: number, kind: string) {
+/**
+ * 导出后提示（大图处理结果 + 真实体积）
+ *
+ * 两类处理分开报：重编码是"图还在，只是压小了"，剔除是"图没进包，只剩占位"。
+ * 以前只报一个 filteredImages，用户看到"已过滤 N 张"会以为图被弄丢了（B7）。
+ *
+ * totalBytes 由 utils 返回**真实字节**（ZIP = 落盘/blob.size，JSON = UTF-8 长度），
+ * 不再是估算值 —— 提示里的 MB 数必须和用户拿到的文件对得上（B12）。
+ */
+function applyExportInfo(
+  filteredImages: number,
+  reencodedImages: number,
+  totalBytes: number,
+  kind: string,
+) {
   const mb = (totalBytes / 1024 / 1024).toFixed(1)
-  if (filteredImages > 0) {
-    exportInfo.value = `${kind}完成(约 ${mb}MB)。因数据量较大,已自动过滤 ${filteredImages} 张超大图片(保留"[图片]"占位)。`
-  } else {
-    exportInfo.value = `${kind}完成(约 ${mb}MB)。`
+  const notes: string[] = []
+  if (reencodedImages > 0) {
+    notes.push(
+      `已重编码 ${reencodedImages} 张大图（最长边 1600、画质略有压缩，体积已显著减小）`,
+    )
   }
+  if (filteredImages > 0) {
+    notes.push(`已剔除 ${filteredImages} 张超大图片（保留"[图片]"占位）`)
+  }
+  exportInfo.value = `${kind}完成(约 ${mb}MB)。` + (notes.length > 0 ? notes.join('；') + '。' : '')
 }
 
 // ---- 两段式确认状态 ---------------------------------------------------------
@@ -144,30 +164,32 @@ const confirmTexts: Record<Exclude<ConfirmKind, null>, string> = {
   import: '导入将覆盖当前全部数据，确定吗？',
 }
 
+/** 确认弹窗的标题(与触发按钮同名,让玩家一眼看出自己在确认什么) */
+const confirmTitles: Record<Exclude<ConfirmKind, null>, string> = {
+  clear: '删除全部对话',
+  clearMessages: '清空全部消息',
+  clearContext: '清空全部上下文',
+  clearEverything: '一键清空历史与上下文',
+  import: '导入数据',
+}
+
+/** 当前确认弹窗标题(null 时给个兜底,弹窗本身不显示) */
+const confirmTitle = computed(() =>
+  confirmKind.value ? confirmTitles[confirmKind.value] : '确认操作',
+)
+
 const fileInput = ref<HTMLInputElement | null>(null)
 
 /** 导入合并进行中（合并是同步的，但数据量大时仍会让出一次绘制） */
 const isMergingImport = ref(false)
 
-
-
 /**
- * 统一导出入口
+ * 导出数据(.zip)
  *
- * @param kind      zip(压缩包) / json(单文件)
- * @param emergency 应急导出：安卓上直接写进手机「下载/BAKER」，不需要 root/数据线
- */
-/**
- * 导出数据(.zip) —— **恢复为正式版实现**（2026-09-30 按用户要求）
- *
- * 正式版的路径就是两条，简单可靠：
- *   1. 打包端(EXE/APK)：exportToZipInWorker(打包+base64) → getNativeSaveFile() → saveFile()
- *      原生插件内部用 ACTION_CREATE_DOCUMENT 拉起系统文件管理器
+ * 两条路径，简单可靠：
+ *   1. 打包端(EXE/APK)：exportToZipInWorker(打包+base64) → saveExportFileSmart()
+ *      —— 小文件走系统保存框；大文件走分块写入 + 收尾回读校验，失败明确报错
  *   2. 浏览器：downloadProject() 直接下载
- *
- * 已移除测试版后加的全套自研机制（分块写入 beginWrite/appendChunk/finishWrite、
- * probePlugin 探测、强制超时、时间线打点、已用时显示）——它们没能解决问题，
- * 反而增加了"卡在 preparing"这类不可见故障面。
  */
 async function onExport() {
   if (isExporting.value) return
@@ -181,30 +203,34 @@ async function onExport() {
       throw new Error('当前没有可导出的数据（列表为空）。若你确认有聊天记录，请先重启应用再试；' +
                       '仍为空说明本地数据文件异常，可把数据目录里的 endfield-baker-data.json 发我排查。')
     }
-    const fileName = `BAKER-${new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19).replace(/-/g, '')}.zip`
+    // 文件名统一用 zipExport 的本地时间戳：以前这里用 toISOString()（UTC），
+    // 同一时刻导出的 ZIP 与 JSON 会差 8 小时，用户按时间对不上（B11）。
+    const fileName = projectExportFileName()
     if (isNativePlatform()) {
       // 打包端(EXE/APK)：Worker 内序列化 + 压缩 + base64，再经原生保存
-      const { base64, filteredImages, totalBytes } = await exportToZipInWorker(
+      const { base64, filteredImages, reencodedImages, totalBytes } = await exportToZipInWorker(
         cards.value,
         chatStore.myGender,
         chatStore.stripVariantIndex,
         settingsStore.promptOverrides,
         settingsStore.getSettingsSnapshot(),
       )
-      const saveFile = await getNativeSaveFile()
-      if (!saveFile) throw new Error('未找到系统保存组件')
-      const result = await saveFile({ fileName, base64 })
-      if (result?.canceled) throw new Error('已取消导出')
-      applyExportInfo(filteredImages, totalBytes, '导出数据')
+      // 以前这里走整包 base64 的 saveFile，且**不校验落盘字节**：
+      // 数据一大桥层就静默截断 → 得到 0 字节空包还提示"导出完成"。
+      // 现在统一走 saveExportFileSmart：小文件走系统保存框（带空内容守卫），
+      // 大文件走分块写入（逐块 SHA-256 + 收尾回读校验），失败会明确报错。
+      const saved = await saveExportFileSmart({ fileName, base64, mime: 'application/zip' })
+      // 优先用落盘字节（分块通道是回读校验过的），拿不到再退回 blob 真实体积（B12）
+      applyExportInfo(filteredImages, reencodedImages, saved.bytes || totalBytes, '导出数据')
     } else {
-      const { filteredImages, totalBytes } = await downloadProject(
+      const { filteredImages, reencodedImages, totalBytes } = await downloadProject(
         cards.value,
         chatStore.myGender,
         chatStore.stripVariantIndex,
         settingsStore.promptOverrides,
         settingsStore.getSettingsSnapshot(),
       )
-      applyExportInfo(filteredImages, totalBytes, '导出数据')
+      applyExportInfo(filteredImages, reencodedImages, totalBytes, '导出数据')
     }
   } catch (err) {
     importError.value = err instanceof Error ? err.message : '导出失败'
@@ -220,7 +246,7 @@ async function onExportJson() {
   exportInfo.value = ''
   importError.value = ''
   try {
-    const { filteredImages, totalBytes } = await downloadProjectJson(
+    const { filteredImages, reencodedImages, totalBytes } = await downloadProjectJson(
       cards.value,
       chatStore.myGender,
       chatStore.stripVariantIndex,
@@ -229,7 +255,7 @@ async function onExportJson() {
       // v7：把当前列表人物顺序一起写进包（覆盖导入时应用）
       chatStore.exportCardOrder(),
     )
-    applyExportInfo(filteredImages, totalBytes, '导出 JSON')
+    applyExportInfo(filteredImages, reencodedImages, totalBytes, '导出 JSON')
   } catch (err) {
     importError.value = err instanceof Error ? err.message : '导出失败'
   } finally {
@@ -244,7 +270,7 @@ async function onEmergencyExport() {
   exportInfo.value = ''
   importError.value = ''
   try {
-    const { filteredImages, totalBytes } = await downloadProjectJson(
+    const { filteredImages, reencodedImages, totalBytes } = await downloadProjectJson(
       cards.value,
       chatStore.myGender,
       chatStore.stripVariantIndex,
@@ -253,7 +279,7 @@ async function onEmergencyExport() {
       // v7：把当前列表人物顺序一起写进包（覆盖导入时应用）
       chatStore.exportCardOrder(),
     )
-    applyExportInfo(filteredImages, totalBytes, '应急导出')
+    applyExportInfo(filteredImages, reencodedImages, totalBytes, '应急导出')
   } catch (err) {
     importError.value = err instanceof Error ? err.message : '应急导出失败'
   } finally {
@@ -644,7 +670,7 @@ function onCancelConfirm() {
       :class="{ 'dm--embedded': embedded }"
       @click.self="emit('close')"
     >
-      <div class="dm__panel" :class="{ 'dm__panel--narrow': !!confirmKind }">
+      <div class="dm__panel">
         <!-- 右上角 × 关闭按钮(内嵌模式不显示) -->
         <button v-if="!embedded" class="dm__close" type="button" aria-label="关闭" @click="emit('close')">×</button>
         <h2 v-if="!embedded" class="dm__title">数据管理</h2>
@@ -653,36 +679,9 @@ function onCancelConfirm() {
           {{ stats.sizeKB }} KB
         </p>
 
-        <!-- 二次确认页 -->
-        <div v-if="confirmKind" class="dm__confirm">
-          <!-- 导入：让用户选「合并」还是「覆盖」（2026-09-30 新增） -->
-          <template v-if="confirmKind === 'import'">
-            <p class="dm__confirm-text">导入方式：合并保留现有数据，覆盖会替换全部数据。</p>
-            <p class="dm__subtitle">
-              合并规则：同一角色已有对话时，导入的对话会作为**新的对话卡**追加到该角色下；
-              本地没有的角色则直接新建；群聊一律直接追加。
-            </p>
-            <div class="dm__actions">
-              <button class="dm__btn dm__btn--primary" type="button" @click="onConfirmMerge">
-                {{ isMergingImport ? '合并中…' : '合并数据' }}
-              </button>
-              <button class="dm__btn dm__btn--danger" type="button" :disabled="isMergingImport" @click="onConfirmOverwrite">
-                覆盖数据
-              </button>
-              <button class="dm__btn" type="button" :disabled="isMergingImport" @click="onCancelConfirm">取消</button>
-            </div>
-          </template>
-          <template v-else>
-            <p class="dm__confirm-text">{{ confirmTexts[confirmKind] }}</p>
-            <div class="dm__actions">
-              <button class="dm__btn dm__btn--primary" type="button" @click="onConfirm">确认</button>
-              <button class="dm__btn" type="button" @click="onCancelConfirm">取消</button>
-            </div>
-          </template>
-        </div>
-
         <!-- 主页面:导出/导入 + 三个全局清空按钮 -->
-        <template v-else>
+        <template v-if="!confirmKind">
+          <h3 v-if="embedded" class="dm__group">数据</h3>
           <div class="dm__actions">
             <button class="dm__btn dm__btn--primary" type="button" :disabled="isExporting" @click="onExport">
               {{ isExporting ? '导出中…' : '导出数据' }}
@@ -704,9 +703,10 @@ function onCancelConfirm() {
             <button class="dm__btn" type="button" @click="onPickFile">导入数据</button>
           </div>
 
-          <div class="dm__divider"></div>
+          <div class="dm__divider" v-if="!embedded"></div>
 
           <!-- 云同步(临时数据中转):上传换取件码 / 输码取回 -->
+          <h3 v-if="embedded" class="dm__group">云同步</h3>
           <p class="dm__subtitle">云同步（临时 · 最多保留 24~48 小时）</p>
           <div class="dm__actions">
             <button class="dm__btn dm__btn--primary" type="button" :disabled="cloudBusy" @click="onCloudUpload">
@@ -775,8 +775,9 @@ function onCancelConfirm() {
             <p v-if="codeInvalid" class="dm__fetch-error">取件码无效</p>
           </div>
 
-          <div class="dm__divider"></div>
+          <div class="dm__divider" v-if="!embedded"></div>
 
+          <h3 v-if="embedded" class="dm__group dm__group--danger">危险操作</h3>
           <div class="dm__actions dm__actions--menu">
             <button class="dm__btn dm__btn--danger" type="button" @click="onRequestClear">删除全部对话</button>
             <button class="dm__btn" type="button" @click="onRequestClearMessages">清空全部消息</button>
@@ -795,6 +796,53 @@ function onCancelConfirm() {
 
         <input ref="fileInput" type="file" :accept="IMPORT_FILE_ACCEPT" hidden @change="onFileChange" />
       </div>
+
+      <!--
+        破坏性操作的二次确认:与公告 / 提醒 / 更新弹窗同一副外壳。
+        以前是"把面板内容换成确认页",玩家会失去上下文;现在改成覆盖式弹窗,
+        背景里的数据页还在,取消即原样返回。
+      -->
+      <VersionDialogShell
+        :open="!!confirmKind"
+        :title="confirmTitle"
+        kind="alert"
+        :closable="!isMergingImport"
+        @close="onCancelConfirm"
+      >
+        <!-- 导入:让用户选「合并」还是「覆盖」 -->
+        <template v-if="confirmKind === 'import'">
+          <p class="dm__confirm-text">导入方式:合并保留现有数据，覆盖会替换全部数据。</p>
+          <p class="dm__confirm-note">
+            合并规则：同一角色已有对话时，导入的对话会作为新的对话卡追加到该角色下；
+            本地没有的角色则直接新建；群聊一律直接追加。
+          </p>
+        </template>
+        <p v-else-if="confirmKind" class="dm__confirm-text">{{ confirmTexts[confirmKind] }}</p>
+
+        <template #actions>
+          <template v-if="confirmKind === 'import'">
+            <button class="pn-btn" type="button" :disabled="isMergingImport" @click="onConfirmMerge">
+              <span class="pn-btn__tex" aria-hidden="true"></span>
+              <span class="pn-btn__deco" aria-hidden="true"></span>
+              <span class="pn-btn__label">{{ isMergingImport ? '合并中…' : '合并数据' }}</span>
+            </button>
+            <button class="pn-btn dm-act--danger" type="button" :disabled="isMergingImport" @click="onConfirmOverwrite">
+              <span class="pn-btn__label">覆盖数据</span>
+            </button>
+            <button class="pn-btn dm-act--ghost" type="button" :disabled="isMergingImport" @click="onCancelConfirm">
+              <span class="pn-btn__label">取消</span>
+            </button>
+          </template>
+          <template v-else>
+            <button class="pn-btn dm-act--danger" type="button" @click="onConfirm">
+              <span class="pn-btn__label">确认</span>
+            </button>
+            <button class="pn-btn dm-act--ghost" type="button" @click="onCancelConfirm">
+              <span class="pn-btn__label">取消</span>
+            </button>
+          </template>
+        </template>
+      </VersionDialogShell>
     </div>
   </Transition>
 </template>
@@ -1043,6 +1091,48 @@ $progress-text-color: #ffef00;
   &__btn--danger {
     background: #7a2e2e;
     color: #f0eeee;
+  }
+}
+
+// ---- 二次确认弹窗(VersionDialogShell 的白底正文区) ----------------------
+// 弹窗正文是浅色底,原先那套深色面板用的浅灰字在这里会看不清,单独覆盖一档。
+.dm__confirm-text {
+  margin: 0 0 10px;
+  color: #1f1f1f;
+  font-family: $font-harmony;
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.dm__confirm-note {
+  margin: 0;
+  color: #5f5f5f;
+  font-family: $font-harmony;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+// 弹窗按钮:危险操作红底、次要操作浅底,主操作沿用 .pn-btn 的深色
+.dm-act--danger {
+  background: #7a2e2e;
+  color: #f0eeee;
+  box-shadow: 0 0 0 0.05em #7a2e2e, 0 0 0 0.05em #a86a6a inset;
+
+  &:hover:not(:disabled) {
+    background: #632424;
+    color: #f8f4f4;
+    box-shadow: 0 0 0 0.05em #632424, 0 0 0 0.05em #a86a6a inset;
+  }
+}
+
+.dm-act--ghost {
+  background: rgba(0, 0, 0, 0.06);
+  color: #2a2a2a;
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.18) inset;
+
+  &:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.12);
+    color: #111;
   }
 }
 </style>

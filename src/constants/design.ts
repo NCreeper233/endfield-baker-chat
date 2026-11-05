@@ -183,7 +183,7 @@ export function avatarTopToBubble(avatarBox: number): Record<'other' | 'mine', n
 }
 
 /** 桌面端头像→气泡偏移(98px 头像盒,与历史行为一致) */
-export const AVATAR_TOP_TO_BUBBLE = avatarTopToBubble(CHAT.avatarBox)
+const AVATAR_TOP_TO_BUBBLE = avatarTopToBubble(CHAT.avatarBox)
 
 /**
  * 由头像顶部 y 推算气泡顶部 y

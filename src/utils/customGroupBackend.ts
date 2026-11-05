@@ -36,7 +36,9 @@ import { useSettingsStore } from '../stores/settings'
 import { customChatCompletion, parseSuggestionList } from './customApi'
 import type { CustomChatMessage } from './customApi'
 import { applyImmersiveToCharacterPrompt, stripImmersive } from './immersive'
+import { buildRagContext } from './rag'
 import { devInfo, devWarn } from './logger'
+import { applyLengthPolicy } from '../constants/prompts'
 import type {
   CreateGroupSessionInput,
   GroupHistoryItem,
@@ -57,6 +59,27 @@ const MAX_TURNS = 60
 
 /** 送往模型的历史条数上限(与后端 HISTORY_LIMIT 一致) */
 const HISTORY_LIMIT = 50
+
+/**
+ * 历史裁剪的"块大小"
+ *
+ * 直接 `slice(-HISTORY_LIMIT)` 会让窗口每轮往前滑一条,前缀每轮都变 →
+ * 服务商的前缀缓存**永远不命中**。这里改成:超出上限时一次丢掉一整块
+ * (向上取整到块大小),窗口在接下来的 8 轮里保持完全一致,缓存能吃满。
+ */
+const HISTORY_TRIM_CHUNK = 8
+
+/**
+ * 计算本轮历史的起始下标(从尾部往前保留,最多 HISTORY_LIMIT 条)
+ *
+ * 超额部分向上取整到块大小的倍数:例如上限 50、历史 51 条 → 从第 8 条起,
+ * 保留 43 条;到 59 条仍是同一个起点;到 60 条才再跳 8 条。
+ */
+function windowStart(total: number): number {
+  if (total <= HISTORY_LIMIT) return 0
+  const excess = total - HISTORY_LIMIT
+  return Math.ceil(excess / HISTORY_TRIM_CHUNK) * HISTORY_TRIM_CHUNK
+}
 
 /** 渲染成"发言人:内容"文本时的历史条数上限(与后端 build_history_text 一致) */
 const HISTORY_TEXT_LIMIT = 40
@@ -245,12 +268,7 @@ function escapeRegExp(text: string): string {
  *   - 第 2 段单独成一条 system(见 generateReply 的 messages 组装);
  *   - 第 5 段与群聊规则照后端文本组装。
  */
-function buildGroupSystemPrompt(
-  s: LocalGroupSession,
-  speaker: string,
-  topic: string,
-  nudge: string,
-): string {
+function buildGroupSystemPrompt(s: LocalGroupSession): string {
   const store = useSettingsStore()
   // 第 1 段:世界观(与单聊 custom 用的同一条 system 文本)
   const worldview = store.getSystemMessage()
@@ -262,19 +280,33 @@ function buildGroupSystemPrompt(
       ? '玩家以「管理员」身份参与对话,管理员发言由玩家自己输入。'
       : `玩家扮演「${s.myRole}」,该角色的发言由玩家自己输入。`
 
+  // ⚠️ 首条 system 是**所有角色共享的缓存前缀**:这里只能写与"这一轮谁发言"
+  // 无关的内容。一旦把「你正在扮演 X」写进来,群聊里换个角色发言整段前缀就作废。
+  // 角色身份 / 本轮话题 / 催促语统一放进 buildSpeakerBriefing,贴在本轮最后
+  // 一条 user 之前(与 RAG 语料同一位置)。
   const groupRules = [
     '【群聊场景】',
     `这是一个多人聊天群,群名「${s.groupName || '群聊'}」,成员:${membersLine}。`,
     roleLine,
-    `你正在扮演其中的「${speaker}」。`,
     '规则:',
-    `1. 只输出「${speaker}」这一个角色的发言,绝对不要替别人说话,也不要写任何旁白式的第三人称叙述。`,
+    '1. 只输出你自己这一个角色的发言,绝对不要替别人说话,也不要写任何旁白式的第三人称叙述。',
     '2. 这是群聊,不是一对一。语气要像在群里说话:短、口语化、可以点名回应某个人(用「@某某」或直接叫名字),不要长篇大论。',
     '3. 发言要接得住上文,针对最近几条消息里最值得回应的点,不要自说自话,也不要把之前说过的话重复一遍。',
     '4. 与在场成员的亲疏、称呼、态度严格遵照你在原作设定中与他们的关系。',
   ].join('\n')
 
-  const parts = [worldview, groupRules]
+  return [worldview, groupRules].filter((p) => p && p.trim()).join('\n\n')
+}
+
+/**
+ * 本轮发言的"临时简报":谁在说话 + 玩家刚抛出的话题 + 催促语
+ *
+ * 全是**每轮都会变**的内容,所以放在本轮最后一条 user 的**前面**
+ * (与 RAG 语料同一位置),让前面的固定前缀(世界观 + 群规则 + 角色提示词 +
+ * 历史)保持完全一致 —— 换人发言也能命中前缀缓存。
+ */
+function buildSpeakerBriefing(speaker: string, topic: string, nudge: string): string {
+  const parts = [`【本轮发言】你正在扮演「${speaker}」,只输出这一个角色的发言。`]
   if (topic) {
     parts.push(
       `【玩家刚刚抛出的话题】\n${topic}\n请自然地接住这个话题,不要生硬地宣布「话题切换」。`,
@@ -312,7 +344,7 @@ async function generateReply(
   }
 
   const store = useSettingsStore()
-  const system = buildGroupSystemPrompt(s, speaker, opts.topic, opts.nudge ?? '')
+  const system = buildGroupSystemPrompt(s)
   const messages: CustomChatMessage[] = [{ role: 'system', content: system }]
 
   // 第 2 段:角色提示词
@@ -320,11 +352,16 @@ async function generateReply(
   // 同口径):截掉强制括号的「### 回复风格规则」并追加禁止规则,或保留原风格。
   // 刻意不用 settingsStore.getCharacterMessage():那条消息读的是 store 全局开关,
   // 而这里要跟随请求参数,避免"提示词层用 A、文本层用 B"的分叉。
-  const character = applyImmersiveToCharacterPrompt(
-    store.getCharacterPrompt(speaker), opts.immersive)
+  // 长度策略：角色卡里若带 {LENGTH_TARGET} 占位符，必须在这里按角色填掉，
+  // 否则发给模型的是字面量（fillLengthTarget 无占位符时原样返回，可无条件调用）。
+  const character = applyLengthPolicy(
+    applyImmersiveToCharacterPrompt(store.getCharacterPrompt(speaker), opts.immersive), speaker)
   if (character) messages.push({ role: 'system', content: character })
 
-  for (const h of history.slice(-HISTORY_LIMIT)) {
+  // ---- 历史:按"块"裁剪,不是每轮滑一条 --------------------------------
+  // 逐条滑动会让**每一轮的前缀都不一样**(开头少一条),等于永远缓存不命中;
+  // 改成超额时一次丢一整块,前缀在接下来的若干轮里保持完全一致。
+  for (const h of history.slice(windowStart(history.length))) {
     let text = (h.text ?? '').trim()
     if (!text) {
       if (h.image) text = h.side === 'other' ? '[图片]' : '[玩家发来一张图片]'
@@ -339,14 +376,39 @@ async function generateReply(
     }
   }
 
-  if (opts.topic) {
-    messages.push({ role: 'user', content: `（玩家抛出的话题：${opts.topic}）` })
-  }
+  // ---- 本轮简报:谁在说话 + 话题 + 催促语 -------------------------------
+  // 这些每轮都变,所以贴在本轮最后一条 user 之前(与语料同一位置),
+  // 不污染前面的固定前缀。
+  messages.push({
+    role: 'user',
+    content: buildSpeakerBriefing(speaker, opts.topic, opts.nudge ?? ''),
+  })
   messages.push({
     role: 'user',
     content: `（现在轮到你「${speaker}」在群里发言。只输出你要说的内容,`
       + `不要加引号、不要写'${speaker}：'这样的前缀。）`,
   })
+
+  // ---- 后端 RAG 检索(群聊) ----------------------------------------------
+  // 语料插在**本轮最后一条 user 之前**(也就是那句「轮到你发言」之前),而不是
+  // 提示词之后:这样固定前缀(两段提示词 + 之前的历史)每轮完全一致,服务商的
+  // 前缀缓存能一路命中,只有新检索到的语料与本轮指令需要重新计费。
+  // 检索失败静默跳过;开关关闭时完全不发请求。
+  if (store.ragEnabled) {
+    const lastMine = [...history].reverse().find((h) => h.side === 'mine' && (h.text ?? '').trim())
+    const query = ((lastMine?.text ?? '') || opts.topic || '').trim()
+    const ragBlock = query ? await buildRagContext(query, opts.signal, store.ragTopK) : ''
+    if (ragBlock) {
+      let insertAt = messages.length
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          insertAt = i
+          break
+        }
+      }
+      messages.splice(insertAt, 0, { role: 'system', content: ragBlock })
+    }
+  }
 
   const { text: raw } = await customChatCompletion(store.apiConfig, messages, {
     temperature: 0.85,

@@ -34,5 +34,23 @@ const INITIAL_CARDS: Card[] = CHARACTERS.map((c) => ({
  * 返回的数组不与常量共享引用,后续 store 原地增删元素不会污染常量。
  */
 export function createInitialCards(): Card[] {
-  return INITIAL_CARDS.map((card) => structuredClone(card))
+  return INITIAL_CARDS.map((card) => deepClone(card))
+}
+
+/**
+ * 深拷贝（带降级）
+ *
+ * `structuredClone` 是 ES2022 的内置函数：鸿蒙 ArkWeb / 老安卓 WebView
+ * 上可能不存在，直接调用会让启动 seed 抛错 → 白屏。
+ * 卡片数据是纯 JSON（字符串/数字/数组/对象），JSON 往返足够且兼容性最好。
+ */
+function deepClone<T>(value: T): T {
+  if (typeof structuredClone === 'function') {
+    try {
+      return structuredClone(value)
+    } catch {
+      // 落入 JSON 分支
+    }
+  }
+  return JSON.parse(JSON.stringify(value)) as T
 }

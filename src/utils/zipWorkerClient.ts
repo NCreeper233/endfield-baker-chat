@@ -68,7 +68,11 @@ function callWorker<T>(msg: Record<string, unknown>): Promise<T> {
 
 export interface WorkerExportResult {
   base64: string
+  /** 被剔除(退回 [图片] 占位)的图片张数 */
   filteredImages: number
+  /** 被 canvas 重编码(仍是图,只是压小了)的图片张数 */
+  reencodedImages: number
+  /** 真实字节:浏览器端=ZIP blob.size;原生分块通道另有回读校验过的落盘字节 */
   totalBytes: number
 }
 
@@ -89,7 +93,7 @@ export async function exportToZipInWorker(
   // 表现为 "could not be cloned / could not be closed")。
   // JSZip 3.10 的 generateAsync 本身就是异步 API(内部同步流处理),不会阻塞主线程;
   // base64 转换采用分片(8K 参数)避免栈溢出。稳定性优先。
-  const { blob, filteredImages, totalBytes } = await exportToZip(
+  const { blob, filteredImages, reencodedImages, totalBytes } = await exportToZip(
     cards as never,
     myGender,
     stripVariantIndex,
@@ -97,7 +101,7 @@ export async function exportToZipInWorker(
     settingsSnapshot,
   )
   const base64 = await blobToBase64Fallback(blob)
-  return { base64, filteredImages, totalBytes }
+  return { base64, filteredImages, reencodedImages, totalBytes }
 }
 
 /** 导入解析:直接在主线程执行(与导出一致,避免跨线程 Blob 兼容问题) */

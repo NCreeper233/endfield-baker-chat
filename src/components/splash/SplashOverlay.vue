@@ -15,7 +15,12 @@ const props = withDefaults(
   { minDuration: 2200 },
 )
 
-const emit = defineEmits<{ (e: 'complete'): void }>()
+const emit = defineEmits<{
+  /** 进度到达 100%(扫屏 / 淡出还没结束) */
+  (e: 'complete'): void
+  /** 遮罩已经完全退场(淡出播完、元素移除)—— 入场弹窗等这个信号 */
+  (e: 'done'): void
+}>()
 
 const isVisible = ref(true)
 const phase = ref<'init' | 'loading' | 'complete' | 'sweeping' | 'fadeout'>('init')
@@ -66,6 +71,8 @@ onMounted(() => {
             timers.push(setTimeout(() => {
               isVisible.value = false
               document.body.style.overflow = ''
+              // 遮罩已彻底退场:入场弹窗从这里开始才允许出现
+              emit('done')
             }, 300))
           }, 400),
         )
