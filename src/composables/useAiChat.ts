@@ -334,15 +334,14 @@ export function useAiChat() {
     /** 本轮是否发生了上下文压缩(压缩会使服务端缓存前缀失效) */
     let compacted = false
 
-    /** 落字前拦「彻底空白」：上游返回空，或被沉浸式过滤器整条吃掉 */
-    const rejectIfUnplayable = (): boolean => {
-      if (fullText.trim()) return false
-      chatStore.appendAiError(
-        '回复内容为空(可能被沉浸式过滤掉或上游返回空),可点「重新生成」重试',
-        userMsgId,
-        ctx,
-      )
-      return true
+    /**
+     * 整轮到此为止：什么都没有落下，抹掉加载气泡
+     *
+     * 空回复不弹任何提示 —— 上游返回空、或被沉浸式过滤成空，玩家看到的
+     * 只是加载气泡消失。
+     */
+    const endEmptyTurn = (): void => {
+      chatStore.abortAiResponse(ctx)
     }
 
     // ---- 请求并缓冲完整回复(loading 动画持续,不实时显示文字) -------------
@@ -390,16 +389,18 @@ export function useAiChat() {
           // 逐字播出的细节在 composables/chat/backendStream：节奏、权威全文补完、
           // 以及「收到 delta 前失败就回退非流式」
           const outcome = await runBackendStream(
-            { chat: chatStore, appendStaged, onUnplayable: rejectIfUnplayable },
+            { chat: chatStore, appendStaged, onEmptyTurn: endEmptyTurn },
             {
               apiConfig: settingsStore.apiConfig,
               request,
               signal,
               ctx,
               smartSplit: settingsStore.smartSplit,
+              // done 帧兜底：空白 done 时是否用逐帧文本收尾（默认开）
+              keepDeltasOnEmptyDone: settingsStore.keepDeltasOnEmptyDone,
             },
           )
-          // 已实时播完并收尾，或已按「空回复」写过错误气泡
+          // 已实时播完并收尾（含「空回复静默收尾」）
           if (outcome.kind === 'finalized') return
           fullText = outcome.fullText
           pendingMood = outcome.mood
@@ -457,8 +458,11 @@ export function useAiChat() {
     // 本轮响应已失效(用户点停止,或同一会话又发起了新请求):不继续分段显示
     if (!chatStore.isCtxActive(ctx)) return
 
-    // ---- "空回复"守卫:分段落字之前拦一次 ------------------------------------
-    if (rejectIfUnplayable()) return
+    // 空回复：静默收尾，不留空气泡也不弹提示
+    if (!fullText.trim()) {
+      endEmptyTurn()
+      return
+    }
 
     // 分段与播放：规则在 utils/aiText，节奏在 composables/chat/segmentPlayback
     const segments = splitAiSegments(fullText, settingsStore.smartSplit)

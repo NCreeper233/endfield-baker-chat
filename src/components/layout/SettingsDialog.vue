@@ -1280,6 +1280,40 @@ function resetAll() {
               </SetRow>
             </SetSection>
 
+            <SetSection title="回复收尾">
+              <SetRow
+                label="保留已收到的内容"
+                :hint="settingsStore.keepDeltasOnEmptyDone
+                  ? '已开启：流式收尾帧为空白、但已经收到过内容时，用收到的内容收尾'
+                  : '已关闭：严格以流式收尾帧为准，收尾帧空就算空回复'"
+                :tone="settingsStore.keepDeltasOnEmptyDone ? 'ok' : 'warn'"
+              >
+                <SegControl
+                  :model-value="settingsStore.keepDeltasOnEmptyDone ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  aria-label="保留已收到的内容"
+                  @update:model-value="(v) => (settingsStore.keepDeltasOnEmptyDone = v === 'on')"
+                />
+              </SetRow>
+
+              <SetRow
+                label="沉浸式括号过滤"
+                :hint="settingsStore.immersiveStrip
+                  ? '已开启：沉浸式模式下把括号里的动作、神态从回复里剔掉'
+                  : '已关闭：仍要求角色只输出台词，但角色写了括号也照原样显示'"
+                :tone="settingsStore.immersiveStrip ? 'ok' : 'warn'"
+              >
+                <SegControl
+                  :model-value="settingsStore.immersiveStrip ? 'on' : 'off'"
+                  :options="BOOL_SEG"
+                  :disabled="!settingsStore.immersiveMode"
+                  :title="settingsStore.immersiveMode ? '' : '需先开启「沉浸式对话模式」'"
+                  aria-label="沉浸式括号过滤"
+                  @update:model-value="(v) => (settingsStore.immersiveStrip = v === 'on')"
+                />
+              </SetRow>
+            </SetSection>
+
             <SetSection title="输入面板">
               <SetRow
                 label="新版输入面板"
@@ -1644,7 +1678,11 @@ function resetAll() {
 
 .st__win {
   // 顶部不留白:页签栏紧贴页面顶端
-  padding-top: 0;
+  // 但要给状态栏安全区让位（--safe-top 默认 0；只有边到边机型会是非 0，
+  // 否则设置页顶部那条页签栏会被状态栏压住/点不到）
+  padding-top: var(--safe-top, 0px);
+  // 底部同理：三键导航栏 / 手势条压住内容区底部时兜一层（2026-11-08 真机修）
+  padding-bottom: var(--safe-bottom, 0px);
 }
 
 .st__top {

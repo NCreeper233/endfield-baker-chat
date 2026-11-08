@@ -451,6 +451,41 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
+  // ---- 回复收尾的两个闸（都默认开启）----
+  const KEEP_DELTAS_KEY = `${STORAGE_PREFIX}-keep-deltas`
+  /**
+   * done 帧兜底：后端 done 帧的 reply 是空白、但逐帧已经收到过内容时，用逐帧文本收尾。
+   *
+   * 关掉后严格以 done 帧为准（空白就当真空回复）。只对 SSE 流式有意义 ——
+   * 非流式路径本来就只有 done 那一份文本。
+   */
+  const keepDeltasOnEmptyDone = ref<boolean>(localStorage.getItem(KEEP_DELTAS_KEY) !== '0')
+
+  watch(keepDeltasOnEmptyDone, (val) => {
+    try {
+      localStorage.setItem(KEEP_DELTAS_KEY, val ? '1' : '0')
+    } catch {
+      // 静默失败
+    }
+  })
+
+  const IMMERSIVE_STRIP_KEY = `${STORAGE_PREFIX}-immersive-strip`
+  /**
+   * 沉浸式括号过滤：沉浸式开启时，是否真的把回复里残留的括号描写剔掉。
+   *
+   * 只在「沉浸式对话模式」开启时才有意义（那才是提示词要求只输出台词的场合）。
+   * 关掉后提示词照发，但客户端不再裁剪 —— 模型不听话写了括号，玩家能看到原文。
+   */
+  const immersiveStrip = ref<boolean>(localStorage.getItem(IMMERSIVE_STRIP_KEY) !== '0')
+
+  watch(immersiveStrip, (val) => {
+    try {
+      localStorage.setItem(IMMERSIVE_STRIP_KEY, val ? '1' : '0')
+    } catch {
+      // 静默失败
+    }
+  })
+
   // ---- 实验性：新版输入面板（默认关闭）----
   const NEW_INPUT_PANEL_KEY = `${STORAGE_PREFIX}-new-input-panel`
   /**
@@ -609,6 +644,8 @@ export const useSettingsStore = defineStore('settings', () => {
     bracketCenter.value = false
     bracketColor.value = false // 彩色括号描写:默认关(且依赖括号描写居中)
     centerMyBracket.value = false // 居中我方括号内容:默认关
+    keepDeltasOnEmptyDone.value = true // done 帧兜底:默认开
+    immersiveStrip.value = true // 沉浸式括号过滤:默认开
     newInputPanel.value = false
     summaryConfig.value = { ...DEFAULT_SUMMARY_CONFIG }
     noticeDismissed.value = false
@@ -707,6 +744,8 @@ export const useSettingsStore = defineStore('settings', () => {
       bracketCenter: bracketCenter.value,
       bracketColor: bracketColor.value,
       centerMyBracket: centerMyBracket.value,
+      keepDeltasOnEmptyDone: keepDeltasOnEmptyDone.value,
+      immersiveStrip: immersiveStrip.value,
       newInputPanel: newInputPanel.value,
       choicesEnabled: choicesEnabled.value,
       sseStreaming: sseStreaming.value,
@@ -737,6 +776,10 @@ export const useSettingsStore = defineStore('settings', () => {
     // 这两项原先只导出不导入 —— 恢复备份后设置会悄悄回到默认值
     if (typeof s.bracketColor === 'boolean') bracketColor.value = s.bracketColor
     if (typeof s.centerMyBracket === 'boolean') centerMyBracket.value = s.centerMyBracket
+    if (typeof s.keepDeltasOnEmptyDone === 'boolean') {
+      keepDeltasOnEmptyDone.value = s.keepDeltasOnEmptyDone
+    }
+    if (typeof s.immersiveStrip === 'boolean') immersiveStrip.value = s.immersiveStrip
     if (typeof s.newInputPanel === 'boolean') newInputPanel.value = s.newInputPanel
     if (typeof s.choicesEnabled === 'boolean') choicesEnabled.value = s.choicesEnabled
     if (typeof s.sseStreaming === 'boolean') sseStreaming.value = s.sseStreaming
@@ -773,6 +816,8 @@ export const useSettingsStore = defineStore('settings', () => {
     bracketCenter,
     bracketColor,
     centerMyBracket,
+    keepDeltasOnEmptyDone,
+    immersiveStrip,
     newInputPanel,
     legacyUnlimitedHistory,
     summaryConfig,

@@ -53,11 +53,11 @@ export interface BackendStreamDeps {
   /** 分拍写入(useReplyReveal 的实现) */
   appendStaged: (text: string, ctx: AiResponseCtx) => Promise<void>
   /**
-   * "空回复"守卫:返回 true 表示已按错误处理,本回合到此为止。
+   * 空回复时静默收尾（抹掉加载气泡，不弹提示）
    *
-   * 由调用方提供 —— 它要写错误气泡,并带着 userMsgId(重试锚点)。
+   * 由调用方提供 —— 它要负责 `abortAiResponse` 那套清理。
    */
-  onUnplayable: () => boolean
+  onEmptyTurn: () => void
 }
 
 /** 回合参数 */
@@ -68,6 +68,13 @@ export interface BackendStreamParams {
   ctx: AiResponseCtx
   /** 设置项「智能消息分条」 */
   smartSplit: boolean
+  /**
+   * 设置项「done 帧兜底」（默认 true）
+   *
+   * true：done 帧的 reply 是空白、但逐帧已经收到过内容 → 用逐帧文本收尾
+   * （否则短回复会被覆盖成空串，整轮白说）。
+   */
+  keepDeltasOnEmptyDone?: boolean
 }
 
 /**
@@ -80,8 +87,8 @@ export async function runBackendStream(
   deps: BackendStreamDeps,
   params: BackendStreamParams,
 ): Promise<BackendStreamOutcome> {
-  const { chat, appendStaged, onUnplayable } = deps
-  const { apiConfig, request, signal, ctx, smartSplit } = params
+  const { chat, appendStaged, onEmptyTurn } = deps
+  const { apiConfig, request, signal, ctx, smartSplit, keepDeltasOnEmptyDone } = params
 
   /** 已完成(实时播完并收尾) */
   const finalized: BackendStreamOutcome = { kind: 'finalized' }
@@ -147,6 +154,7 @@ export async function runBackendStream(
   try {
     const result = await fetchBackendReplyStream(apiConfig, request, {
       signal,
+      keepDeltasWhenDoneEmpty: keepDeltasOnEmptyDone !== false,
       onDelta: (text) => {
         revealBuf += text
       },
@@ -181,14 +189,17 @@ export async function runBackendStream(
   await pacer
 
   // done 帧全文为空、但已经实时播过内容(后端异常):以已落下的字为准。
-  // 各段在播放时已经各自 finishAiSegment 入了历史,这里只收尾 ——
-  // 若交给"空回复"守卫,玩家会看到"有内容 + 一条空回复错误"。
+  // 各段在播放时已经各自 finishAiSegment 入了历史,这里只收尾。
   if (streamedLive && !fullText.trim() && playedCount > 0) {
     if (chat.isCtxActive(ctx)) chat.finishAiResponse(ctx)
     return finalized
   }
 
-  if (streamedLive && onUnplayable()) return finalized
+  // 一段都没播、全文还是空:空回复，静默收尾（抹掉加载气泡，不弹任何提示）
+  if (streamedLive && !fullText.trim()) {
+    onEmptyTurn()
+    return finalized
+  }
 
   if (streamedLive) {
     // ---- 收尾:按权威全文补完剩余段 ----------------------------------

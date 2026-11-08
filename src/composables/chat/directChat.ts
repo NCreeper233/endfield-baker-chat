@@ -128,8 +128,13 @@ export async function runDirectChat(
   // 这里再过一遍文本层:模型不听话时也不会漏出 (动作) / *动作*。
   // 用 ImmersiveFilter 逐增量过滤(跨 delta 保持括号状态),
   // 收尾时用一次性 stripImmersive 以权威全文兜底。
+  //
+  // 两道闸:immersiveMode 决定"要不要只留台词"(连提示词一起换),
+  //         immersiveStrip 只决定"文本层要不要真的裁掉括号描写"。
+  // 后者关掉时提示词照发,但模型硬写出来的括号会原样显示 —— 排查用得上。
   const immersive = settings.immersiveMode
-  const immFilter = immersive ? new ImmersiveFilter(true) : null
+  const strip = immersive && settings.immersiveStrip
+  const immFilter = strip ? new ImmersiveFilter(true) : null
   const usageHolder: { value: NormalizedUsage | null } = { value: null }
   let fullText = ''
 
@@ -148,8 +153,8 @@ export async function runDirectChat(
       fullText += immFilter ? immFilter.feed(chunk) : chunk
     },
     onDone: (full) => {
-      // 以权威全文为准再过滤一次(immersive=false 时原样返回)
-      const filtered = stripImmersive(full, immersive)
+      // 以权威全文为准再过滤一次(过滤关掉时原样返回)
+      const filtered = stripImmersive(full, strip)
       // 过滤成空时回退原文:沉浸式把整条回复都判定成"动作描写"时,
       // 玩家看到空气泡等于"对方没说话",比看到带括号的原文更糟。
       fullText = filtered || full

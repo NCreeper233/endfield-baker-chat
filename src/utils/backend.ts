@@ -110,6 +110,13 @@ export interface BackendStreamOptions {
   onStage?: (stage: string) => void
   /** 外部中止信号(通常来自 chat store 的本轮响应上下文) */
   signal?: AbortSignal
+  /**
+   * done 帧兜底（默认 true）
+   *
+   * true：done 帧的 `reply` 是空白、但逐帧已经收到过内容时，退回逐帧累积的文本。
+   * 关掉后严格以 done 帧为准（空白就当真空回复，交给上层报错）。
+   */
+  keepDeltasWhenDoneEmpty?: boolean
 }
 
 /**
@@ -379,7 +386,7 @@ export async function fetchBackendReplyStream(
   request: BackendRequest,
   options: BackendStreamOptions = {},
 ): Promise<BackendReplyResult> {
-  const { onDelta, onStage, signal } = options
+  const { onDelta, onStage, signal, keepDeltasWhenDoneEmpty = true } = options
   // 地址固定为网关 + /stream，不读用户自填 backendUrl
   const url = `${gatewayUrl()}/stream`
 
@@ -467,7 +474,23 @@ export async function fetchBackendReplyStream(
     if (event === 'done') {
       // done 是权威结果:reply 覆盖逐帧累积(可能丢帧),mood 一并带出
       if (typeof payload.reply === 'string') {
-        st.finalReply = payload.reply
+        /**
+         * ⚠️ 唯一的例外：done 的 reply 是空白，而逐帧已经收到过内容，且没关掉兜底开关。
+         *
+         * 这时绝不能拿它覆盖。覆盖会把「上游其实说了几个字」变成整轮空白 ——
+         * 玩家那边什么都不会出现，而屏幕上本来就该有字。
+         * backendStream 里那条 `playedCount > 0` 的兜底救不了这种情形：
+         * 短回复（`嗯。` 这种）在流式期间永远定不了稿，一段都没播过，
+         * 于是两个兜底同时失效。
+         *
+         * 没有收到过任何 delta 时仍然采信 done（后端确实什么都没给）。
+         * mood / usage 不受影响。
+         */
+        const blankDone = !payload.reply.trim()
+        st.finalReply =
+          blankDone && keepDeltasWhenDoneEmpty && st.receivedDelta
+            ? st.accumulated
+            : payload.reply
         st.finalMood = typeof payload.mood === 'string' ? payload.mood : undefined
       }
       // 用量与知识源：done 帧里可能带（后端两种都发，取到即用）
