@@ -13,7 +13,7 @@ const props = withDefaults(
     title: string
     /** 图标种类 */
     kind?: VersionDialogKind
-    /** 版本号(有值才画左上角的小徽标,如 v3.2) */
+    /** 版本号(有值才画左上角的小徽标,如 v3.2.1) */
     version?: string
     /** 日期文字(有值才画在徽标右边,如 2026-10-18) */
     date?: string
