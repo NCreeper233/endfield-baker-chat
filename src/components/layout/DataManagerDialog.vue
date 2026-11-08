@@ -1,35 +1,14 @@
 ﻿<script setup lang="ts">
-// =============================================================================
-// 数据管理弹窗(DataManagerDialog)
-// -----------------------------------------------------------------------------
-// 提供全局操作(控制全部对话):
-//   - 数据统计(卡片 / 对话 / 消息 / 序列化大小)
-//   - 导出工程(两种格式,直接下载):
-//       · 导出数据 = .zip 压缩包(文本 JSON + 独立图片文件)
-//       · 导出 JSON = 单文件 JSON(旧版兼容格式,图片 dataURL 内联)
-//   - 导入工程(选文件 → 解析校验 → 二次确认 → 整体替换):
-//       · .zip 走压缩包解压(见 zipExport)
-//       · .json 走旧版兼容层(见 jsonCompat:自动识别旧格式并补全缺失字段)
-//   - 清空全部对话(删除所有子对话,每个角色保留一个空子对话,清除消息与上下文)
-//   - 清空全部消息(仅清空可见消息,AI 上下文记忆保留)
-//   - 清空全部上下文(仅清空 AI 记忆,可见消息保留)
-//   - 一键清空历史与上下文(同时清空全部消息 + 全部上下文)
-//   - 云同步(临时):一键上传到 local.peilika.beer 换一个取件码;
-//     在别的设备输入取件码即可取回并导入。服务器最多保留 24~48 小时
-//     (每天 12:00 检查一次,超过 24 小时的自动清理)
-//
-// 破坏性操作均为两段式确认(弹窗内切换确认态),不动用现有素材图。
-// =============================================================================
-import { computed, ref, watch, onUnmounted } from 'vue'
+// DataManagerDialog —— 数据管理：统计、导出（.zip / 单文件 JSON）、导入、四种清空、云同步取件码
+// 破坏性操作均为两段式确认（弹窗内切换确认态）。.json 走旧格式兼容层，图片内联；
+// .zip 走压缩包，图片为独立文件。
+import { computed, ref, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
 import { useSettingsStore } from '../../stores/settings'
 import VersionDialogShell from './VersionDialogShell.vue'
-import { MATERIALS } from '../../constants/materials'
 import {
   downloadProject,
-  importFromZip,
-  getNativeSaveFile,
   projectExportFileName,
   type ProjectPayload,
 } from '../../utils/zipExport'
@@ -101,7 +80,7 @@ const stats = computed(() => {
   return { cardCount: cards.value.length, convCount, msgCount, sizeKB: sizeKB.toFixed(1) }
 })
 
-// ---- 导出状态（恢复为正式版实现）-------------------------------------------
+// 导出状态
 /** 导出中（ZIP 正在序列化+压缩） */
 const isExporting = ref(false)
 /** JSON 导出中 */
@@ -123,13 +102,9 @@ function isNativePlatform(): boolean {
 }
 
 /**
- * 导出后提示（大图处理结果 + 真实体积）
- *
- * 两类处理分开报：重编码是"图还在，只是压小了"，剔除是"图没进包，只剩占位"。
- * 以前只报一个 filteredImages，用户看到"已过滤 N 张"会以为图被弄丢了（B7）。
- *
- * totalBytes 由 utils 返回**真实字节**（ZIP = 落盘/blob.size，JSON = UTF-8 长度），
- * 不再是估算值 —— 提示里的 MB 数必须和用户拿到的文件对得上（B12）。
+ * 两类处理分开报：重编码是「图还在，只是压小了」，剔除是「图没进包，只剩占位」。
+ * totalBytes 是 utils 返回的真实字节（ZIP = blob.size，JSON = UTF-8 长度），
+ * 提示里的 MB 数必须与用户拿到的文件一致。
  */
 function applyExportInfo(
   filteredImages: number,
@@ -150,7 +125,7 @@ function applyExportInfo(
   exportInfo.value = `${kind}完成(约 ${mb}MB)。` + (notes.length > 0 ? notes.join('；') + '。' : '')
 }
 
-// ---- 两段式确认状态 ---------------------------------------------------------
+// 两段式确认状态
 type ConfirmKind = 'clear' | 'clearMessages' | 'clearContext' | 'clearEverything' | 'import' | null
 const confirmKind = ref<ConfirmKind>(null)
 const importError = ref('')
@@ -197,14 +172,13 @@ async function onExport() {
   exportInfo.value = ''
   importError.value = ''
   try {
-    // 空数据守卫(2026-10-04)：以前这种情况会"成功"导出一个 0 字节空包，
-    // 用户拿到手以为数据丢了 —— 直接说清楚更有用
+    // 空数据守卫：空库不能"成功"导出一个 0 字节空包，
+    // 直接说清楚更有用
     if (!cards.value || cards.value.length === 0) {
       throw new Error('当前没有可导出的数据（列表为空）。若你确认有聊天记录，请先重启应用再试；' +
                       '仍为空说明本地数据文件异常，可把数据目录里的 endfield-baker-data.json 发我排查。')
     }
-    // 文件名统一用 zipExport 的本地时间戳：以前这里用 toISOString()（UTC），
-    // 同一时刻导出的 ZIP 与 JSON 会差 8 小时，用户按时间对不上（B11）。
+    // 统一用 zipExport 的本地时间戳，否则 ZIP 与 JSON 会差 8 小时
     const fileName = projectExportFileName()
     if (isNativePlatform()) {
       // 打包端(EXE/APK)：Worker 内序列化 + 压缩 + base64，再经原生保存
@@ -220,7 +194,7 @@ async function onExport() {
       // 现在统一走 saveExportFileSmart：小文件走系统保存框（带空内容守卫），
       // 大文件走分块写入（逐块 SHA-256 + 收尾回读校验），失败会明确报错。
       const saved = await saveExportFileSmart({ fileName, base64, mime: 'application/zip' })
-      // 优先用落盘字节（分块通道是回读校验过的），拿不到再退回 blob 真实体积（B12）
+      // 优先用落盘字节（分块通道回读校验过），拿不到再退回 blob 真实体积
       applyExportInfo(filteredImages, reencodedImages, saved.bytes || totalBytes, '导出数据')
     } else {
       const { filteredImages, reencodedImages, totalBytes } = await downloadProject(
@@ -288,7 +262,7 @@ async function onEmergencyExport() {
 }
 
 
-// ---- 云同步(临时数据中转) ----------------------------------------------------
+// 云同步（临时数据中转）
 /** 上传中 */
 const cloudBusy = ref(false)
 /** 取回中 */
@@ -299,16 +273,8 @@ const cloudResult = ref<CloudUploadResult | null>(null)
 const cloudCodeInput = ref('')
 
 /**
- * 取件码校验
- *
- * 服务端规则（见 local-data/local_data_service.py）：
- *   CODE_LEN = 8
- *   ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   ← 去掉 0O1I 等易混字符
- * 即**恰好 8 位、只含大写字母与数字**。
- *
- * 输入上限取 8 + 2 = 10 作冗余：既挡住乱粘贴的超长串，
- * 又给用户"多打一两个字符"留出容错，不会因为差一位就完全无法输入。
- * （服务端本身会按 CODE_LEN 截断，所以多出的字符不会造成后端异常。）
+ * 服务端规则：恰好 8 位，字母表去掉了 0O1I 等易混字符，只含大写字母与数字。
+ * 输入上限取 +2 冗余：挡住超长粘贴，又给多打一两个字符留出容错（服务端按长度截断）。
  */
 const CODE_LEN = 8
 /**
@@ -493,7 +459,7 @@ function onRequestClearEverything() {
   confirmKind.value = 'clearEverything'
 }
 
-// ---- 破坏性操作:统一两段式确认(先切确认态,再由 onConfirm 真正执行) ---------
+// 破坏性操作：统一两段式确认（先切确认态，再由 onConfirm 执行）
 /** 删除全部对话 */
 function onRequestClear() {
   confirmKind.value = 'clear'
@@ -541,16 +507,8 @@ function applyCards(next: Card[]) {
 }
 
 /**
- * 应用导入包里的**人物顺序**（v7）
- *
- * 为什么必须放在 applyCards **之后**：replaceAllCards 会清空排序记录
- * （旧下标/旧记录与新卡片树无关），所以只有替换完再写顺序才生效。
- *
- * 旧包没有 order 字段时的兜底：按 cards 数组本身的顺序当顺序 ——
- * 导出时 cards 就是按"最近活跃在前"排列的，所以这个兜底同样能还原原顺序。
- *
- * @param payload 导入包
- * @param deriveFromCards 是否允许用 cards 数组顺序兜底
+ * ⚠️ 必须放在 applyCards 之后：replaceAllCards 会清空排序记录，替换完再写才生效。
+ * 旧包没有 order 字段时按 cards 数组顺序兜底 —— 导出时它就是「最近活跃在前」。
  */
 function applyImportedOrder(payload: ProjectPayload, deriveFromCards: boolean) {
   let order = payload.order
@@ -596,7 +554,7 @@ function onConfirmOverwrite() {
 }
 
 /**
- * 合并导入（2026-09-30 新增）
+ * 合并导入
  *
  * 规则见 utils/importMerge.ts：同角色已有对话 → 追加为新的对话卡；
  * 本地无该角色 → 新建；本地同名角色为空 → 直接写入；群聊 → 直接追加。
@@ -851,19 +809,16 @@ function onCancelConfirm() {
 @use '../../styles/variables' as *;
 @use '../../styles/mixins' as *;
 
-// 提示小字统一配色（2026-09-30 按用户要求改为**白色**）
+// 提示小字统一配色（白色）
 //   云同步说明（“最多保留 24~48 小时”那行）/ 进度信息 / 结果提示都用它；
 //   错误行仍是红色。
 //   注意：进度条相关文字另有专门的黄色（$progress-text-color），见下。
+//   云同步区块必须**显式声明** color：深色父级下靠继承会显示成黑色。
 $hint-text-color: #ffffff;
 
-// 进度条 & 进度文字统一**黄色**（用户要求：底下的蓝色进度条和蓝色提示字都改黄）
+// 进度条 & 进度文字统一**黄色**（与界面强调黄同源）
 //   进度条本体见 .dm__progress-bar；这里给文字与阶段徽标用同一套金色。
 $progress-text-color: #ffef00;
-
-// ---- 云同步区块 ----
-// 2026-09-30 修复:原先没有声明 color,靠继承 —— 深色父级下这行说明会显示成黑色,
-// 与其它提示小字(#9fe0ff 淡蓝)风格不一致。显式指定同一套配色。
 .dm__subtitle {
   margin: 0 0 8px;
   font-size: 13px;
@@ -972,7 +927,7 @@ $progress-text-color: #ffef00;
   color: #fff8ec;
 }
 
-// ---- 进度条(上传 / 取回) ----
+// 进度条（上传 / 取回）
 .dm__progress {
   margin: 10px 0 6px;
 }
@@ -987,8 +942,7 @@ $progress-text-color: #ffef00;
   height: 100%;
   width: 0;
   border-radius: 6px;
-  // 2026-09-30：改为**按钮同款亮黄**（= $color-subcard-selected #ffef00）。
-  // 之前用的金色渐变偏暗，和界面上的强调黄不一致。
+  // 按钮同款亮黄（= $color-subcard-selected），与界面强调色保持一致
   background: linear-gradient(90deg, #ffef00, #ffe95c);
   transition: width 0.18s linear;
 }
@@ -1094,7 +1048,7 @@ $progress-text-color: #ffef00;
   }
 }
 
-// ---- 二次确认弹窗(VersionDialogShell 的白底正文区) ----------------------
+// 二次确认弹窗（VersionDialogShell 的白底正文区）
 // 弹窗正文是浅色底,原先那套深色面板用的浅灰字在这里会看不清,单独覆盖一档。
 .dm__confirm-text {
   margin: 0 0 10px;

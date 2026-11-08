@@ -1,13 +1,10 @@
-// =============================================================================
-// zipWorker.ts —— 导入/导出序列化 Web Worker
-// -----------------------------------------------------------------------------
-// 将 ZIP 的 JSON 序列化、JSZip 压缩/解压、base64 转换放到独立 Worker 线程,
-// 避免主线程(Android WebView / 低端机)在大历史数据导入导出时阻塞与 OOM。
-// 主线程只接收最终结果(base64 字符串 / 解析后的 payload)。
-// =============================================================================
+// zipWorker —— 导入导出的序列化 Worker
+// ZIP 的 JSON 序列化、JSZip 压缩/解压、base64 转换都放独立线程，避免大历史
+// 在低端机上阻塞主线程或 OOM。主线程只收最终结果。
+
 import { exportToZip, importFromZip } from './zipExport'
 
-/** Blob → base64(worker 内分片转换,避免单次超长字符串峰值) */
+/** 分片转换，避免单次超长字符串峰值 */
 function blobToBase64InWorker(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()

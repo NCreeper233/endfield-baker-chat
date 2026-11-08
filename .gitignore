@@ -20,3 +20,12 @@ cloudflared-linux-amd64
 *.bak_before_*
 *.tmpdir/
 # 保留原有的 node_modules/ dist/ backup/ mock/ 等条目
+
+# ---- 2026-11-08 补：本地工作区与打包残留不进仓库 ----
+# .dsh / endfield-ui 是 agent 技能目录的副本（各约 35 MB），.workbuddy 是本地笔记
+.dsh/
+.claude/
+endfield-ui/
+.workbuddy/
+# 打包时生成的源码压缩包（体积数 MB，且每次重建都不同）
+*.zip

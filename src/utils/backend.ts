@@ -1,19 +1,9 @@
-// =============================================================================
-// 新后端统一调用层(backend.ts) —— v4
-// -----------------------------------------------------------------------------
-// 后端模式(apiMode === 'backend')的专属 API 层:
-//   - 所有角色统一请求 https://api.peilika.beer/chat(测试版网关,端口 5501),
-//     不再使用每角色独立子域名
-//   - 请求体用 character_id 替代长提示词,不再发送 system_prompt /
-//     global_prompt / character_prompt(除非用户自定义了提示词覆盖)
-//   - 角色 ID 列表硬编码在前端(CHARACTER_ID_MAP,29 个干员)
-//   - 后端(提示词输出模块)根据 character_id 加载角色提示词与世界观,
-//     并完成联网搜索判断与免费搜索,返回 { reply }
-//   - 自定义 API 模式(apiMode === 'custom')不经过本模块,由 llm.ts 直连
-// =============================================================================
+// backend —— 后端模式（apiMode === 'backend'）的专属 API 层
+// 请求体只带 character_id，由后端加载角色提示词与世界观；custom 模式不经过这里。
 
 import type { ApiConfig } from '../stores/settings'
-import { API_BASES, gatewayUrl } from '../constants/apiRoutes'
+import { gatewayUrl } from '../constants/apiRoutes'
+import { readSseLines } from '../infra/http/sse'
 
 /** 后端请求的历史条目(OpenAI 风格 role/content) */
 export interface BackendHistoryEntry {
@@ -45,15 +35,8 @@ export interface BackendRequest {
   immersive_mode?: boolean
   /** 实验性开关:True 使用新版提示词(后端从 characters_v2/ 加载);缺省=旧版提示词 */
   use_new_prompt?: boolean
-  /**
-   * 知识源（2026-09-30 新增，配合前端「联网搜索（替代 RAG）」开关）
-   *
-   *   true  → 使用 RAG 语料库
-   *   false → 使用联网搜索
-   *   缺省  → 由后端默认（当前后端默认走 RAG）
-   *
-   * 前端默认**不带**该字段（保持与旧版一致），仅在用户打开开关时显式传 false。
-   */
+  /** 知识源：true = RAG 语料库，false = 联网搜索，缺省由后端决定。
+   *  前端默认不带该字段，仅用户打开「联网搜索」时显式传 false。 */
   use_rag?: boolean
 }
 
@@ -72,7 +55,7 @@ export interface BackendReply {
   reply: string
   /** 可选:角色当前心情表情 token(如 sns_emoji_001),缺失时前端不展示 */
   mood?: string
-  /** 本次请求的 token 用量（后端 2026-09-30 起统一返回） */
+  /** 本次请求的 token 用量（后端统一返回） */
   usage?: BackendUsage
   /** 本次实际生效的知识源："rag" | "web" | "none" */
   knowledge_source?: string
@@ -91,14 +74,9 @@ export interface BackendReplyResult {
 }
 
 /**
- * 「流式不可用」专用错误(收到任何 delta **之前**就失败)
- *
- * 出现它意味着流式这条路压根没走通:旧后端没有 /chat/stream(404)、网络失败、
- * 非 2xx、响应不是 event-stream,或流结束了却一个字节都没收到。
- * 调用方据此**回退到非流式 fetchBackendReply 一次**,用户无感。
- *
- * ⚠️ 一旦已经收到过 delta,本函数绝不会抛它(内容已落在气泡里,回退会重复追加);
- * `event: error` 帧是后端明确报错(不是链路失败),同样不抛它。
+ * 「流式不可用」专用错误：收到任何 delta **之前**就失败（404 / 非 2xx / 非 event-stream /
+ * 一字节未收到），调用方据此回退非流式一次。已经收到过 delta，或 event: error 帧
+ * （后端明确报错）都不会抛它，否则回退会重复追加内容。
  */
 export class BackendStreamUnavailableError extends Error {
   constructor(message: string) {
@@ -160,23 +138,7 @@ function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === 'AbortError'
 }
 
-/**
- * 统一网关地址(新后端唯一入口)
- * 用户可在设置中配置 backendUrl 覆盖(主要用于本地调试),为空时使用该地址。
- *
- * 【测试版】这里指向**测试版专用网关** api.peilika.beer(:5501),
- * 与正式版 api.peilika.beer(:5500) 是完全独立的两套后端 —— 端口错开、
- * 实例表独立、进程独立。测试版前端绝不可以再指向正式网关。
- */
-// ⚠ 已废弃：本常量写死了 primary 域名，不跟随用户在设置里选择的备用域名。
-//   实际请求走 resolveBackendUrl()/gatewayUrl()（见下方调用点），保留仅为兼容旧引用。
-//   新代码请勿使用这个常量，否则备用域名会失效。
-const GATEWAY_URL = API_BASES.primary + '/chat'
-
-/**
- * 角色中文名 → character_id 映射表(硬编码,29 个干员)
- * 与后端 /perlica_project/characters/{id}.json 一一对应。
- */
+/** 角色中文名 → character_id，与后端 characters/{id}.json 一一对应 */
 export const CHARACTER_ID_MAP: Record<string, string> = {
   伊冯: 'yifeng',
   余烬: 'yujin',
@@ -232,11 +194,9 @@ export function resolveBackendUrl(character: string, fallback = ''): string {
 /**
  * 最近保留的问答轮数(1 轮 = 1 条用户 + 1 条 AI 回复)
  *
- * 2026-09-28 由 25 → 15:实测同一批上游调用中，输入 token 越多越慢 ——
- * 输入 ≥10k token 时平均 9.1s / p90 23s，而 6–10k token 时平均 3.3s / p90 7s。
- * 每次请求的固定成本（角色卡 + 世界观）已占约 6k token，历史再带 50 条就会顶到 9–14k，
- * 于是"有时候特别慢"。压到 15 轮（30 条）后输入回到 6–9k 区间，
- * 更早的内容仍由「智能总结」压成前情提要，不影响连贯性。
+ * 取 15 轮是实测折中：输入 token 越多越慢（≥10k 平均 9.1s / p90 23s，6–10k 时
+ * 平均 3.3s）。固定成本（角色卡 + 世界观）已占约 6k，历史 50 条会顶到 9–14k；
+ * 30 条回到 6–9k，更早的内容由「智能总结」压成前情提要，不影响连贯性。
  */
 export const BACKEND_HISTORY_ROUNDS = 15
 
@@ -244,27 +204,9 @@ export const BACKEND_HISTORY_ROUNDS = 15
 export const BACKEND_HISTORY_LIMIT = BACKEND_HISTORY_ROUNDS * 2
 
 /**
- * 组装后端请求体(v4)
- *
- * 将前端历史({side, text, image?})映射为后端格式:
- *   - mine → user / other → assistant
- *   - 图片消息:content 用 "[图片]" 占位
- *     ⚠ 现状:history 条目仍会把 image(base64 dataURL) 一起带上(`image: h.image || undefined`),
- *     弱网/多图时请求体很大 —— 待办:历史图片只传 id 或只在本轮发送(docs/AUDIT-2026-10-04.md F18/C1)
- *   - 仅截取最近 25 轮(50 条),从旧到新;不足则全部发送
- *   - 当前输入单独放 message,不在 history 中
- *
- * 提示词策略:
- *   - 映射表内角色:发送 character_id,不发送任何长提示词
- *     (后端按 character_id 加载角色提示词与世界观)
- *   - 仅当用户自定义了该角色提示词覆盖时,额外发送 character_prompt
- *     (尊重用户自定义,覆盖后端内置提示词)
- *   - 映射表外角色(自定义角色):退回发送完整 system_prompt(兼容处理)
- *
- * @param message   当前用户输入
- * @param character 角色中文名
- * @param history   截取前的完整历史(不含当前输入)
- * @param options   { characterId?, characterPromptOverride?, systemPrompt?, think?, forceSearch?, immersiveMode?, useNewPrompt?, useRag? }
+ * 组装后端请求体：mine → user、other → assistant，图片消息 content 用「[图片]」占位，
+ * 仅截取最近 50 条。映射表内角色只发 character_id（后端自行加载提示词），
+ * 用户自定义了覆盖时才额外发 character_prompt；表外角色退回完整 system_prompt。
  */
 export function buildBackendRequest(
   message: string,
@@ -330,17 +272,7 @@ export function buildBackendRequest(
   return req
 }
 
-/**
- * 请求统一网关并返回完整回复文本
- *
- * POST JSON 到网关(https://api.peilika.beer/chat 或用户配置 backendUrl),
- * 解析一次性响应 { reply }。
- *
- * @param config  API 配置(需 apiMode === 'backend')
- * @param request 后端请求体
- * @param signal  AbortController(外部传入以便中止)
- * @returns reply 文本与可选 mood
- */
+/** 一次性 POST，解析 { reply }；config.apiMode 须为 'backend' */
 export async function fetchBackendReply(
   config: ApiConfig,
   request: BackendRequest,
@@ -435,29 +367,12 @@ async function fetchBackendReplyOnce(
 }
 
 /**
- * 请求统一网关的 SSE 流式接口(/chat/stream)
+ * SSE 流式接口 /chat/stream，请求体与 /chat 完全一致，额外带 Accept: text/event-stream。
+ * 帧协议：delta 增量 / done 权威全文 / error 后端报错 / stage 阶段 / `: ping` 心跳（忽略）。
  *
- * POST 到 `gatewayUrl() + '/stream'`(即 /chat/stream);请求体与 /chat **完全一致**,
- * 额外带 `Accept: text/event-stream`。事件协议(事件名固定,data 均为 JSON):
- *   - `event: delta` → {"text":"增量片段"}                        → options.onDelta(text)
- *   - `event: done`  → {"reply":"完整文本","mood":…}              → 以 reply 为最终权威文本
- *   - `event: error` → {"error":"中文提示","code":"rate_limit…"}   → 抛 Error(error 字段)
- *   - `event: stage` → {"stage":"judge|lease|generate|search"}    → options.onStage(stage)
- *   - `: ping` 形式的注释行(心跳)                                 → 忽略
- * 帧与帧之间用空行分隔(与 llm.ts 的 SSE 读取同一套写法:fetch + getReader + 文本解码,
- * 不引入任何新依赖)。
- *
- * 失败语义(与调用方的回退策略一一对应):
- *   - **收到任何 delta 之前**失败(网络 / 非 2xx / 响应不是 event-stream / 流里什么都没有)
- *     → 抛 BackendStreamUnavailableError,调用方回退到 fetchBackendReply 一次
- *   - 已经收到 delta 之后再出错 → 原样抛出(绝不静默吞掉,也不再回退)
- *   - `event: error` 帧 → 始终原样抛出(后端明确报错,不是链路失败)
- *
- * @param config  API 配置(按任务约定,本接口地址固定为网关 /chat/stream,
- *                与非流式接口的 resolveBackendUrl 不同 —— 不读用户自填 backendUrl)
- * @param request 后端请求体(与 fetchBackendReply 完全同构)
- * @param options 增量 / 阶段回调与中止信号
- * @returns 权威 reply 文本与可选 mood
+ * 失败语义：收到任何 delta 之前失败 → 抛 BackendStreamUnavailableError，调用方回退
+ * 非流式一次；收到 delta 之后出错、或 error 帧 → 原样抛出，绝不静默吞掉。
+ * 地址固定为网关（不读用户自填 backendUrl）。
  */
 export async function fetchBackendReplyStream(
   config: ApiConfig,
@@ -465,7 +380,7 @@ export async function fetchBackendReplyStream(
   options: BackendStreamOptions = {},
 ): Promise<BackendReplyResult> {
   const { onDelta, onStage, signal } = options
-  // 地址固定为网关 + /stream(见上方 @param config 说明)
+  // 地址固定为网关 + /stream，不读用户自填 backendUrl
   const url = `${gatewayUrl()}/stream`
 
   // ---- 1. 建立连接(这一段的失败都属于"流式不可用",可回退) -----------------
@@ -512,10 +427,8 @@ export async function fetchBackendReplyStream(
   }
 
   // ---- 2. 逐帧读取 ---------------------------------------------------------
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  /** 尚未按行切分的残留文本 */
-  let buffer = ''
+  // 读流骨架(解码 / 切行 / 残行 / 异常时释放连接)走 infra/http/sse 的公共实现;
+  // 这里只维护"帧"的语义(event 名 + 多行 data)。
   /** 当前帧累积的 event 名与 data 行(SSE 允许一个帧带多行 data) */
   let frameEvent = ''
   let frameData: string[] = []
@@ -621,22 +534,11 @@ export async function fetchBackendReplyStream(
   }
 
   try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      // 保留最后不完整的一行,等下一个 chunk 补齐
-      buffer = lines.pop() ?? ''
-      for (const line of lines) consumeLine(line)
-    }
-    // 流结束时:补处理最后一行(可能没有换行符),并派发可能残留的半帧
-    if (buffer !== '') consumeLine(buffer)
+    await readSseLines(response.body, (line) => consumeLine(line))
+    // 流已自然结束:派发可能残留的半帧(最后一帧没有跟空行)
     flushFrame()
   } catch (err) {
-    // 提前退出(报错 / 中止)时主动关掉底层连接,不给后端留一个没人读的流
-    reader.cancel().catch(() => {})
+    // 读流器在抛出前已释放底层连接,这里不再重复 cancel
     if (isAbortError(err)) throw err
     // 后端明确报错(rate_limit / upstream / internal):原样抛出,不回退
     if (err instanceof BackendStreamEventError) throw err
@@ -688,17 +590,8 @@ export interface BackendSuggestionInput {
 }
 
 /**
- * 按需拉取单聊「AI 推荐回复」(与群聊 requestGroupSuggestions 对齐)
- *
- * POST 到 `gatewayUrl() + '/suggestions'`(即 /chat/suggestions),返回若干条候选文本。
- * 与 /chat 一样按 character_id 让后端加载角色提示词;自定义角色退回 character 字段。
- * 地址与 SSE 一致固定为网关(与后端约定一致,不读用户自填 backendUrl)。
- *
- * 拉取失败一律抛错,由调用方降级为"暂无推荐" —— 推荐只是输入辅助,
- * 绝不能因为它失败而影响正常聊天。
- *
- * @param input  角色信息 + 历史(前端形状)
- * @param signal 中止信号(切换会话 / 关闭面板时可不传,失败也只是一次无效请求)
+ * 按需拉取单聊推荐：POST 网关 /chat/suggestions，地址固定不读用户 backendUrl。
+ * 失败一律抛错，由调用方降级为「暂无推荐」—— 推荐只是输入辅助，不能影响正常聊天。
  */
 export async function fetchBackendSuggestions(
   input: BackendSuggestionInput,

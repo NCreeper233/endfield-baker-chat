@@ -1,29 +1,12 @@
-// =============================================================================
-// useGroupChat —— 群聊的对话调度(前端侧)
-// -----------------------------------------------------------------------------
-// 把"群聊 UI 状态"接到群聊传输层,按 apiMode 二选一(见 utils/groupTransport):
-//   - backend / legacy → 后端群聊服务(:5810 / api.peilika.beer/group)
-//   - custom           → 前端本地链路(直连用户自定义 API,utils/customGroupBackend)
-// 两条链路同名同签名,本文件的回合/循环/打断逻辑对它们完全无感。
-//
-// 与单聊的关键差异
-// ----------------
-// 1. 单聊是一次 POST 拿回复,角色名 = 会话名;
-//    群聊必须显式带上"这一条是谁说的",否则无法判断下一位该谁发言。
-// 2. 智能模式是"持续进行"的:每次只回一条,由前端循环请求直到 done;
-//    玩家一发消息就中止循环 —— 这就是"随时打断"。
-// 3. 传输层只存调度状态(轮转游标/上一位发言人/话题),完整历史每次请求都带上。
-//
-// 展示仍复用单聊那套管线:
-//   beginAiResponse(说话人, 头像) → 加载气泡显示该角色头像
-//   appendAiChunk(文本, ctx)      → 落下这一条消息
-//   finishAiResponse(ctx)         → 收尾
-// =============================================================================
+// useGroupChat —— 群聊的对话调度
+// 传输层按 apiMode 二选一（见 utils/groupTransport），两条链路同名同签名，本文件无感。
+// 智能模式由前端循环请求到 done；玩家发消息即中止循环（这就是「随时打断」）。
 import { effectScope, ref, watch } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import { findCharacter } from '../constants/character'
 import { splitAiSegments } from '../utils/aiText'
+import { buildGroupHistory } from '../utils/groupHistory'
 import { useReplyReveal } from './useReplyReveal'
 import { requestSummary } from '../utils/summary'
 import { BACKEND_HISTORY_LIMIT } from '../utils/backend'
@@ -34,8 +17,7 @@ import {
   type GroupReplyItem,
   type GroupReplyResult,
 } from '../utils/groupBackend'
-// 群聊传输层:backend 模式走后端 /group/*,custom 模式走前端本地链路
-// (直连用户自定义 API)。两条链路同名同签名,这里的回合逻辑对二者无感。
+// 群聊传输层：backend 走后端 /group/*，custom 走前端本地链路（直连用户 API）
 import { groupTransportFor } from '../utils/groupTransport'
 import { devInfo, devWarn } from '../utils/logger'
 
@@ -53,13 +35,10 @@ const RATE_LIMIT_RETRY = 3
 const RATE_LIMIT_MAX_WAIT_S = 30
 
 /**
- * 单次"开启/恢复对话"的连续请求上限
+ * 单次「开启 / 恢复对话」的连续请求上限
  *
- * ⚠️ 这**不是**"对话长度限制",只是失控保护:
- * 需求明确"只要玩家不点暂停,就让它一直保持对话状态",因此正常使用下
- * 这个数字永远碰不到 —— 对话由玩家点「暂停对话」结束。
- * 保留一个上限是为了防止意外(例如无人看管的标签页)无限消耗 API 配额。
- * 200 轮按每轮 5~8s 估算≈20 分钟以上,交互场景下等同于不设限。
+ * 这不是对话长度限制，只是失控保护：正常使用永远碰不到（由玩家点暂停结束），
+ * 保留上限只为防无人看管的标签页无限烧配额。
  */
 const SMART_MAX_ROUNDS = 200
 
@@ -78,17 +57,10 @@ interface GroupCardLike {
   conversations: { name: string }[]
 }
 
-// =============================================================================
-// 回合状态:**模块级单例**
-// -----------------------------------------------------------------------------
-// ChatInput / GroupFlowControl / ChatMessageRow 三个组件各自会调用
-// useGroupChat()。若把 busy / controller / runToken 放在函数体内,每个组件都会
-// 拿到**独立的一份** —— 后果是:
-//   · ChatInput 发起的回合,GroupFlowControl 的「暂停」按钮 abort 不到
-//   - 暂停按钮读到的 busy 恒为 false,永远不会显示成「暂停中」
-// 群聊回合在任意时刻只应该有一个,因此这些状态必须是进程内共享的。
-// (与 useMobile / useCanvasZoom 的单例做法一致。)
-// =============================================================================
+// 回合状态：模块级单例
+// ChatInput / GroupFlowControl / ChatMessageRow 各自调用 useGroupChat()，状态若放在
+// 函数体内，每个组件会拿到独立一份：发起的回合别人 abort 不到，暂停按钮读到的
+// busy 恒为 false。群聊回合同一时刻只应有一个，所以这些状态必须进程内共享。
 
 /** 是否有群聊回合正在进行 */
 const busy = ref(false)
@@ -105,30 +77,21 @@ let controller: AbortController | null = null
 /**
  * 回合令牌
  *
- * 玩家打断后立刻发起的新回合,与"上一轮迟到的 finally"之间会打架:
- * 旧回合的 fetch 被 abort 后,它的 finally 还会执行一次,若不加判别就会
- * 把新回合的 busy / controller 一并清掉(表现为新回合刚开始就被判定为结束、
- * 或暂停按钮失灵)。每次 abort / 新回合都递增令牌,只有持有当前令牌的那一轮
- * 才有权复位共享状态。
+ * 打断后立刻发起的新回合会被「上一轮迟到的 finally」清掉状态（表现为新回合刚开始
+ * 就被判结束、暂停按钮失灵）。每轮递增令牌，只有持有当前令牌的那轮才有权复位。
  */
 let runToken = 0
 
 /**
- * 当前回合锁定的"目标会话 + 卡片"
+ * 当前回合锁定的会话与卡片
  *
- * 回合可能持续几十秒、跨多次 API 调用,期间玩家随时可能切走。
- * 切走时必须知道"要停的是哪一个会话、要把哪张卡的进行中状态落回去",
- * 故在回合开始时连同卡片一起记住(消费方见 bindSwitchGuard)。
+ * 回合可能持续几十秒，期间玩家会切走；切走时要停的是这一个会话、要落回状态的是
+ * 这一张卡，所以回合开始时就记住（消费方见 bindSwitchGuard）。
  */
 let runningSub: number | null = null
 let runningCard: (GroupCardLike & { groupRunning?: boolean }) | null = null
 
-/**
- * 本回合锁定的**会话对象**(与 runningSub 同时写入)
- *
- * 下标只是位置,删群 / 建群 / 导入之后同一个下标可能已经换成另一段会话。
- * 落字前比一次对象引用,才能认出"位置还在、但已经不是当初那一段"。
- */
+/** 本回合锁定的会话对象：落字前比一次引用，才能认出「位置还在但不是那一段」 */
 let runningConv: Conversation | null = null
 
 /** 「切换对话即暂停」的监听是否已注册(模块级:整个应用只注册一次) */
@@ -156,18 +119,9 @@ export function useGroupChat() {
   }
 
   /**
-   * 切换对话 → 自动暂停正在跑的那个群聊回合
-   *
-   * 为什么必须停:群聊回合是"一轮接一轮"的持续循环(智能模式),玩家切走后
-   * 它仍在向后端要下一位发言、继续往**原来那个会话**写消息 —— 玩家看不见,
-   * 额度却一直在烧;而且 busy 是全局单例,切到的新会话里那颗按钮会被显示成
-   * 「暂停对话」(其实正在跑的根本不是它),点下去还会把新会话的回合逻辑搅乱。
-   *
-   * 语义与玩家亲手点「暂停对话」完全一致:中止本轮 + 把该群的"进行中"落回
-   * false(写进工程数据)。这样切回来时按钮显示「恢复对话」,想继续再点。
-   *
-   * 监听挂在**独立作用域**上:它要活到应用结束 —— ChatInput / GroupFlowControl
-   * 会随移动端"列表↔聊天"视图切换卸载重建,绑在组件作用域里的 watch 会跟着失效。
+   * 切换对话必须暂停正在跑的回合：否则循环仍往**原会话**写消息，玩家看不见但额度在烧，
+   * 而 busy 是全局单例，新会话的按钮还会显示成「暂停对话」。
+   * 监听挂在独立作用域：这些组件会随移动端视图切换卸载重建。
    */
   function bindSwitchGuard(): void {
     if (switchGuardBound) return
@@ -195,12 +149,7 @@ export function useGroupChat() {
     })
   }
 
-  /**
-   * 回合锁定的那段会话是否还在原下标上
-   *
-   * 结构变更(删一段会话 / 新建 / 导入恢复)会让后面的会话整体前移或后移,
-   * 同一个下标于是指向另一段会话 —— 这时落字就是串台。
-   */
+  /** 回合锁定的会话是否还在原下标：删/建/导入会让同一下标指向别的会话，那时落字就是串台 */
   function lockedConvStillHere(): boolean {
     if (runningSub === null) return false
     return chatStore.conversations[runningSub] === runningConv
@@ -216,43 +165,23 @@ export function useGroupChat() {
   }
 
   /**
-   * 把指定会话的消息整理成群聊服务要的历史格式
+   * 整理群聊历史：规则在 utils/groupHistory（纯函数），这里只取消息与署名
    *
-   * @param sub 目标会话下标(回合开始时锁定,不随玩家切换而变)
+   * @param sub 回合开始时锁定，不随玩家切换而变
    */
   function buildHistory(card: GroupCardLike, sub?: number): GroupHistoryItem[] {
     const idx = sub ?? chatStore.activeSub
     const msgs = idx === null || idx === undefined
       ? []
       : (chatStore.conversations[idx]?.messages ?? [])
-    const me = myDisplayName(card)
-    const out: GroupHistoryItem[] = []
-    for (const m of msgs) {
-      // 错误占位气泡不进历史
-      if ((m as { error?: boolean }).error) continue
-      // 话题提示行不是真实消息:话题由 topic 字段单独传给后端,不混进历史
-      if ((m as { topic?: boolean }).topic) continue
-      const text = (m.text ?? '').trim()
-      if (!text && !m.image) continue
-      out.push({
-        side: m.side === 'mine' ? 'mine' : 'other',
-        text,
-        speaker: m.side === 'mine'
-          ? me
-          : (m.speakerName || ''),
-        image: m.image,
-      })
-    }
-    return out
+    return buildGroupHistory(msgs, myDisplayName(card))
   }
 
   /**
-   * 确保会话存在
+   * 确保会话存在：id 失效就自动重建一次，别让用户看到「会话不存在」
    *
-   * session_id 由传输层生成并保存在卡片上:
-   *   - backend 模式 → 后端生成的 id(后端超时回收后自愈重建);
-   *   - custom  模式 → 前端本地 id(重开软件后本地 Map 为空,同样自愈重建)。
-   * 因此卡片上的 id 一旦失效,这里会自动重建一次,避免用户看到"会话不存在"。
+   * backend 模式是后端生成的 id（超时回收后自愈），custom 模式是本地 id
+   * （重开软件后本地 Map 为空，同样自愈）。
    */
   async function ensureSession(
     card: GroupCardLike,
@@ -331,11 +260,9 @@ export function useGroupChat() {
   }
 
   /**
-   * 把推荐写进 store 并**存进这段对话的持久化数据**
+   * 写进 store 并持久化到这段对话
    *
-   * 只存数据、不展开面板 —— 面板由玩家点「推荐」按钮打开。
-   * 存的是"针对当前对话状态(最后一条消息)"的一次性结果:同一个状态反复打开
-   * 面板都直接复用,对话往前走过了才重新生成。
+   * 只存数据、不展开面板。存的是「针对当前对话状态」的一次性结果，状态没变就复用。
    */
   function applySuggestions(items: string[]): void {
     if (!settingsStore.choicesEnabled) {
@@ -347,14 +274,10 @@ export function useGroupChat() {
   }
 
   /**
-   * 玩家打开推荐面板时按需拉取推荐
+   * 玩家打开面板时按需拉取
    *
-   * **一段对话只生成一次**:已有缓存且对话没往前走 → 直接复用,不打 API。
-   * 群聊回合本身不再顺带生成推荐(`/reply` 的 want_suggestions 传 false),
-   * 否则每一轮都要白花一次 API 调用,那正是"重复刷新"的来源。
-   *
-   * @param force 忽略缓存强制重新生成
-   * @returns 是否拿到了内容
+   * 一段对话只生成一次；回合本身不再顺带生成（want_suggestions 传 false），
+   * 否则每轮都白花一次调用 —— 那正是「重复刷新」的来源。
    */
   async function fetchSuggestions(force = false): Promise<boolean> {
     if (!settingsStore.choicesEnabled) return false
@@ -393,15 +316,9 @@ export function useGroupChat() {
   }
 
   /**
-   * 组装送往群聊服务的历史(含「智能总结」)
+   * 组装送往群聊服务的历史，含与单聊同一套智能总结
    *
-   * 与单聊完全同一套口径:
-   *   - 历史 ≤ 50 条:原样发送
-   *   - 历史 > 50 条且开启了智能总结:把超出部分压成一条「前情提要」放在最前,
-   *     最近 50 条保持原样
-   *   - 未开启智能总结:直接截取最近 50 条
-   *
-   * @param sub 目标会话下标(回合开始时就锁定)
+   * 超过 50 条且开启总结时，把超出部分压成一条「前情提要」放最前；未开启则直接截最近 50 条。
    */
   async function historyForRequest(
     card: GroupCardLike,
@@ -438,11 +355,10 @@ export function useGroupChat() {
   }
 
   /**
-   * 请求一次(一步)回复
+   * 请求一步回复
    *
-   * 限速(429)不当作失败:测试版与正式版共用同一批 Key,连续推进时很容易撞到
-   * 冷却。这里退避重试若干次,而不是直接把回合掐掉 —— 之前的表现正是
-   * "点开始对话 → 一会儿没反应 → 自己暂停了"。
+   * 429 限速不算失败：测试版与正式版共用同一批 Key，很容易撞冷却。这里退避重试，
+   * 而不是把回合掐掉 —— 之前的表现正是「点开始 → 一会儿没反应 → 自己暂停了」。
    */
   async function pullOnce(
     sessionId: string,
@@ -560,12 +476,8 @@ export function useGroupChat() {
           break
         }
 
-        // 本轮开始时「继续对话」浮窗是否已经挂着 —— 这一轮结束后的判定只看这个快照。
-        // 必须用"本轮开始前"的状态:浮窗是在第 20 条消息落下的瞬间由 store 弹出来的,
-        // 若拿"此刻"的状态判,这一轮刚弹出就会立刻被判成"没人点"而暂停,
-        // 玩家只看到浮窗闪一下。快照保证至少整整聊完一轮才停(够看一眼、点一下)。
-        // 浮窗状态按会话隔离,这里必须显式带上本回合锁定的 sub —— 用"当前会话"
-        // 会让别的群挂着的浮窗把这一轮掐停。
+        // 用「本轮开始前」的浮窗状态：浮窗是在第 20 条落下的瞬间弹出的，拿此刻状态判
+        // 会立刻被判成「没人点」而暂停，玩家只看到闪一下。按会话隔离，必须带本回合的 sub。
         const nudgeWasOpen = !opts.once && chatStore.isGroupContinueOpen(sub)
 
         let result = await pullOnce(sessionId, card, newTurn, signal, sub)
@@ -602,12 +514,11 @@ export function useGroupChat() {
           devInfo('[group] 停止:', result.stop_reason)
         }
 
-        // 一轮聊完:浮窗本来就挂着、这一轮也没人点 → 自动暂停。
-        // 这一步刻意排在 `if (result.done) break` **之前**:
-        // 轮流模式与"后端一次就收束"的轮次 done 恒为 true,排在后面就永远执行不到
-        // (这正是"攒够 20 条也毫无反应"的原因)。
-        // 「指定发言」那种单点一次(once)不计入 —— 它由玩家逐次点出来,
-        // 而且指定模式没有「恢复对话」按钮,一旦被自动暂停,玩家打字将永远等不到回复。
+        // 浮窗本来就挂着、这轮也没人点 → 自动暂停。
+        // 必须排在 `if (result.done) break` **之前**：轮流模式与「后端一次就收束」的
+        // 轮次 done 恒为 true，排在后面永远执行不到。
+        // 指定模式的单次发言（once）不计入：它没有「恢复对话」按钮，一旦被自动暂停
+        // 玩家打字就再也等不到回复。
         if (nudgeWasOpen && chatStore.isGroupContinueOpen(sub)) {
           if (runningCard) runningCard.groupRunning = false
           chatStore.resetGroupContinue(sub)
@@ -629,22 +540,16 @@ export function useGroupChat() {
         await delay(SMART_LOOP_GAP)
       }
     } finally {
-      // 只有"当前这一轮"才有权复位:被玩家打断的旧回合令牌已过期,
-      // 它的 finally 不能再动新回合的状态
+      // 只有当前这一轮有权复位：被打断的旧回合并令牌已过期，不能动新回合的状态
       if (myToken === runToken) {
         busy.value = false
         controller = null
-        // 刻意**不**在这里清 runningSub / runningConv / runningCard:
-        // 回合自然收束后它们仍是"最后一次锁定的那段会话",而切换守卫用 busy
-        // 判断"是否还在跑"。在这里清空会让守卫的判据(当前会话不再是我锁定的
-        // 那个)失效 —— 正是"该停的没停"的另一半。它们的生命周期由 abort()
-        // (打断)与下一次 runTurn(重新锁定)负责。
+        // 刻意不在这里清 runningSub / runningConv / runningCard：切换守卫用 busy 判断
+        // 「是否还在跑」，清空会让它的判据失效（「该停的没停」的另一半）。
+        // 它们的生命周期归 abort() 与下一次 runTurn。
         //
-        // 刻意**不**在这里复位 groupRunning:
-        // 它是"玩家希望这段群聊处于进行/可恢复状态"的持久化意图,只有玩家
-        // 显式点「暂停对话」才置 false。回合自然收束(后端判定 END / 达到轮数
-        // 上限)后仍保持 true,下次打开页面按钮就显示「恢复对话」,
-        // 玩家一点即可接着聊 —— 这就是"想开始聊就开始聊,想停就停"。
+        // 也刻意不复位 groupRunning：那是「玩家希望这段群聊可恢复」的持久意图，
+        // 只有玩家点暂停才置 false。自然收束后仍是 true，按钮就显示「恢复对话」。
       }
     }
   }
@@ -663,20 +568,17 @@ export function useGroupChat() {
   }
 
   /**
-   * 玩家在群里发一条消息,然后按发言模式推进
+   * 玩家在群里发一条消息，然后按发言模式推进
    *
-   * 旁观 + 非指定模式时不会走到这里(那种情况下底部按钮是「给出话题」,
-   * 由 giveTopic() 处理)。
+   * 旁观 + 非指定模式不会走到这里（那时底部按钮是「给出话题」）。
    */
   async function sendMessage(text: string, opts: { once?: boolean } = {}): Promise<void> {
     if (chatStore.activeSub === null) return
     abort()
     chatStore.sendUserMessage(text)
 
-    // 「暂停」的语义(需求原文):暂停期间玩家**可以照常发消息**,但 AI 角色
-    // 不会回复;只有点了「恢复对话」才继续。
-    // groupRunning === false 表示玩家主动暂停过(undefined = 从未开始,
-    // 那种情况下发消息就应该正常触发回复)。
+    // 暂停期间玩家可以照常发消息，但角色不回复。groupRunning === false 才是主动暂停过；
+    // undefined = 从未开始，发消息就应该正常触发回复。
     const card = chatStore.activeCard as (GroupCardLike & { groupRunning?: boolean }) | null
     if (card?.groupRunning === false) return
 
@@ -684,10 +586,9 @@ export function useGroupChat() {
   }
 
   /**
-   * 旁观模式:给出话题(只记录,不触发 AI)
+   * 旁观模式：给出话题（只记录，不触发 AI）
    *
-   * 话题不以"管理员说的话"形式落成我方气泡,而是渲染成一条半透明小字提示行
-   * 「新话题:xxx」;同时写入后端会话状态(第五段提示词)。
+   * 不落成我方气泡，而是渲染成一行「新话题：xxx」提示；同时写进后端会话状态。
    */
   async function giveTopic(text: string): Promise<void> {
     if (chatStore.activeSub === null) return
@@ -705,10 +606,9 @@ export function useGroupChat() {
   }
 
   /**
-   * 点「开启 / 恢复对话」 —— 从当前进度继续推进
+   * 点「开启 / 恢复对话」：接着上次的位置往下走
    *
-   * newTurn=false:不重置后端的轮转计数,接着上次的位置往下走。
-   * 暂停期间玩家发出的消息已经写进会话,恢复时自然会被一并纳入历史。
+   * newTurn=false 不重置后端轮转计数；暂停期间玩家发的消息已在会话里，会被一并纳入历史。
    */
   async function startConversation(): Promise<void> {
     await runTurn({ newTurn: false })

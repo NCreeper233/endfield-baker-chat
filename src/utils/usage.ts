@@ -1,18 +1,9 @@
-// =============================================================================
-// 服务商 usage 归一化(usage)
-// -----------------------------------------------------------------------------
-// 自定义 API 面向任意 OpenAI 兼容服务商,缓存命中字段各不相同:
-//   - DeepSeek   : usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
-//                  (官方文档:Context Caching,命中数直接给出,无需额外参数)
-//   - OpenAI/Azure: usage.prompt_tokens_details.cached_tokens
-//                  (需 stream_options.include_usage 才在流式响应中返回)
-//   - Anthropic 兼容: usage.cache_read_input_tokens / cache_creation_input_tokens
-//   - 其他代理   : usage.cached_tokens(顶层,非标准)
-//
-// 另外记录"哪些 baseUrl 不支持 stream_options"——部分非官方端点会直接
-// 400 Unknown parameter: stream_options(实证见 Cherry Studio issue #11652),
-// 需要降级重试并记住,避免每次都先失败一轮。
-// =============================================================================
+// usage —— 服务商 usage 的归一化
+// 自定义 API 面向任意 OpenAI 兼容服务商，缓存命中字段各不相同：
+//   DeepSeek 用 prompt_cache_hit/miss_tokens，OpenAI/Azure 用
+//   prompt_tokens_details.cached_tokens，Anthropic 兼容用 cache_read/creation，
+//   还有些代理直接给顶层 cached_tokens。
+// 另外记住哪些 baseUrl 不支持 stream_options（会直接 400），降级重试后不再发。
 
 /** 缓存命中字段的来源标识(面板据此说明"命中数从哪来") */
 export type UsageSource = 'deepseek' | 'openai' | 'anthropic' | 'generic' | 'unknown'
@@ -20,12 +11,11 @@ export type UsageSource = 'deepseek' | 'openai' | 'anthropic' | 'generic' | 'unk
 /** 归一化后的用量 */
 export interface NormalizedUsage {
   /**
-   * 提示词(prompt)token **总数**,含命中缓存的部分
+   * 提示词 token 总数，含命中缓存的部分。
    *
-   * 口径统一在此处完成,因为各厂商对"输入 token"的定义并不一致:
-   *   - OpenAI / DeepSeek / 多数代理:prompt_tokens 已是总数
-   *   - Anthropic:input_tokens **不含**缓存读取与写入部分,必须相加
-   * 命中率 = cachedTokens / inputTokens,只有分母是总数时才成立。
+   * 口径必须统一：OpenAI / DeepSeek 的 prompt_tokens 已是总数，Anthropic 的
+   * input_tokens 不含缓存读写、必须相加。命中率 = cached / inputTokens 只在
+   * 分母是总数时成立。
    */
   inputTokens: number
   /** 输出(completion)token 总数 */
@@ -48,12 +38,7 @@ function readObject(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null
 }
 
-/**
- * 把服务商返回的 usage 原始对象归一化为统一形状
- *
- * @param raw SSE 数据块中的 usage 字段(未知形状,内部逐字段校验)
- * @returns   归一化结果;无可用 token 数时返回 null
- */
+/** raw 形状未知，内部逐字段校验；无可用 token 数时返回 null */
 export function normalizeUsage(raw: unknown): NormalizedUsage | null {
   const u = readObject(raw)
   if (!u) return null
@@ -63,18 +48,13 @@ export function normalizeUsage(raw: unknown): NormalizedUsage | null {
   const anthropicRead = readNumber(u.cache_read_input_tokens)
   const anthropicCreate = readNumber(u.cache_creation_input_tokens)
 
-  // 把"输入 token"统一成提示词总数(见 NormalizedUsage.inputTokens 的说明)。
-  //
-  // Anthropic 的口径是坑:官方文档明确 input_tokens 是
-  // "Number of input tokens which were not read from or used to create a cache",
-  // 即**不含**缓存部分。若拿它当分母,cache_read / input_tokens 会算出
-  // 远超 100% 的荒谬命中率,同时还会把估算器的自校准比值带偏。
+  // Anthropic 的坑：input_tokens 是「未从缓存读取、也未用于创建缓存」的数量，
+  // 拿它当分母会算出远超 100% 的命中率，还会把估算器的自校准比值带偏。
   let inputTokens: number | null
   if (promptTotal !== null) {
-    // OpenAI / DeepSeek / 多数代理:prompt_tokens 本身即总数(含命中部分)
     inputTokens = promptTotal
   } else if (altInput !== null) {
-    // Anthropic 风格:input_tokens 只是"未走缓存"的那部分,需补齐总数
+    // Anthropic 风格：补齐缓存读写部分
     inputTokens = altInput + (anthropicRead ?? 0) + (anthropicCreate ?? 0)
   } else {
     inputTokens = null
@@ -118,7 +98,7 @@ export function normalizeUsage(raw: unknown): NormalizedUsage | null {
   }
 }
 
-// ---- stream_options 能力记忆 -------------------------------------------------
+// stream_options 能力记忆
 // 记录明确拒绝 stream_options 的端点,后续请求不再发送该参数(省掉一次失败往返)。
 
 /** 记忆用的 localStorage key(与设置 store 的 STORAGE_PREFIX 无关,独立命名空间) */
@@ -179,7 +159,7 @@ export function looksLikeStreamOptionsError(errText: string): boolean {
   )
 }
 
-// ---- 数据可信度 -------------------------------------------------------------
+// 数据可信度
 
 /** 数据可信度档位 */
 export type DataStatusLevel = 'measured' | 'partial' | 'estimated' | 'stale' | 'none'
@@ -203,19 +183,8 @@ const SOURCE_LABEL: Record<UsageSource, string> = {
 }
 
 /**
- * 描述一次请求数据的可信度
- *
- * 抽成纯函数的原因:这是"面板数字能不能信"的唯一判据,必须能被单独验证。
- *
- * 五个档位:
- *   measured  实测      —— 命中数来自服务商上报,是计费口径,可直接采信
- *   partial   部分实测  —— usage 有、缓存字段没有:输入输出实测,命中情况未知
- *   estimated 本地估算  —— 连 usage 都没有,全部为本地推算
- *   stale     端点已变更 —— 已有数据来自旧端点,不代表当前配置
- *   none      尚无请求
- *
- * @param record         最近一次请求记录(可为 null)
- * @param currentBaseUrl 当前配置的 baseUrl(端点变了旧数据就失效)
+ * 「面板数字能不能信」的唯一判据，抽成纯函数以便单独验证。
+ * measured 实测 / partial 有 usage 无缓存字段 / estimated 全本地推 / stale 端点已变 / none 无请求。
  */
 export function describeDataStatus(
   record: { estimated: boolean; source: UsageSource; endpoint?: string } | null,
@@ -249,7 +218,7 @@ export function describeDataStatus(
   return { level: 'measured', label: '实测', detail: `命中数来自 ${SOURCE_LABEL[record.source]}` }
 }
 
-// ---- 展示格式化 -------------------------------------------------------------
+// 展示格式化
 
 /** 千分位格式化 token 数(非法值回退 0) */
 export function formatTokenCount(n: number): string {

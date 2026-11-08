@@ -1,30 +1,7 @@
-// =============================================================================
-// 旧版 JSON 数据集兼容层(jsonCompat)
-// -----------------------------------------------------------------------------
-// 职责:
-//   - exportToJson: 当前工程(卡片+设置+自定义提示词) → 单文件 JSON 字符串
-//   - importFromJson: 解析 JSON 文件,识别"新版单文件 / 旧版 data.json 转储 /
-//     裸卡片数组"等结构,统一转换并自动补全缺失字段 → ProjectPayload
-//   - normalizeCards: 任意来源的卡片数据归一化为当前 Card[] 结构
-//   - downloadProjectJson: 按平台(浏览器/EXE/APK)导出 JSON 文件
-//
-// 设计原则:
-//   - JSON 单文件:图片以 dataURL 内联(与 ZIP 的独立图片文件相对)
-//   - 兼容层只做"宽容读取 + 补全",不丢弃任何可识别字段
-//   - 群聊是**卡片级**属性(members / myRole / speakMode / groupTopic …):
-//     导出随卡片原样带走,导入由 utils/groupMeta 统一还原(旧包字段丢失时
-//     从对话内容反推),绝不出现"群聊导出去再导回来变单聊壳"
-//   - 补全默认值与新建数据一致:
-//       · 卡片缺对话 → 丢弃该卡片(空卡无意义;内置角色由 mergeBuiltinCards 补齐)
-//       · 对话缺 name → 用"干员N-会话M"兜底;缺 contextHistory → 保持 undefined
-//         (getChatHistory 自动回退从 messages 派生,等价于新对话初始状态)
-//       · 消息缺 id → 顺序补号;缺 side → 按 role/user=我方,其余=对方;
-//         text 缺 → 兼容 content 字段;带图消息缺 imageW/H → CHAT_IMAGE 默认
-//   - 结构识别优先级:顶层 cards > characterCards > characters > 裸数组
-//   - 顶部聊天条:兼容 stripVariantIndex / stripVariant(数字或数字字符串)
-//   - 性别:兼容 myGender / gender('male'|'female'|'m'|'f'|0|1) / isFemale
-//   - 设置:读取新版 settings 对象;缺失时不重置(applySettingsSnapshot 保留现值)
-// =============================================================================
+// jsonCompat —— 单文件 JSON 导出与旧版数据兼容导入
+// 只做「宽容读取 + 补全」，不丢弃任何可识别字段；结构识别优先级
+// 顶层 cards > characterCards > characters > 裸数组。
+// 图片以 dataURL 内联（ZIP 则用独立图片文件）。
 
 import type { Card, ChatMessage, Conversation } from '../types/chat'
 import { CHAT_IMAGE } from '../constants/design'
@@ -50,13 +27,11 @@ export const JSON_EXPORT_EXT = '.json'
 /** JSON 导入可接受的文件选择过滤(与 ZIP 扩展名并列) */
 export const IMPORT_FILE_ACCEPT = '.zip,.json,application/json'
 
-// ---- 消息归一化 -------------------------------------------------------------
+// 消息归一化
 
 /**
- * 单条消息归一化 + 补全。
- *
- * 兼容旧字段:role(user→mine/assistant→other)、content(代替 text)。
- * 图片缺宽高时补 CHAT_IMAGE 默认;id 由调用方在整段补号。
+ * 单条消息归一化：兼容旧字段 role（user→mine / assistant→other）与 content（代替 text）；
+ * 图片缺宽高时补 CHAT_IMAGE 默认值，id 由调用方统一补号。
  */
 function normalizeMessage(raw: unknown): ChatMessage {
   if (!raw || typeof raw !== 'object') {
@@ -112,14 +87,10 @@ function normalizeContextHistory(
   return entries.length > 0 ? entries : undefined
 }
 
-// ---- 对话/卡片归一化 ---------------------------------------------------------
+// 对话 / 卡片归一化
 
 /**
- * 对话归一化 + 补全。
- *
- * 兼容旧字段:items(代替 messages)。
- * 消息 id 在整段顺序补号(旧数据 id 缺失/重复时保证 v-for key 唯一)。
- * 空消息(无文本无图片)丢弃。
+ * 兼容旧字段 items（代替 messages）；消息 id 顺序补号以保证 v-for key 唯一；空消息丢弃。
  */
 function normalizeConversation(raw: unknown, fallbackName: string): Conversation | null {
   if (!raw || typeof raw !== 'object') return null
@@ -137,6 +108,16 @@ function normalizeConversation(raw: unknown, fallbackName: string): Conversation
   const out: Conversation = { name, messages }
   const ctx = normalizeContextHistory(c.contextHistory)
   if (ctx !== undefined) out.contextHistory = ctx
+  // 会话累计输出 token:导出包里带着它(exportToJson 直接序列化卡片),
+  // 但早期导入端没还原 —— 表现为"恢复备份后智能总结的累计量归零",
+  // 该触发总结的时候不触发。这里补上读取(非法值忽略,保持"未设置"语义)。
+  if (
+    typeof c.sessionOutputTokens === 'number' &&
+    Number.isFinite(c.sessionOutputTokens) &&
+    c.sessionOutputTokens > 0
+  ) {
+    out.sessionOutputTokens = Math.trunc(c.sessionOutputTokens)
+  }
   // AI 推荐回复缓存:导入时一并还原(旧包没有这个字段 → 保持 undefined)
   const sug = c.suggestions
   if (sug && typeof sug === 'object' && Array.isArray((sug as { items?: unknown }).items)) {
@@ -154,14 +135,8 @@ function normalizeConversation(raw: unknown, fallbackName: string): Conversation
 }
 
 /**
- * 卡片归一化 + 补全。
- *
- * 兼容旧字段:subs / children(代替 conversations)。
- * 无任何有效对话的卡片丢弃(内置角色会由 store 的 mergeBuiltinCards 补齐)。
- *
- * ⚠️ 群聊的 members / myRole / speakMode 等是**卡片级**字段:早期这里只重建了
- * conversations,于是"群聊导出成 JSON 再导回来"直接退化成单聊壳。
- * 现在统一走 utils/groupMeta:显式字段(含旧字段名)优先,缺失时按对话内容反推。
+ * 兼容旧字段 subs / children（代替 conversations）；无有效对话的卡片丢弃（内置角色由
+ * store 的 mergeBuiltinCards 补齐）。群聊卡片级字段统一走 utils/groupMeta。
  */
 function normalizeCard(raw: unknown, cardIndex: number): Card | null {
   if (!raw || typeof raw !== 'object') return null
@@ -195,7 +170,7 @@ export function normalizeCards(raw: unknown): Card[] {
     .filter((c): c is Card => c !== null)
 }
 
-// ---- JSON 导入 ---------------------------------------------------------------
+// JSON 导入
 
 /**
  * 解析 JSON 文本为当前工程结构(自动识别旧版格式并补全)。
@@ -295,7 +270,7 @@ export function importFromJson(text: string): ProjectPayload {
   }
 }
 
-// ---- JSON 导出 ---------------------------------------------------------------
+// JSON 导出
 
 /** 统计导出内容(与 ZIP 导出一致) */
 function countStats(cards: Card[]) {
@@ -313,7 +288,7 @@ function countStats(cards: Card[]) {
 /**
  * 挑出"可导出"的卡片/对话（只读遍历，不复制消息体）
  *
- * 性能要点（2026-09-28 修复导出闪退）：这里只做**浅层筛选**，绝不
+ * 性能要点：这里只做**浅层筛选**，绝不
  * `JSON.parse(JSON.stringify(cards))` —— 30MB 的数据集深拷贝一次就是
  * 又一个 30MB 常驻内存，手机 WebView 直接崩。
  */
@@ -380,15 +355,9 @@ function buildJsonHead(
 }
 
 /**
- * 序列化工程为单文件 JSON 字符串。
- *
- * 图片以 dataURL 内联(与 ZIP 的独立图片文件相对);
- * 仅导出有消息或有 AI 记忆的对话;设置快照与自定义提示词一并内嵌。
- *
- * 防 OOM:导出前预算检查,超预算时按"先大后小"剔除图片(只删到放得下为止,
- * 保留 "[图片]" 占位),剔除后重新估算;仍超硬上限就抛错并提示清理/分批。
- * 图片重编码需要 canvas，而本函数是同步的 —— 异步调用方（downloadProjectJson）
- * 应先调 `reencodeOversizedImages`，这样多数大图根本走不到"剔除"这一步。
+ * 图片以 dataURL 内联（ZIP 则是独立文件）；只导出有消息或有 AI 记忆的对话。
+ * 防 OOM：超预算按「先大后小」剔除并重估，仍超硬上限就抛错。
+ * 本函数是同步的、做不了 canvas，异步调用方应先调 reencodeOversizedImages。
  */
 export function exportToJson(
   cards: Card[],
@@ -412,7 +381,7 @@ export function exportToJson(
     workCards = budgeted.cards
     filteredImages = budgeted.dropped
   }
-  // 剔除后重新估算：纯文本超限时没有图可删，只能明确拒绝（B6）
+  // 剔除后重新估算：纯文本超限时没有图可删，只能明确拒绝
   assertExportSizeWithinLimit(estimateExportBytes(workCards), '导出 JSON')
 
   const head = buildJsonHead(
@@ -422,7 +391,7 @@ export function exportToJson(
   Object.defineProperty(payload, 'cards', { value: workCards, enumerable: true })
   // 紧凑输出：美化缩进会让 30MB 的包再胖 ~25%，导入端只认 JSON 语义不受影响
   const json = JSON.stringify(payload)
-  // 真实字节：以 UTF-8 落盘长度为准，不再回估算值（B12）
+  // 真实字节：以 UTF-8 落盘长度为准，不回估算值
   const realBytes = utf8ByteLength(json)
   assertExportSizeWithinLimit(realBytes, '导出 JSON')
   // 同步路径没有 canvas，重编码张数恒为 0；调用方自行重编码后再合并计数
@@ -458,7 +427,7 @@ export async function* exportToJsonChunks(
     workCards = budgeted.cards
     filteredImages = budgeted.dropped
   }
-  // 剔除后重新估算，再看硬上限（B6）
+  // 剔除后重新估算，再看硬上限
   assertExportSizeWithinLimit(estimateExportBytes(workCards), '导出 JSON')
 
   const head = buildJsonHead(
@@ -493,22 +462,20 @@ export async function* exportToJsonChunks(
   buf += ']}'
   yield emit(buf)
 
-  // 真实字节总量（B12）：逐片累计 UTF-8 长度，和最终文件同一口径
+  // 真实字节总量：逐片累计 UTF-8 长度，与最终文件同一口径
   return { filteredImages, totalBytes: emittedBytes }
 }
 
-/** JSON 导出文件名(BAKER-JSON-本地时间.json) —— 与 ZIP 共用 timestamp()，时区一致（B11） */
+/** JSON 导出文件名 —— 与 ZIP 共用 timestamp()，时区一致 */
 export function jsonExportFileName(): string {
   return `BAKER-JSON-${timestamp()}${JSON_EXPORT_EXT}`
 }
 
 /**
- * 导出 JSON 工程文件(按平台:安装版弹系统保存框 / 浏览器直接下载)。
- * 复用 zipExport 的跨平台下载逻辑(EXE 系统另存为 / APK SAF / 浏览器 <a download>)。
+ * 导出 JSON 工程文件（安装版弹系统保存框 / 浏览器直接下载）。
  *
- * 大图重编码（B7）只在**会触发预算处理的超大导出**里做：`exportToJson` 是
- * 同步的，做不了 canvas，所以放到序列化之前。常规导出保留原图（导出是备份，
- * 用户预期包里就是原图），`reencodedImages` 恒为 0。
+ * 大图重编码只在会触发预算处理的超大导出里做：`exportToJson` 是同步的、做不了 canvas，
+ * 所以放在序列化之前。常规导出保留原图，reencodedImages 恒为 0。
  */
 export async function downloadProjectJson(
   cards: Card[],
@@ -526,8 +493,7 @@ export async function downloadProjectJson(
     prepared.cards, myGender, stripVariantIndex, promptOverrides, settingsSnapshot, cardOrder,
   )
   const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
-  // 真实字节（B12）：浏览器端是 blob.size；原生端是 saveExportFileSmart
-  // 回读校验过的落盘字节。两者都比"估算值"更接近用户拿到的文件。
+  // 真实字节：浏览器端是 blob.size；原生端是回读校验过的落盘字节
   const written = await downloadBlob(blob, jsonExportFileName())
   return {
     filteredImages,

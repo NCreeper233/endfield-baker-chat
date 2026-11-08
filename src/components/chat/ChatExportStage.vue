@@ -1,20 +1,7 @@
 <script setup lang="ts">
-// =============================================================================
-// 离屏聊天导出画布(ChatExportStage)
-// -----------------------------------------------------------------------------
-// 直接对 DOM 用 html-to-image 截图;不用 SVG
-// foreignObject 方案(字体内联 / data URL 转换 / canvas taint 等一堆问题)。
-//
-// 实现:离屏渲染 ChatArea(export-mode) + AppBackground(absolute),复用主界面
-// 同一套渲染逻辑(消息流 / 气泡 / 头像 / 装饰),用 captureRegion(toPng +
-// canvas 裁剪)按 region(strip 顶 → 帧底)导出 PNG。
-//
-// 关键点:
-//   - ChatArea(export-mode) 关闭动画/交互,只渲染静态全量消息
-//   - 所有消息元素按设计坐标绝对定位(不依赖 chat-scroll 高度撑开),
-//     stage 给定明确尺寸即可正确渲染
-//   - frameH / region 由 useChatRows 预先计算,provide 给 ChatArea
-// =============================================================================
+// ChatExportStage —— 离屏导出的聊天画布
+// 离屏渲染 ChatArea(export-mode) + AppBackground，复用主界面同一套渲染逻辑，再用
+// captureRegion 按 region 导出 PNG。不用 foreignObject 方案（字体内联 / canvas taint 一堆坑）。
 import { computed, nextTick, onMounted, provide, ref, watch } from 'vue'
 import { useBubbleMeasure } from '../../composables/useBubbleMeasure'
 import { useChatRows } from '../../composables/useChatRows'
@@ -98,15 +85,6 @@ const error = ref<string | null>(null)
 
 /** 是否已可截图(stage 挂载 + 渲染稳定) */
 const ready = ref(false)
-
-/** 双 rAF:等两次浏览器绘制,确保布局/字体/图片就绪后定格 */
-function nextPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => resolve())
-    })
-  })
-}
 
 /** 挂载后:等渲染稳定 → 标记截图可用 */
 onMounted(async () => {

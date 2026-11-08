@@ -1,11 +1,6 @@
 <script setup lang="ts">
-// =============================================================================
-// 应用根组件
-// -----------------------------------------------------------------------------
-// 组装:背景层 + 等比缩放画布(顶部标题 + 干员卡片列表 + 聊天区 + 顶部工具栏)。
-// 删除走"删除模式":操作带上的删除按钮进入多选,底部条(DeleteModeBar)选删除对象。
-// 调试模式:URL 包含 #debug 时,useDebugMode 会在左下角渲染气泡尺寸信息。
-// =============================================================================
+// App —— 应用根组件：背景 + 等比画布（顶栏 / 卡片列表 / 聊天区）+ 各类浮层
+// 删除走「删除模式」多选；URL 带 #debug 时左下角渲染气泡尺寸信息。
 import { ref, computed, inject, provide, toValue, watch, onMounted, onBeforeUnmount } from 'vue'
 import type { ChatMessage, GroupSpeakMode } from './types/chat'
 import AppBackground from './components/layout/AppBackground.vue'
@@ -28,10 +23,6 @@ import StylePreferenceDialog from './components/layout/StylePreferenceDialog.vue
 import UpdateDialog from './components/layout/UpdateDialog.vue'
 import VersionDialogShell from './components/layout/VersionDialogShell.vue'
 import AnnouncementPage from './components/layout/AnnouncementPage.vue'
-import SplashOverlay from './components/splash/SplashOverlay.vue'
-// ⛔ 临时彩蛋(可删):月亮物理玩具 —— 开屏动画放完后整屏出场。
-//    删法见 src/easteregg/moon/README.md(本行与下方模板里的 <MoonEgg /> 一起删)。
-import MoonEgg from './easteregg/moon/MoonEgg.vue'
 import { useChatStore } from './stores/chat'
 import { useSettingsStore } from './stores/settings'
 import { useMobile, hasEditableFocus } from './composables/useMobile'
@@ -41,7 +32,6 @@ import {
   DESKTOP_GEOM,
   type ChatGeometry,
 } from './constants/chatGeometry'
-import { MATERIALS } from './constants/materials'
 import { useDebugMode } from './composables/useDebugMode'
 import { usePopups } from './composables/usePopups'
 import { flushPendingWrites } from './composables/useChatPersistence'
@@ -52,7 +42,7 @@ import { getPlatform } from './utils/platform'
 const chatStore = useChatStore()
 const settingsStore = useSettingsStore()
 
-// ---- 创建群聊弹窗(第三版群聊,纯 UI) --------------------------------------
+// 创建群聊弹窗（纯 UI）
 /** 弹窗是否展开 */
 const groupDialogOpen = ref(false)
 
@@ -74,11 +64,10 @@ function onCreateGroup(members: string[], myRole: string, speakMode: GroupSpeakM
   chatStore.createGroupCard(members, myRole, undefined, speakMode)
 }
 
-// ---- 群聊演示数据回收(历史遗留清理) ----------------------------------------
-// 早期为确认 UI 曾播种过三个假群,现已废弃(不再播种)。
-//
-// 但老版本的白名单净化会把卡片级字段(members 等)丢掉,这些残留数据在库中
-// 已经退化成"群聊名 + 单聊壳",所以按标题精确匹配清理一次。
+// 群聊演示数据回收（历史遗留清理）
+// 老版本播种过的三个演示群残留仍在部分用户的库里：
+// 老版白名单净化会丢卡片级字段(members 等)，退化成"群聊名 + 单聊壳"，
+// 所以按标题精确匹配清理一次。
 // 标题清单与"空壳"判定统一放在 utils/groupMeta:那边新增的群聊识别要用同一份,
 // 否则被识别回来的演示群空壳会绕过这里的清理。
 
@@ -98,21 +87,13 @@ function purgeLegacyDemoGroups(): void {
 // 调试浮层(非调试模式下为空操作)
 useDebugMode()
 
-// ---- 弹窗(公告 / 提醒 / 更新) ---------------------------------------------
-// 数据来自服务端单一 JSON(https://notice.peilika.beer/popup.json,见 constants/popups):
-// 公告(title/content)/ 提醒(alerts)/ 更新(version + downloads)三合一。
-// 三类弹窗按「公告 → 提醒 → 更新」排队,同一时刻只渲染一个。
+// 弹窗（公告 / 提醒 / 更新）
+// 三类数据同出一个 JSON（constants/popups），按「公告 → 提醒 → 更新」排队，只渲染一个。
 //
-// ⚠️ 公告开关与组件必须成对:enableNotice: true 时队首可能是 'notice',
-//    必须同时渲染 <NoticeDialog>(见下方模板)—— 否则这个队首没有任何组件
-//    能关掉它,排在后面的提醒 / 更新会被永久堵住,一次都弹不出来。
-// forceUpdate: false —— 更新弹窗仅在客户端(Windows / 安卓)弹出,网页端不弹。
-//
-// enableAlert: true —— 「提醒」弹窗(服务端 popup.json 的 alerts)已恢复启用。
-//    它是队列的一环(公告 → 提醒 → 更新):数据里还有未确认的提醒就先弹提醒。
-//    ⚠️ 若只想临时关掉它,必须在这里关(usePopups 的 enableAlert: false),
-//       而不是仅在模板里不渲染 AlertDialog —— 否则 'alert' 会占住队首,
-//       把后面的更新弹窗永久堵死(与之前的公告 bug 同一类)。
+// ⚠️ 开关与组件必须成对：队首是该类型却没有对应组件渲染，它就没有任何出口，
+// 后面的提醒 / 更新会被永久堵住。要关掉某一类，必须在这里把开关设为 false，
+// 而不是仅在模板里不渲染对应组件。
+// forceUpdate: false —— 更新弹窗仅在客户端弹出，网页端不弹。
 const {
   noticeTitle,
   noticeContent,
@@ -128,12 +109,11 @@ const {
   downloadUrl,
 } = usePopups({ enableNotice: true, enableAlert: true, forceUpdate: false })
 
-// ---- 弹窗类型 ---------------------------------------------------------------
-// 测试版已转为公测,原先的「管理员密码门禁」已于 2026-09-25 整体移除。
-// 现在直接按队列依次出现:公告 → 提醒 → 更新,同一时刻只有一个。
+// 弹窗类型
+// 公测版没有密码门禁；弹窗按队列依次出现：公告 → 提醒 → 更新，同一时刻只有一个。
 const popupKind = computed(() => activePopup.value)
 
-// ---- 首次使用偏好弹窗(动作 / 神态描写的显示样式) --------------------------
+// 首次使用偏好弹窗（动作 / 神态描写的显示样式）
 /**
  * 一次性标记的 localStorage key
  *
@@ -162,23 +142,20 @@ const stylePrefAsked = ref(readStylePrefAsked())
 const stylePrefSnoozed = ref(false)
 
 /**
- * 开屏遮罩是否已**完全退场**
+ * 启动层是否已**完全退场**
  *
  * 入场弹窗(公告 / 提醒 / 更新)与首次使用偏好都等这个信号。
- * 进度到 100% 之后还有扫屏 + 淡出约 0.8 秒,只等"进度满"的话,
- * 弹窗会在这期间隔着半透明的遮罩出现,看起来像"和加载动画一起冒出来"。
+ * 启动层在 index.html 里，擦幕 + 淡出约 1.1 秒后才移除并广播 `baker:boot-done`；
+ * 只等"挂载完成"的话，弹窗会隔着还没退场的黄幕冒出来。
  */
 const splashGone = ref(false)
 
-/**
- * 是否显示首次使用偏好弹窗
- *
- * 四个条件同时满足才弹:
- *   1. 还没问过(一次性)
- *   2. 本次会话没点过「稍后再说」
- *   3. 开屏动画已结束
- *   4. 公告 / 提醒 / 更新队列当前为空 —— 这个弹窗**不插队**,避免两个弹窗叠在一起
- */
+/** 启动层退场 → 放行入场弹窗 */
+function onBootDone(): void {
+  splashGone.value = true
+}
+
+/** 四个条件同时满足才弹：没问过、本次没点「稍后再说」、开屏结束、弹窗队列为空（不插队） */
 const stylePrefOpen = computed(
   () =>
     !stylePrefAsked.value &&
@@ -188,18 +165,8 @@ const stylePrefOpen = computed(
 )
 
 /**
- * 应用首次使用偏好
- *
- * 全部落到已有开关上(不新增设置项):
- *   none  → 第一步选了「不开启动作/神态描写」:打开「沉浸式对话模式」,
- *           让后端不再写括号描写,只留台词;样式开关一个都不动
- *   color → 开启描写 + 居中 + 彩色
- *   mono  → 开启描写 + 居中但统一色
- *   off   → 开启描写,但描写留在气泡里(不居中)
- *
- * ⚠️ 后三种都要先把 immersiveMode 关掉:它的默认值是**开**(后端不写括号),
- *    若只改居中/彩色而不管它,后端压根不会写括号描写,玩家选的样式就永远看不到。
- * 选完即置一次性标记,并立刻落盘(与其它设置改动同一条持久化路径)。
+ * 全部落到已有开关上：none 打开沉浸式（不写括号）；其余三种先关掉沉浸式再设样式，
+ * 否则后端压根不写括号描写，玩家选的样式永远看不到。选完即落盘。
  */
 function onStylePreference(mode: 'none' | 'color' | 'mono' | 'off'): void {
   if (mode === 'none') {
@@ -228,13 +195,8 @@ function onStylePreference(mode: 'none' | 'color' | 'mono' | 'off'): void {
 }
 
 /**
- * 稍后再说:关掉本次,样式自动落到「默认括号样式」
- *
- * 两个语义刻意分开:
- *   - **样式**(居中 / 彩色)按默认值落地:括号描写留在气泡里,与旧版观感一致
- *   - **是否开启描写**(immersiveMode)不动:那一问玩家没回答,不该替他决定 ——
- *     它保持当前值(新用户即应用默认),想改随时去设置里拨
- * 另外**不写一次性标记**:下次进入(刷新 / 重开)照旧会问;本次会话内不再打扰。
+ * 样式（居中 / 彩色）按默认值落地，与旧版观感一致；是否开启描写（immersiveMode）
+ * 玩家没回答就不动。不写一次性标记：下次进入照旧会问，本次会话内不再打扰。
  */
 function onStylePreferenceLater(): void {
   settingsStore.bracketCenter = false
@@ -243,7 +205,7 @@ function onStylePreferenceLater(): void {
   flushPendingWrites()
 }
 
-// ---- 退出确认(三端统一) ---------------------------------------------------
+// 退出确认（三端统一）
 // 电脑版:Electron 主进程拦截窗口关闭后发来 flush-request
 // 手机版:系统返回键(Capacitor WebView 会触发 popstate)
 // 网页版:浏览器后退(同样走 popstate)
@@ -308,9 +270,8 @@ function nativeBridge(): NativeBridge | undefined {
 const onFlushRequest = () => {
   requestExit(
     async () => {
-      // 【2026-10-04 数据安全】必须**等**落盘完成再通知主进程关闭窗口。
-      // 以前是 fire-and-forget，主进程收到 flushDone 立刻 destroy，
-      // 在途写入随之消失 —— "关掉就丢"的直接原因。
+      // 必须**等**落盘完成再通知主进程关闭窗口：
+      // fire-and-forget 的话主进程收到 flushDone 就 destroy，在途写入随之消失。
       try {
         await flushPendingWrites()
       } catch (err) {
@@ -334,14 +295,9 @@ const onFlushRequest = () => {
 let exiting = false
 
 /**
- * 确认退出时需要回退的历史层数
- *
- *   1 层 = 应用自身所在的条目
- *   1 层 = 我们为拦截返回而压入的守卫层
- *
- * 守卫层在每次回退时都是"先被退掉、再重新压入"(同一 URL 的 pushState 会
- * 截断前进历史),所以栈里**始终只有一层守卫** —— 这个数字固定为 2,
- * 绝不能随用户按了几次返回而累加,否则会一次退到站外。
+ * 应用自身 1 层 + 拦截返回的守卫层 1 层 = 2。
+ * ⚠️ 守卫层每次回退都是「先退掉再压入」，栈里始终只有一层，这个数字绝不能累加，
+ * 否则会一次退到站外。
  */
 const EXIT_HISTORY_STEPS = 2
 
@@ -387,7 +343,7 @@ const onPopState = () => {
 // 自定义页面背景(带 localStorage 持久化:刷新保留、不随 .baker 导出、
 // 不受清空对话影响;上传成功赋值后自动落库)
 
-// ---- 移动端视图 -----------------------------------------------------------
+// 移动端视图
 // ≤768px 视口进入移动端模式:
 //   list 视图 = 对话列表全屏;选中对话后切 chat 视图 = 全屏聊天窗口。
 // 移动端聊天窗口是独立自适应组件(MobileChat),不复用 1920 设计稿画布。
@@ -395,13 +351,8 @@ const { isMobile, width, height, keyboardOffsetTop, keyboardInset, chatViewportH
   useMobile()
 
 /**
- * 移动端聊天容器的定位
- *
- * 浏览器(尤其 iOS)在软键盘弹出时会把可视视口整体向下平移,而 position:fixed
- * 是相对**布局视口**定位的 —— 于是整个界面被顶到屏幕外,只剩一大片背景。
- * 这里把容器直接钉在可视视口上:top = 可视视口偏移,height = 可视视口高度,
- * 浏览器怎么平移都严丝合缝,输入面板自然落在键盘正上方。
- * 键盘未弹出时 offsetTop 恒为 0、高度等于视口高度,与原布局完全一致。
+ * 钉在可视视口上：iOS 弹键盘时会把可视视口下移，而 fixed 是相对布局视口定位，
+ * 不这样整个界面会被顶到屏幕外。键盘未弹出时 offsetTop 为 0、高度等于视口高度。
  */
 const mChatStyle = computed(() => ({
   top: keyboardOffsetTop.value + 'px',
@@ -418,7 +369,7 @@ const MOBILE_LIST_W = 526
  *
  * = CharacterCardList 里两张卡的底边:模式切换宿主(62+40=102)与
  * 列表容器(.character-card 顶部 122.57 + 高 897.27 = 1019.84)。
- * 早期误写成 897.27(只等于列表容器自身高度),导致缩放系数偏大约 13.7%,
+ * **必须算到容器底边**——只算容器自身高度会让缩放系数偏大约 13.7%，
  * 页面下方内容被切掉一截。
  */
 const MOBILE_LIST_H = 1019.84
@@ -459,17 +410,9 @@ provide('enterMobileChat', () => {
   if (isMobile.value) mobileView.value = 'chat'
 })
 
-// ---- 聊天区可见性自愈 -------------------------------------------------------
-// Edge/夸克等 Chromium 内核在软键盘弹出/收起时,对 fixed 容器内绝对定位元素
-// 存在合成层残留 bug:元素布局值正常但渲染丢失(页面只剩背景+返回按钮)。
-// 方案:键盘/视口变化后自检 .chat-scroll 是否在可视区域内,异常则通过
-// chatEpoch 变更强制重挂载 ChatArea,触发浏览器重新合成,黑屏自愈。
-//
-// 误判防护(避免"键盘闪退"):
-//   1. 键盘压缩中(innerHeight < 几何高度)跳过检测——布局本来就按小视口排布
-//   2. rAF 后读数,确保渲染稳定
-//   3. 连续误判保护:同一次键盘会话最多自愈 3 次,防止无限重挂载循环
-//   4. 重挂载后恢复输入焦点(若之前聚焦在输入框),键盘不因重挂载收起
+// 聊天区可见性自愈：Edge / 夸克等 Chromium 内核在键盘收放后会残留合成层，
+// 元素布局正常但渲染丢失（只剩背景）。检测到就递增 chatEpoch 强制重挂载 ChatArea。
+// 防误判：键盘压缩中跳过、rAF 后读数、同一次键盘会话最多自愈 3 次、重挂载后恢复焦点。
 const chatEpoch = ref(0)
 let healTimer: number | null = null
 let healCount = 0
@@ -491,10 +434,9 @@ function scheduleChatHeal(focusDelay: boolean) {
 /**
  * 软键盘当前是否顶着可视视口
  *
- * iOS 上 window.innerHeight 在键盘弹出时**不变**,原先那条
- * `innerHeight < height - 30` 的守卫在 iOS 上永远不成立 —— 自愈检测会在
- * 键盘展开、布局正在过渡的过程中照常执行,一旦误判就会强制重挂载聊天区
- * (销毁输入框 → 键盘收起),正是"键盘一弹就乱"的帮凶之一。
+ * 不能用 `innerHeight < height - 30` 这条守卫：iOS 上键盘弹出时
+ * window.innerHeight **不变**，它在 iOS 永远不成立 —— 自愈检测会在键盘展开、
+ * 布局过渡中照常执行，一旦误判就强制重挂载聊天区（销毁输入框 → 键盘收起）。
  */
 function isKeyboardOpen(): boolean {
   if (keyboardInset.value > 0) return true
@@ -554,16 +496,9 @@ function checkChatVisible() {
 }
 
 /**
- * 是否运行在 iOS 上(原生壳或网页版)
- *
- * 自愈重挂载针对的是 Chromium(Edge/夸克)合成层残留 bug;iOS 上 Safari /
- * Chrome / Edge / 夸克都用 WebKit,没有这个问题,而重挂载会销毁输入框
- * (键盘随之收起),所以 iOS 上整体关掉自愈。
- *
- * 平台优先走 utils/platform;但它在网页版返回 'web',platform 的 isIOS()
- * 目前只认 Capacitor 原生壳且未对外导出,因此这里用 getPlatform() 加 UA
- * 兜住网页版 —— 只匹配 AppleWebKit 会漏掉套着 Chromium UA 的 iOS 浏览器
- * (Chrome / Edge / 夸克),正是之前自愈误触发的来源。
+ * 自愈只针对 Chromium 的合成层 bug；iOS 上全是 WebKit，而重挂载会销毁输入框、
+ * 键盘随之收起，故整体关掉。getPlatform 在网页版返回 web，故再用 UA 兜住
+ * 套着 Chromium UA 的 iOS 浏览器（iPadOS 13+ 请求桌面 UA，只能靠触点数区分）。
  */
 const isIOS = (() => {
   if (getPlatform() === 'ios') return true
@@ -608,6 +543,15 @@ const mBackTop = computed(() =>
 
 
 onMounted(() => {
+  // 启动层（index.html 里的静态层）黄幕退场并移除后会广播这个事件；
+  // 公告 / 首次偏好都要等它，免得弹窗盖在开场上。
+  if (document.getElementById('boot-layer')) {
+    window.addEventListener('baker:boot-done', onBootDone)
+  } else {
+    // 没有启动层（旧构建 / 被中途移除）→ 直接放行
+    splashGone.value = true
+  }
+
   // 聊天区可见性自愈监听:输入聚焦/失焦(键盘弹出/收起) + visualViewport 变化
   document.addEventListener('focusin', onHealSignal)
   document.addEventListener('focusout', onHealSignal)
@@ -635,6 +579,7 @@ onBeforeUnmount(() => {
   window.visualViewport?.removeEventListener('scroll', onHealSignal)
   window.removeEventListener('dsh-flush-request', onFlushRequest)
   window.removeEventListener('popstate', onPopState)
+  window.removeEventListener('baker:boot-done', onBootDone)
   if (healTimer !== null) clearTimeout(healTimer)
 })
 
@@ -704,7 +649,7 @@ function onCloseExport(): void {
 /** 设置弹窗是否展开(API 配置 + 提示词编辑 + 数据管理 + 背景) */
 const settingsOpen = ref(false)
 
-// ---- 公告页 -----------------------------------------------------------------
+// 公告页
 /**
  * 公告页是否展开
  *
@@ -744,17 +689,9 @@ function closeHint(): void {
 }
 
 /**
- * 聊天按钮(chat09)行为:
- * - 已选中主卡(点击父级角色卡片或子对话,activeCardIndex 非 null)
- *   → 在选中主卡下追加子会话(无需进入子对话)
- * - 未选中任何角色 → 弹出"请先选中角色"提示
+ * 聊天按钮：已选中主卡就在其下追加子会话；未选中则提示先选角色
  */
-/**
- * 列表上方操作带的加号
- *
- * 群聊模式下语义是"创建群聊",单聊模式下是"新建对话" —— 由 App 统一分发,
- * CharacterCardList / ChatModeSwitch 都不参与判断。
- */
+/** 群聊模式下是「创建群聊」，单聊模式下是「新建对话」，由 App 统一分发 */
 function onAdd() {
   if (chatStore.chatMode === 'group') {
     groupDialogOpen.value = true
@@ -777,16 +714,15 @@ function onChatNew() {
 </script>
 
 <template>
-  <!-- ============ 已退出(网页端):界面整体收起,只留提示 ============
-       浏览器不允许脚本关闭非脚本打开的标签页,这是能做到的、明确的"退出"表现 -->
+  <!-- 已退出：脚本不能关闭非脚本打开的标签页，只能整体收起并给出明确提示 -->
   <div v-if="exited" class="exit-done">
     <p class="exit-done__title">已保存并退出</p>
     <p class="exit-done__sub">当前进度已写入本地，可以关闭此页面了</p>
   </div>
 
-  <AppBackground />
+  <AppBackground :custom-url="settingsStore.customBg" />
 
-  <!-- ==================== 桌面端(>768px):1920 设计稿等比画布 ==================== -->
+  <!-- 桌面端（>768px）：1920 设计稿等比画布 -->
   <template v-if="!isMobile">
     <DesignCanvas>
       <AppHeader variant="desktop" :mode="chatStore.chatMode" @update:mode="chatStore.setChatMode" />
@@ -802,7 +738,7 @@ function onChatNew() {
     </DesignCanvas>
   </template>
 
-  <!-- ==================== 移动端(≤768px):列表 ↔ 聊天 双视图 ==================== -->
+  <!-- 移动端（≤768px）：列表 ↔ 聊天双视图 -->
   <template v-else>
     <!-- 列表视图:对话列表等比缩放铺满视口(选中对话后自动切到聊天视图)。
          顶栏由 AppHeader 固定承担(标题 + 单聊/群聊页签),列表本身只画卡片;
@@ -990,15 +926,6 @@ function onChatNew() {
     @save="onExitSave"
     @cancel="onExitCancel"
   />
-
-  <!-- 开屏动画(启动时全屏覆盖,约 3 秒后自动淡出,不阻塞数据加载)。
-       @done → splashGone:公告 / 提醒 / 更新 / 首次使用偏好全部等遮罩彻底退场后再出现。 -->
-  <SplashOverlay @done="splashGone = true" />
-
-  <!-- ⛔ 临时彩蛋(可删):月亮物理玩具。
-       自己盯开屏遮罩消失后才出场,所以刻意排在 <SplashOverlay /> 之后;
-       删法见 src/easteregg/moon/README.md(连同上面那行 import 一起删)。 -->
-  <MoonEgg />
 </template>
 
 <style scoped lang="scss">
@@ -1013,12 +940,12 @@ function onChatNew() {
   line-height: 1.7;
 }
 
-// ---- 聊天页顶部页签(单聊 / 群聊) ------------------------------------------
-// 已并入 AppHeader(components/layout/AppHeader.vue):标题与页签同处一条顶栏,
-// 页签相对整页居中。这里不再有独立的定位容器。
+// 聊天页顶部页签（单聊 / 群聊）
+// 页签在 AppHeader(components/layout/AppHeader.vue) 里渲染:标题与页签同处一条顶栏。
+// 这里不再有独立的定位容器。
 
 
-// ---- 移动端列表视图 --------------------------------------------------------
+// 移动端列表视图
 // 对话列表(526×897 设计稿)等比缩放铺满手机视口;列表自身可滚动。
 // stage 顶部留一条 14px 的呼吸缝(AppHeader 固定顶栏:标题 + 页签)。
 .m-list {
@@ -1049,7 +976,7 @@ function onChatNew() {
   }
 }
 
-// ---- 移动端聊天视图 --------------------------------------------------------
+// 移动端聊天视图
 // fixed 全屏 + 强制合成层(规避 Chromium 内核键盘合成残留 bug) + 自愈兜底。
 // 移动端输入框用原生 textarea(ChatInput 分支),绕开夸克等对 contenteditable
 // 的焦点 bug。
@@ -1089,9 +1016,9 @@ function onChatNew() {
   }
 }
 
-// ---- 移动端适配 -----------------------------------------------------------
+// 移动端适配
 
-// ---- 已退出(网页端)-------------------------------------------------------
+// 已退出（网页端）
 // 铺满整屏、最高层级:退出后不再渲染任何应用界面
 .exit-done {
   position: fixed;

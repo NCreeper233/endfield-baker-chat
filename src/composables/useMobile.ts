@@ -1,11 +1,5 @@
-// =============================================================================
-// useMobile:移动端视口判定
-// -----------------------------------------------------------------------------
-// 响应式监听视口尺寸,提供:
-//   - isMobile:宽度 ≤ MOBILE_BREAKPOINT 即视为移动端(启用列表↔聊天切换视图)
-//   - width / height:当前视口尺寸(供移动端 zoom 容器计算缩放系数)
-// 模块级单例:多个组件共享同一组 ref 与 resize 监听(与 useCanvasZoom 同思路)。
-// =============================================================================
+// useMobile —— 移动端视口判定（模块级单例，多个组件共享同一组 ref 与监听）
+// 宽度 ≤ MOBILE_BREAKPOINT 即视为移动端，启用列表 ↔ 聊天切换视图。
 
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
@@ -18,17 +12,10 @@ const height = ref(typeof window !== 'undefined' ? window.innerHeight : 1080)
 /** 是否移动端视口 */
 const isMobile = ref(width.value <= MOBILE_BREAKPOINT)
 
-// ---- 可视视口(visual viewport)----------------------------------------------
-// iOS Safari 弹出软键盘时**不会**改变 window.innerHeight(布局视口保持全高),
-// 只有 visualViewport 会收缩;同时浏览器会把可视视口整体向下平移,好让获得
-// 焦点的输入框露出来。
-//
-// 若继续按 innerHeight 排版,输入面板会停在键盘背后;而浏览器那一次平移又会把
-// 整块 position:fixed 界面顶到屏幕外 —— 用户看到的就是"输入框跑到最上面,
-// 中间空出一大片背景"。
-//
-// 解法:键盘弹出时改用可视视口来排版与定位,让容器严丝合缝地贴在可视视口上,
-// 浏览器怎么平移都不影响最终位置。
+// 可视视口（visual viewport）
+// iOS Safari 弹软键盘时 innerHeight 不变，只有 visualViewport 收缩，且浏览器会把
+// 可视视口整体下移；仍按 innerHeight 排版会让输入面板停在键盘背后。
+// 故键盘弹出时改用可视视口排版与定位。
 const visualHeight = ref(height.value)
 const visualOffsetTop = ref(0)
 /** 软键盘顶起的高度(px);0 表示键盘未弹出 */

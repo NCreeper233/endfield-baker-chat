@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview",
     "electron:build": "vite build && electron-builder --win",
     "electron:dir": "vite build && electron-builder --win dir"
@@ -15,11 +18,9 @@
     "@capacitor/android": "^8.5.0",
     "@capacitor/core": "^8.5.0",
     "@capacitor/filesystem": "^8.1.2",
-    "cannon-es": "^0.20.0",
     "html-to-image": "^1.11.13",
     "jszip": "^3.10.1",
     "pinia": "^3.0.3",
-    "three": "^0.160.1",
     "vue": "^3.5.17"
   },
   "devDependencies": {
@@ -30,6 +31,7 @@
     "sass": "^1.89.2",
     "typescript": "~5.9.2",
     "vite": "^7.1.0",
+    "vitest": "^5.1.0",
     "vue-tsc": "^3.0.5"
   },
   "build": {

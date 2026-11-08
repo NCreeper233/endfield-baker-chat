@@ -1,57 +1,32 @@
-// =============================================================================
-// 打包环境文件存储桥接(nativeStorage)
-// -----------------------------------------------------------------------------
-// 网页端(浏览器)沿用 IndexedDB(见 useChatPersistence)。
-// 打包端(EXE/APK WebView)改用本地 JSON 文件持久化:
-//   - Electron(EXE):preload 通过 contextBridge 暴露 window.nativeStorage
-//   - Capacitor(APK):@capacitor/filesystem 插件(应用数据目录)
-//
-// 统一抽象为一个"键值文件仓库":所有键存进同一个 JSON 文件
-// endfield-baker-data.json,读写都是整文件序列化,失败静默降级。
-//
-// 【2026-10-04 数据保护】损坏检测 + .bak 一代备份 + 拒绝覆盖损坏文件:
-//   之前"读失败→空缓存→整文件覆盖"会把手机里的聊天记录整份抹掉(偶发)。
-// =============================================================================
+// nativeStorage —— 打包环境的文件存储桥接
+// 网页端走 IndexedDB；打包端把所有键存进同一个 JSON 文件，读写都是整文件序列化。
+// ⚠️ 「读失败 → 空缓存 → 整文件覆盖」曾把手机里的聊天记录整份抹掉，
+// 故有损坏检测 + .bak 一代备份 + 拒绝覆盖损坏文件。
 
 import { isElectron, isNative } from './platform'
 
-/** 统一文件读写接口(由 Electron preload / Capacitor 各自提供) */
+/** 由 Electron preload / Capacitor 各自提供 */
 export interface NativeFileBridge {
-  /**
-   * 分块写整文件（大数据量用）
-   *
-   * 工程数据到 30MB+ 时，一次性把整串内容过桥会让手机 WebView/Java 侧
-   * 内存峰值过高而闪退；分块写把峰值压到单块大小（2026-09-28 修复导出闪退）。
-   */
+  /** 分块写整文件：一次性把 30MB+ 过桥会让手机内存峰值过高而闪退 */
   writeFileChunked?: (path: string, content: string) => Promise<void>
-  /** 读取文本文件,不存在/失败返回 null */
+  /** 不存在 / 失败返回 null */
   readFile: (path: string) => Promise<string | null>
   /**
-   * 文件是否存在（可选）
-   *
-   * 【2026-10-04 数据安全】没有它就无法区分「文件不存在」(首次使用,可以写)
-   * 与「读失败」(文件可能还在,绝不能当空库覆盖)。Capacitor 端用 Filesystem.stat 实现;
-   * Electron 端没实现时退化为 .bak 启发式判断。
+   * 没有它就无法区分「文件不存在」（首次使用，可以写）与「读失败」（可能还在，
+   * 绝不能当空库覆盖）。Electron 未实现时退化为 .bak 启发式判断。
    */
   exists?: (path: string) => Promise<boolean>
-  /** 写入文本文件(覆盖),失败抛出 */
+  /** 覆盖写入，失败抛出 */
   writeFile: (path: string, content: string) => Promise<void>
 }
 
-/** 持久化 JSON 文件名(存于应用数据目录) */
+/** 存于应用数据目录 */
 export const NATIVE_DATA_FILE = 'endfield-baker-data.json'
 
-/** 模块级缓存:null=未检测 / undefined=尚未检测 / bridge=可用 */
+/** undefined = 尚未探测；null = 网页端 */
 let cachedBridge: NativeFileBridge | null | undefined
 
-/**
- * 获取打包环境的文件读写桥。
- *
- * 依次探测:
- *   1. Electron 的 window.nativeStorage(preload 注入)
- *   2. Capacitor 的 @capacitor/filesystem(原生平台)
- * 都不是则返回 null(网页端,由调用方回退 IndexedDB)。
- */
+/** Electron 的 preload 注入优先，其次 Capacitor Filesystem；都不是返回 null 由调用方回退 IndexedDB */
 export async function getNativeFileBridge(): Promise<NativeFileBridge | null> {
   if (cachedBridge !== undefined) return cachedBridge
 
@@ -95,14 +70,9 @@ export async function getNativeFileBridge(): Promise<NativeFileBridge | null> {
             recursive: true,
           })
         },
-        // 分块写：先写 .tmp 再 rename（原子替换）。
-        //
-        // 为什么必须原子：安卓被系统回收/用户强杀时，分块写到一半会留下
-        // 半截 JSON；旧文件已被覆盖 → 重启后整库判损坏 → 聊天记录消失。
-        // 改成写 .tmp 后，最坏情况只是丢掉本次改动，原文件完好。
-        //
-        // 单块 128KB：Java 桥每次要收一个 JS 字符串并转 UTF-8，
-        // 块越小峰值越低（大数据集自动保存闪退的根因之一）。
+        // 分块写：先写 .tmp 再 rename（原子替换）。安卓被强杀时分块写到一半会留下
+        // 半截 JSON，若直接覆盖主文件，重启后整库判损坏。单块 128KB：Java 桥每次要把
+        // JS 字符串转 UTF-8，块越小峰值越低。
         writeFileChunked: async (path, content) => {
           const CHUNK = 128 * 1024
           const tmp = path + '.tmp'
@@ -150,25 +120,15 @@ export async function getNativeFileBridge(): Promise<NativeFileBridge | null> {
 }
 
 /**
- * 打包环境的键值文件仓库。
- *
- * 所有键保存在同一个 JSON 文件里,读写前先整文件读取到内存缓存,
- * 写时整文件序列化落盘。JSON 解析/写入失败静默降级(不阻塞主流程)。
- *
- * 防竞态:写入串行化(writeChain),避免并发 put 时整文件覆盖互相
- * 覆盖丢失数据(大历史导入/导出 + 聊天自动保存同时发生时尤为关键)。
+ * 所有键存同一个 JSON 文件；写入经 writeChain 串行化，避免并发 put 互相覆盖
+ * （大历史导入导出与聊天自动保存同时发生时尤为关键）。
  */
 export function createNativeStore(bridge: NativeFileBridge) {
   let cache: Record<string, unknown> | null = null
-  // 写入串行链:前一个 put 完成后才执行下一个,防止并发覆盖丢数据
   let writeChain: Promise<void> = Promise.resolve()
 
-  // ---- 数据保护(2026-10-04) -------------------------------------------------
-  // 历史 bug:主文件读失败/JSON 解析失败时这里会把 cache 置成 {},而下一次 put
-  // 就拿这个空对象**整文件覆盖** —— 手机被系统杀掉时正好在分块写中间的话,
-  // 文件会留下半截 JSON,重启后就是这样把整份聊天记录抹掉的。
-  // 现在:① 解析失败先尝试从 .bak 恢复;② 两个都坏则标记 corrupt 并**拒绝写入**,
-  //       绝不覆盖,给用户留出手工/工具抢救的机会;③ 每次写前留一代备份。
+  // 数据保护：主文件解析失败先从 .bak 恢复；两个都坏则标记 corrupt 并拒绝写入，
+  // 给用户留出抢救机会；每次写前留一代备份。
   const BAK_FILE = NATIVE_DATA_FILE + '.bak'
   const BAK_MIN_INTERVAL_MS = 5 * 60 * 1000
   let loadedStatus: 'ok' | 'empty' | 'recovered' | 'corrupt' | 'unreadable' = 'empty'
@@ -185,9 +145,8 @@ export function createNativeStore(bridge: NativeFileBridge) {
     }
   }
 
-  // 单飞：冷启动时 useChatPersistence 会**并发**发起 7 个 get()，
-  // 没有它就会并发读 7 次整文件（30MB 库在低端机上直接 OOM，
-  // 而 readFile 的 catch 会把 OOM 吞成 null → 被判成"没有数据" → 整库被覆盖）。
+  // 单飞：冷启动时 useChatPersistence 会并发发起 7 个 get()，否则会并发读 7 次整文件
+  // （30MB 库在低端机上直接 OOM，而 readFile 的 catch 会把 OOM 吞成 null → 整库被覆盖）。
   let loading: Promise<Record<string, unknown>> | null = null
 
   function loadCache(): Promise<Record<string, unknown>> {
@@ -226,9 +185,8 @@ export function createNativeStore(bridge: NativeFileBridge) {
       loadedStatus = 'corrupt'
       return cache
     }
-    // 读出来是 null/空：可能是"真的没有文件"(首次使用)，也可能是"读失败"(文件还在)。
-    // 能 stat 就 stat；不能 stat 时：有 .bak/其它证据说明数据曾存在过 → 按读失败处理，
-    // **绝不当空库写入**，避免把用户数据覆盖掉。
+    // 读出来是 null/空：可能是真的没有文件，也可能是读失败（文件还在）。
+    // 有 .bak 或 stat 得到文件时就按读失败处理，绝不当空库写入。
     if (bridge.exists) {
       const present = await bridge.exists(NATIVE_DATA_FILE).catch(() => false)
       if (present) {

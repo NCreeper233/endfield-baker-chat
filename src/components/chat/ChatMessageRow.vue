@@ -1,12 +1,6 @@
 <script setup lang="ts">
-// =============================================================================
-// 单条消息行
-// -----------------------------------------------------------------------------
-// 职责:渲染一条 ChatRow 的完整消息(头像/文字气泡/图片),
-//       全部定位样式由父级注入的 row 计算。
-// 设计理由:从 ChatArea 消息循环中抽出,模板行数减负;
-//          头像点击以 emit 上报,父组件统一处理 store 写入。
-// =============================================================================
+// ChatMessageRow —— 一条消息行（头像 / 气泡 / 图片），定位样式全部由父级注入的 row 给出
+// 头像点击通过 emit 上报，由父组件统一写 store。
 import { computed, inject, onMounted, onUnmounted, ref, toValue, watch, type CSSProperties } from 'vue'
 import {
   chatGeometryKey,
@@ -16,7 +10,6 @@ import {
 } from '../../constants/chatGeometry'
 import {
   pos,
-  // speakerNameStyle, // 【已注释停用】角色名称显示功能整体停用
 } from '../../utils/chatPosition'
 import { emojiByMood } from '../../constants/emoji'
 import { BUBBLE_FONT } from '../../utils/measure'
@@ -33,10 +26,6 @@ import MessageActionMenu from './MessageActionMenu.vue'
 /** 头像解析函数(由父级传入,与 store/菜单解析链一致) */
 type SpeakerAvatarResolver = (msg: MessageSpeaker) => string
 
-// 【已注释停用】(角色名称显示功能整体停用)
-// /** 说话人显示名解析函数(角色名称悬浮用) */
-// type SpeakerNameResolver = (msg: MessageSpeaker) => string
-
 const props = defineProps<{
   /** 消息行布局结果(rows[i],坐标为滚动容器相对坐标) */
   row: ChatRow
@@ -48,11 +37,6 @@ const props = defineProps<{
    * 只用来决定光标:能点才给手型。other 侧目前只有带两张形象的「管理员」为真。
    */
   isAvatarSwitchable: (msg: MessageSpeaker) => boolean
-  // 【已注释停用】角色名称显示功能整体停用
-  // /** 说话人显示名解析(useChatRows.resolveSpeakerName) */
-  // resolveSpeakerName: SpeakerNameResolver
-  // /** 是否显示角色名称悬浮(store.showCharacterNames) */
-  // showCharacterNames: boolean
 }>()
 
 const emit = defineEmits<{
@@ -83,11 +67,7 @@ function onRegenerate() {
   ai.regenerate(prep.id)
 }
 
-// =============================================================================
-// 长按 / 右键操作菜单(删除)
-// - 移动端:长按 500ms 弹出;触摸移动超过阈值取消
-// - 桌面端:右键(contextmenu)弹出
-// =============================================================================
+// 长按 / 右键菜单：移动端长按 500ms，桌面端 contextmenu；触摸移动超过阈值取消
 const LONG_PRESS_MS = 500
 const MOVE_THRESHOLD = 10
 
@@ -344,17 +324,9 @@ const errorBubbleStyle = computed<CSSProperties>(() => {
   }
 })
 
-// =============================================================================
-// 括号描写居中行(设置项「括号描写居中」)
-// -----------------------------------------------------------------------------
-// 形态:一行**纯居中文本**(无气泡、无头像、无左右归属),左右各内缩
-// centerTextPadX 以免长句顶到聊天框边缘。
-// 样式为什么走 inline(而不是 scoped CSS):
-//   1. 几何必须与 useChatRows 的测量口径同源,一律取几何层
-//   2. 颜色(尤其 -webkit-text-fill-color)必须 inline:html-to-image 克隆节点时会把
-//      计算样式整份内联,该属性会带上根节点的黑色并继承下去、压过 color,
-//      导致导出图里的居中文字变黑(与 ChatBubble 的内文同款处理)
-// =============================================================================
+// 括号描写居中行：纯居中文本，无气泡无头像，左右各内缩 centerTextPadX。
+// 样式走 inline 而非 scoped CSS：几何要与测量口径同源；`-webkit-text-fill-color` 必须
+// inline，否则 html-to-image 克隆时继承根节点黑色，导出图里这行字会变黑。
 
 /** 居中行容器:几何全部由几何层内联注入(文本宽/字号/内缩与测量口径一致) */
 const centeredStyle = computed<CSSProperties>(() => {
@@ -419,14 +391,7 @@ const centeredTextStyle = computed<CSSProperties>(() => {
       :style="pos(row.avatarX, row.avatarTop, geom.avatarBox, geom.avatarBox)"
       @click="emit('avatar-click', row)"
     />
-    <!-- 角色名称悬浮(已注释停用):贴在带头像消息的气泡上缘上方,悬浮于消息间空隙(不占布局);
-          锚定跟随气泡侧缘(other 左缘起向右 / mine 右缘起向左),仅带头像行显示 -->
-    <!-- <span
-      v-if="row.showAvatar && showCharacterNames"
-      class="chat-speaker-name"
-      :style="speakerNameStyle(row.msg.side, row.left, row.left + row.box.rectW, row.bubbleTop)"
-    >{{ resolveSpeakerName(row.msg) }}</span> -->
-    <!-- 括号描写居中行(实验性功能「括号描写居中」):无气泡 / 无头像 / 无左右归属,
+    <!-- 括号描写居中行:无气泡 / 无头像 / 无左右归属,
          一行纯居中文本;displayText 已去掉最外层括号(见 aiText.splitBracketParts)。
          每次挂载都播入场动画(淡入 + 上浮),与 maker 播放模式的居中文本一致 ——
          逐拍显示时它先单独出现,动画因此看得见 -->

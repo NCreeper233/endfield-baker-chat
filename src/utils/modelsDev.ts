@@ -1,79 +1,41 @@
-// =============================================================================
-// models.dev 在线模型库(modelsDev)
-// -----------------------------------------------------------------------------
-// https://models.dev 是一个公开的模型元数据库:GET /api.json 返回全部服务商
-// 与模型,含 limit.context(上下文窗口)、limit.output、价格等。
-//
-// 为什么值得接:
-//   1. 覆盖广 —— 7847 个模型 / 222 个服务商,远超手写表能维护的规模
-//   2. 够新 —— 手写表必然滞后(实例:表里 deepseek-chat 还是 131072,
-//      而 models.dev 上 DeepSeek 已是 deepseek-v4-* / 1,000,000)
-//   3. 可跨域 —— 响应带 access-control-allow-origin: * ,浏览器可直连
-//
-// 体积与缓存:
-//   解压后约 4.5 MB,但 brotli 传输只有 ~330 KB。仍然**必须缓存** ——
-//   24 小时内复用同一份内存数据,且并发查询共享同一个请求(single-flight)。
-//
-// 【关键:必须按服务商匹配,不能只按模型名查】
-//   裸模型名在不同服务商下冲突严重:2545 个裸名里有 466 个 context 不一致
-//   (deepseek-v4-pro 一家一个数,能凑出 8 种取值)。
-//   所以先用 baseUrl 的 host 去匹配服务商的 api 字段(deepseek 的 api 就是
-//   https://api.deepseek.com),命中后只在该服务商内查;
-//   匹配不到服务商时,只在"全库同名模型取值唯一"时才回答 ——
-//   有歧义宁可返回 null 交给用户手填,也不猜一个可能错十倍的数字。
-// =============================================================================
+// modelsDev —— models.dev 在线模型库（含 limit.context 与价格），缓存 24 小时、并发单飞
+// ⚠️ 必须按服务商匹配：裸模型名在不同服务商下取值常不一致，先用 baseUrl 的 host
+// 定位服务商；匹配不到时只有「全库同名取值唯一」才回答，有歧义宁可返回 null。
 
 /** 数据源地址 */
 const API_URL = 'https://models.dev/api.json'
 
-/** 缓存有效期(ms):24 小时。模型窗口变动不频繁,一天一拉足够 */
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
-/** 拉取超时(ms):4.5MB 解压后还要解析,给足时间 */
+/** 4.5MB 解压后还要解析，给足时间 */
 const TIMEOUT_MS = 30000
 
-/**
- * 失败后的重试冷却(ms)
- *
- * 没有它的话,每次换模型/改地址都会重新发起一次注定失败的请求,
- * 而每次都要先等满 30 秒超时 —— 断网时体验会非常糟。
- */
+/** 失败冷却：否则每次换模型都要白等一个 30 秒超时 */
 const FAIL_RETRY_MS = 60000
 
-/** 一个服务商的索引 */
 interface ProviderIndex {
   id: string
   name: string
-  /** 模型 id(小写)→ 上下文窗口 */
+  /** 模型 id（小写）→ 上下文窗口 */
   models: Map<string, number>
 }
 
-/** 全库索引 */
 interface Library {
   providers: Map<string, ProviderIndex>
-  /** 服务商 api 的 host(小写)→ providerId */
+  /** 服务商 api 的 host（小写）→ providerId */
   byHost: Map<string, string>
-  /**
-   * 全库裸模型名索引(小写)
-   *
-   * 值 = 上下文窗口;**null 表示该名字在多个服务商下取值不一致**,
-   * 此时拒绝回答(见文件头说明)。
-   */
+  /** 全库裸模型名；null 表示同名在多个服务商下取值不一致，拒绝回答 */
   bare: Map<string, number | null>
 }
 
-/** 一次命中的结果 */
+/** 一次命中：providerMatched 为 false 表示退化成全库唯一名匹配 */
 export interface LibraryHit {
   contextWindow: number
-  /** 命中的服务商(用于在界面上标注"这个数字是谁给的") */
   providerName: string
-  /** 命中的模型 id */
   modelId: string
-  /** 是否靠 baseUrl 精确匹配到服务商(true)还是退化成全库唯一名匹配(false) */
   providerMatched: boolean
 }
 
-/** 抓取状态(界面据此显示"查询中…") */
 export type LibraryStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 let library: Library | null = null
@@ -81,20 +43,14 @@ let loadedAt = 0
 let inflight: Promise<Library | null> | null = null
 let status: LibraryStatus = 'idle'
 let lastError = ''
-/** 最近一次失败时刻(用于退避,避免每次都白等一个超时) */
+/** 最近一次失败时刻，用于退避 */
 let failedAt = 0
 
-/** 当前抓取状态 */
-function libraryStatus(): LibraryStatus {
-  return status
-}
-
-/** 最近一次失败原因(status 为 error 时有效) */
 export function libraryError(): string {
   return lastError
 }
 
-/** 取出 URL 的 host(小写,去掉端口与路径);解析失败返回空串 */
+/** 小写 host，去掉端口与路径；解析失败返回空串 */
 function hostOf(rawUrl: string): string {
   const s = String(rawUrl || '').trim()
   if (!s) return ''
@@ -126,11 +82,7 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null
 }
 
-/**
- * 把 api.json 编译成查询索引(纯函数,便于单独验证)
- *
- * @param payload /api.json 的解析结果
- */
+/** 把 api.json 编译成查询索引（纯函数，便于单独验证） */
 export function buildLibrary(payload: unknown): Library {
   const providers = new Map<string, ProviderIndex>()
   const byHost = new Map<string, string>()
@@ -225,16 +177,8 @@ async function loadLibrary(force = false): Promise<Library | null> {
 }
 
 /**
- * 在模型库里查上下文窗口
- *
- * 匹配顺序:
- *   1. baseUrl 的 host → 服务商 → 该服务商下的模型(full id / 裸名)
- *   2. 兜底:全库裸名 —— **仅当该名字全库取值唯一**时才返回
- *
- * @param modelId 用户填写的模型名
- * @param baseUrl 用户填写的 Base URL(用于精确匹配服务商)
- * @param force   true 时忽略缓存重新拉取
- * @returns 命中结果;查不到 / 有歧义 / 拉取失败一律返回 null(由调用方退回本地推断)
+ * 先按 baseUrl 的 host 定位服务商再查；兜底的全库裸名查询仅在该名字取值唯一时返回。
+ * 查不到 / 有歧义 / 拉取失败一律返回 null，由调用方退回本地推断。
  */
 export async function lookupModelContext(
   modelId: string,

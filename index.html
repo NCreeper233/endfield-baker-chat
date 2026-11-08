@@ -2,116 +2,331 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <!-- viewport-fit=cover：让页面铺到刘海/圆角区域，使 env(safe-area-inset-*) 生效。
-         没有它时 env() 恒为 0，安全区适配不会起作用。
-         interactive-widget=resizes-content：安卓 Chrome/WebView 弹键盘时让**布局视口**
-         一起收缩，配合 APK 的 android:windowSoftInputMode="adjustResize"，输入框才真正
-         落在键盘上方。刻意不写 resizes-visual：那会让布局视口保持全高，与原生
-         adjustResize 互相打架，反而表现为"键盘挡住输入框 / 整体上移"。 -->
+    <!-- viewport-fit=cover 让 env(safe-area-inset-*) 生效；interactive-widget=resizes-content
+         配合 APK 的 adjustResize，键盘弹出时输入框才不会被挡住。刻意不用 resizes-visual：
+         它保持布局视口全高，会与 adjustResize 打架（表现为键盘挡住输入框或整体上移）。 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>//BAKER/会话消息</title>
     <link rel="icon" type="image/webp" href="/favicon-black.webp" media="(prefers-color-scheme: light)" />
     <link rel="icon" type="image/webp" href="/favicon-white.webp" media="(prefers-color-scheme: dark)" />
-    <!-- 字体刻意**不 preload**：
-         · 全量中文 woff2 有 4.12 MB，preload 会把它提到最高优先级，
-           在手机浏览器（尤其移动网络）上严重挤占首屏加载；
-         · @font-face 已声明 `font-display: swap`（见 styles/_base.scss），
-           文字会先用系统字体立即渲染，字体就绪后自动替换 —— 不阻塞阅读。
-         去掉 preload 后由 CSS 按常规优先级加载，首屏更快、也不会白屏。
-         main.ts 里字体也只做挂载后的后台预热，不参与 app.mount 的门槛。 -->
-    <!-- 启动骨架与启动失败页的样式内联在这里：
-         Vue 挂载前 / 启动失败时构建产物里的 CSS 还没生效，所以只用纯 CSS +
-         系统字体，不依赖 JS、@font-face 或任何网络请求。 -->
+    <!-- 字体刻意不 preload：4.12MB 的 woff2 会挤占首屏；@font-face 已用 font-display: swap，
+         文字先用系统字体渲染，就绪后自动替换。main.ts 也只做挂载后的后台预热。 -->
+    <!-- 启动层与启动失败页的样式内联在这里：Vue 挂载前构建产物 CSS 还没生效，
+         所以只用纯 CSS + 系统字体 + 一段内联脚本，不依赖构建产物。
+         启动层刻意放在 #app 外面：app.mount() 只替换 #app，启动层要活到黄幕擦完再自己移除。 -->
     <style>
       html,
       body {
         margin: 0;
         padding: 0;
         height: 100%;
-        background: #0f1419;
+        background: #141414;
       }
 
       #app {
         height: 100%;
       }
 
-      /* 静态开屏骨架：数据恢复 + 字体加载期间它就是用户看到的全部。
-         app.mount('#app') 会把这一整块替换掉。 */
-      .boot-splash {
+      /* ---- 启动层（版式取自终末地官网加载层）----
+         --u 是版式基准单位（横屏按 2560×1440、竖屏按 1080×1920 缩放），由内联脚本写入；
+         --p 是进度百分比。图片地址也在脚本里用运行时 URL 注入（构建不会改写它们）。 */
+      .boot {
         position: fixed;
-        /* 不用 inset 简写：这是挂载前最关键的一屏，老旧 WebView 也要能铺满 */
         top: 0;
         right: 0;
         bottom: 0;
         left: 0;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 22px;
-        background: #0f1419;
-        color: #f7ff48;
+        z-index: 99999;
+        overflow: hidden;
+        background-color: #141414;
+        background-image: var(--boot-bg-img, none);
+        background-size: cover;
+        background-position: 50%;
+        background-repeat: no-repeat;
+        color: #fff;
         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
           "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
-        user-select: none;
-        -webkit-user-select: none;
+        -webkit-font-smoothing: antialiased;
+        /* 启动层只是画面：不拦点击，黄幕退场期间底下的界面已经可用 */
+        pointer-events: none;
       }
 
-      .boot-splash__logo {
-        font-size: 22px;
-        font-weight: 700;
-        letter-spacing: 0.32em;
-        /* 字距会在最后一个字母后多留一格：用负外边距抵消，视觉才真正居中 */
-        margin-right: -0.32em;
+      .boot--fadeout {
+        opacity: 0;
+        transition: opacity 0.5s ease;
       }
 
-      .boot-splash__bar {
-        position: relative;
-        width: 168px;
-        height: 3px;
-        overflow: hidden;
-        background: rgba(247, 255, 72, 0.16);
-      }
-
-      .boot-splash__bar span {
+      /* 角色名牌（512×512 透明立绘） */
+      .boot__plate {
         position: absolute;
-        inset: 0;
-        background: #f7ff48;
+        left: 64.453125%;
+        top: calc(var(--u) * 27.625);
+        width: calc(var(--u) * 16.5);
+        height: calc(var(--u) * 16.75);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .boot__plate-img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        user-select: none;
+        -webkit-user-drag: none;
+      }
+
+      /* 标记组 + 分隔线 + 大招语音 */
+      .boot__deco {
+        position: absolute;
+        left: 64.453125%;
+        top: calc(var(--u) * 59.375);
+        white-space: nowrap;
+      }
+
+      .boot__mark {
+        width: calc(var(--u) * 8.8125);
+        height: calc(var(--u) * 4);
+        margin-left: calc(var(--u) * -0.5);
+        background-size: 100% 100%;
+        background-repeat: no-repeat;
+        background-position: 50%;
+      }
+
+      .boot__divider {
+        width: calc(var(--u) * 70);
+        height: 2px;
+        margin-top: calc(var(--u) * 1.25);
+        margin-left: calc(var(--u) * -21.625);
+        margin-bottom: calc(var(--u) * 1);
+        background-image: linear-gradient(
+          90deg,
+          rgba(255, 255, 255, 0) 0,
+          rgba(255, 255, 255, 0.1) 50%,
+          rgba(255, 255, 255, 0) 100%
+        );
+      }
+
+      .boot__line {
+        margin: 0;
+        font-size: max(13px, calc(var(--u) * 1.6));
+        font-weight: 500;
+        letter-spacing: 0.04em;
+        line-height: 1.35;
+        color: #fff;
+        animation: boot-line-in 0.24s cubic-bezier(0.2, 0.7, 0.1, 1) both;
+      }
+
+      .boot__triangles {
+        position: absolute;
+        left: calc(var(--u) * -3.375);
+        top: calc(var(--u) * 1.5);
+        width: calc(var(--u) * 1.4375);
+        height: calc(var(--u) * 1.3125);
+        background-size: 100% 100%;
+        background-repeat: no-repeat;
+      }
+
+      /* 进度：竖条 + 贴着条尖的百分比 */
+      .boot__progress {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: calc(var(--u) * 1.25);
+        height: 100%;
+      }
+
+      .boot__bar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: var(--p, 0%);
+        background-color: #fffa00;
+      }
+
+      .boot__ptext {
+        position: absolute;
+        left: calc(var(--u) * 3.125);
+        top: var(--p, 0%);
+        height: 0;
+      }
+
+      .boot__value {
+        position: absolute;
+        left: 0;
+        bottom: calc(var(--u) * 1.625);
+        display: flex;
+        align-items: baseline;
+        color: #fffa00;
+        line-height: 1;
+      }
+
+      /* 数字上方那一小截黄色刻度块 */
+      .boot__value::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        bottom: 100%;
+        width: calc(var(--u) * 0.5);
+        height: calc(var(--u) * 1.875);
+        margin-bottom: calc(var(--u) * 0.25);
+        background-color: #fffa00;
+        border-radius: calc(var(--u) * 0.25);
+      }
+
+      .boot__num {
+        font-size: calc(var(--u) * 4.375);
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .boot__sym {
+        font-size: calc(var(--u) * 3.25);
+      }
+
+      .boot__updating {
+        position: absolute;
+        left: 0;
+        top: calc(var(--u) * -0.5);
+        color: #666;
+        font-size: 12px;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+
+      /* 上方两条灰色小竖块 */
+      .boot__updating::before {
+        content: "";
+        display: block;
+        width: calc(var(--u) * 1.25);
+        height: calc(var(--u) * 0.5);
+        margin-bottom: 2px;
+        background-image: linear-gradient(
+          90deg,
+          #666 0 35%,
+          transparent 35% 65%,
+          #666 65% 100%
+        );
+      }
+
+      /* 离场黄幕 */
+      .boot__wipe {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: #fffa00;
+        transform: scaleX(0);
         transform-origin: left;
-        animation: boot-splash-progress 1.15s ease-in-out infinite;
       }
 
-      @keyframes boot-splash-progress {
-        0% {
-          transform: translateX(-100%) scaleX(0.35);
+      .boot--wipe .boot__wipe {
+        animation: boot-wipe 0.6s cubic-bezier(1, 0, 0.7, 1) both;
+      }
+
+      @keyframes boot-wipe {
+        from {
+          transform: scaleX(0);
         }
-        55% {
-          transform: translateX(35%) scaleX(0.55);
-        }
-        100% {
-          transform: translateX(100%) scaleX(0.35);
+        to {
+          transform: scaleX(1);
         }
       }
 
-      .boot-splash__status {
-        font-size: 10px;
-        letter-spacing: 0.28em;
-        margin-right: -0.28em;
-        color: rgba(247, 255, 72, 0.55);
+      @keyframes boot-line-in {
+        from {
+          opacity: 0;
+          transform: translateY(3px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      /* ---- 竖屏 ---- */
+      @media (orientation: portrait) {
+        .boot__plate {
+          left: 50%;
+          top: calc(var(--u) * 50);
+          transform: translate(-50%, -50%);
+          width: calc(var(--u) * 19.3125);
+          height: calc(var(--u) * 20.9375);
+        }
+
+        .boot__deco {
+          left: calc(var(--u) * 4.625);
+          top: auto;
+          bottom: calc(var(--u) * 5.75);
+        }
+
+        /* 竖屏没位置摆那块灰色标记，官网也把它藏了 */
+        .boot__triangles {
+          display: none;
+        }
+
+        .boot__progress {
+          left: 0;
+          top: auto;
+          bottom: calc(var(--u) * 17.75);
+          width: 82.4074%;
+          height: calc(var(--u) * 2.5);
+        }
+
+        .boot__bar {
+          width: var(--p, 0%);
+          height: 100%;
+        }
+
+        .boot__ptext {
+          left: var(--p, 0%);
+          top: 50%;
+          height: auto;
+          transform: translateY(-50%);
+        }
+
+        .boot__value {
+          position: static;
+          bottom: auto;
+        }
+
+        .boot__value::before {
+          display: none;
+        }
+
+        .boot__num {
+          font-size: calc(var(--u) * 2.2);
+        }
+
+        .boot__sym {
+          font-size: calc(var(--u) * 1.6);
+        }
+
+        .boot__updating {
+          display: none;
+        }
       }
 
       @media (prefers-reduced-motion: reduce) {
-        .boot-splash__bar span {
+        .boot__line {
           animation: none;
-          transform: scaleX(0.4);
+        }
+
+        .boot--fadeout {
+          transition-duration: 0.3s;
+        }
+
+        .boot--wipe .boot__wipe {
+          animation-duration: 0.01s;
         }
       }
 
-      /* 启动失败页：由 main.ts 的 renderBootError 渲染，样式必须内联，
-         否则启动链路挂了往往连 CSS 都没加载。 */
+      /* ---- 启动失败页（由 main.ts 的 renderBootError 渲染）---- */
       .boot-error {
         position: fixed;
-        /* 同上：启动失败页可能在任意旧内核上出现，不依赖 inset 简写 */
         top: 0;
         right: 0;
         bottom: 0;
@@ -122,73 +337,330 @@
         justify-content: center;
         gap: 14px;
         box-sizing: border-box;
-        padding: 24px;
-        background: #0f1419;
-        color: #e8e8e3;
+        padding: 32px 24px calc(32px + env(safe-area-inset-bottom, 0px));
+        overflow: auto;
+        background: #141414;
+        color: #ededed;
         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
           "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
         text-align: center;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .boot-error__eyebrow {
+        margin: 0;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.3em;
+        margin-right: -0.3em;
+        color: #a3a3a3;
       }
 
       .boot-error__title {
         margin: 0;
-        font-size: 20px;
-        letter-spacing: 0.08em;
-        color: #f7ff48;
+        font-size: 24px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        margin-right: -0.1em;
+        color: #ededed;
       }
 
       .boot-error__hint {
         margin: 0;
-        max-width: 520px;
+        max-width: 460px;
         font-size: 13px;
-        line-height: 1.7;
-        color: rgba(232, 232, 227, 0.72);
+        line-height: 1.8;
+        color: #a3a3a3;
       }
 
       .boot-error__detail {
-        margin: 0;
+        margin: 2px 0 0;
         width: 100%;
         max-width: 560px;
         max-height: 30vh;
         overflow: auto;
         box-sizing: border-box;
-        padding: 10px 12px;
-        border: 1px solid rgba(232, 232, 227, 0.18);
-        background: rgba(0, 0, 0, 0.25);
-        color: rgba(232, 232, 227, 0.85);
-        font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        padding: 12px 14px;
+        border: 1px solid rgba(237, 237, 237, 0.16);
+        background: transparent;
+        color: #a3a3a3;
+        font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         white-space: pre-wrap;
         word-break: break-word;
         text-align: left;
       }
 
+      /* 切角 = 可点：底部右侧缺一角；直角块一律不可点 */
       .boot-error__retry {
-        margin-top: 4px;
-        padding: 8px 22px;
-        border: 1px solid #f7ff48;
-        background: transparent;
-        color: #f7ff48;
+        position: relative;
+        margin-top: 6px;
+        padding: 10px 30px;
+        border: 1px solid #ededed;
+        background-color: transparent;
+        background-image: linear-gradient(#fffa00, #fffa00);
+        background-repeat: no-repeat;
+        background-position: left center;
+        background-size: 0% 100%;
+        color: #ededed;
         font: inherit;
         font-size: 13px;
-        letter-spacing: 0.12em;
+        font-weight: 700;
+        letter-spacing: 0.14em;
         cursor: pointer;
-        /* 去掉浏览器默认按钮外观（圆角/内阴影），深色下才不突兀 */
+        clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
+        transition: background-size 0.28s cubic-bezier(0.7, 0, 0.2, 1), color 0.28s cubic-bezier(0.7, 0, 0.2, 1);
         appearance: none;
         -webkit-appearance: none;
+      }
+
+      .boot-error__retry:hover,
+      .boot-error__retry:focus-visible {
+        background-size: 100% 100%;
+        color: #161616;
+        outline: none;
+      }
+
+      @media (hover: none) {
+        /* 触屏没有悬停：主要按钮静止时就是黄底，字用墨色 */
+        .boot-error__retry {
+          background-size: 100% 100%;
+          color: #161616;
+        }
       }
     </style>
   </head>
   <body>
-    <div id="app">
-      <!-- 纯 HTML/CSS 开屏骨架：不依赖 JS 与 @font-face。
-           以前 #app 在 mount 前是空的，等待数据恢复/字体下载时就是纯黑屏，
-           和"卡死"无法区分；现在至少有一个明确的加载状态。 -->
-      <div class="boot-splash" role="status" aria-live="polite" aria-label="正在启动">
-        <div class="boot-splash__logo">//BAKER/</div>
-        <div class="boot-splash__bar"><span></span></div>
-        <div class="boot-splash__status">INITIALIZING</div>
+    <div id="app"></div>
+
+    <!-- 启动层：纯 HTML/CSS + 一段内联脚本。它不在 #app 里，
+         app.mount() 不会替换它；黄幕擦完由 main.ts 调 __bakerBoot.exit() 移除。 -->
+    <div id="boot-layer" class="boot" role="status" aria-live="polite" aria-label="正在启动">
+      <div class="boot__plate">
+        <img id="boot-plate" class="boot__plate-img" alt="" decoding="async"
+             loading="eager" fetchpriority="high" />
       </div>
+
+      <div class="boot__deco">
+        <div class="boot__mark" id="boot-mark"></div>
+        <div class="boot__divider"></div>
+        <p class="boot__line" id="boot-line"></p>
+        <div class="boot__triangles" id="boot-triangles"></div>
+      </div>
+
+      <div class="boot__progress">
+        <div class="boot__bar"></div>
+        <div class="boot__ptext">
+          <div class="boot__value">
+            <span class="boot__num" id="boot-num">0</span><span class="boot__sym">%</span>
+          </div>
+          <div class="boot__updating">Updating...</div>
+        </div>
+      </div>
+
+      <div class="boot__wipe"></div>
     </div>
+
+    <script>
+      // 启动层驱动：随机角色名牌 + 每两秒一句大招语音 + 假进度条 + 退场。
+      // 必须是普通内联脚本（不是 module）：它要在主包下载之前就跑起来。
+      (function () {
+        'use strict'
+
+        /** 角色名 → 大招语音；键与 public/splash/portraits/<角色名>.webp 一一对应 */
+        var VOICE = {"佩丽卡":["歼灭坐标，权限七！","目标锁定，开火！","帝江号，清空区域！"],"陈千语":["当破即破！","当断即断！","当弃即弃！"],"狼卫":["猎物，一个不留！","撕咬吧！","群狼，围猎！"],"弧光":["避无可避。","从风暴中来。","瞬息而至。"],"余烬":["守誓之焰！","我将照耀！","光明于此延续！"],"赛希":["逻辑，本不宜人。","清除此等不谐！","细数他们的罪行。"],"艾维文娜":["我可不算温柔！","这是一条噩耗！","掣击，决颤！"],"洁尔佩塔":["世界翻转！","感受大地的力量！","倾倒在重力之下吧！"],"昼雪":["凛冽寒风！","冰晶之盾！","在霜寒前，停下！"],"黎风":["猜猜在哪只手？","摧破业障，降伏诸恶！","现忿怒相，破！"],"莱万汀":["火焰，照亮黄昏！","焚烧黑暗！","你的末日到了！"],"伊冯":["来，一起跳个舞吧！","感受我“超载的热情”吧！","送你一场烟花秀！"],"大潘":["猛火快炒！","尝尝我的手艺！","让你挑食！"],"秋栗":["看我的信号！","焰火表演开始！","决胜行动方案——"],"卡契尔":["我来解决你们！","不会让你过去的！","滚开！"],"埃特拉":["音爆……轰击！","汇聚……释放！","将声音凝结！"],"萤石":["都活得够久了吧？","动静会有点大哦。","现在还想逃跑吗？"],"安塔尔":["去吧，制胜关键。","增幅回路，启动。","动力运行。"],"阿列什":["上钩了！","你才是饵料！","去饱餐一顿吧！"],"艾尔黛拉":["多利先生，帮帮忙吧！","多利先生，别跑太远。","多利先生，下手轻一些。"],"别礼":["最大功率，启动！","这里就是终点！","请、请和世界告别吧！"],"骏卫":["听我号令！","随我进军！","盾卫！列阵！"],"汤汤":["看见你了——","这招叫——站住别跑！","随波而逝吧！"],"洛茜":["蒸腾吧，群狼之血！","我是利刃的化身！","群狼之魂，与我同在。"],"庄方宜":["惊霆无声，流电掣雨。","雷雨并作，化育万物。","青霄碧落，乌云尽扫。"],"弭弗":["我来掀桌子！","统统……逮捕！","敬酒不吃吃罚酒！"],"诀":["盈缺复转，以我为阵！","天地三才，我衔人间。","平山海，定风波！"],"卡缪":["猩红之雨啊……","坠入永夜吧。","罪行，终被焚毁。"],"提弗洛斯":["胆小鬼，我会钉住你。","你无法离开我的视线。","你应该惧怕我。"],"梨诺":["由我点亮每一颗心！","见证星光的闪耀！","为世界送上璀璨！"],"明河":["枕剑北去，万象为宾！","倾光浮野，万籁归一！","天地为鞘，夜照星流！"],"祀":["无风起浪，海沸山摇！","横剑走笔，斗转星移！","山河为墨，鬼斧神工！"],"噗切娜":["哼哼，道歉也来不及了！","呼呼，大坏蛋！“再见！”","也请你吃好吃的！"]}
+        var NAMES = Object.keys(VOICE)
+
+        var layer = document.getElementById('boot-layer')
+        if (!layer) return
+
+        var base = document.baseURI
+
+        // 版式基准单位：横屏按 2560×1440、竖屏按 1080×1920 缩放（同官网算法）
+        function unit() {
+          var w = window.innerWidth
+          var h = window.innerHeight
+          var dw = h >= w ? 1080 : 2560
+          var dh = h >= w ? 1920 : 1440
+          return 16 * Math.min(w / dw, h / dh)
+        }
+
+        function applyUnit() {
+          layer.style.setProperty('--u', unit() + 'px')
+        }
+
+        // 背景：横屏 / 竖屏两张；顺便把装饰图地址也定下来（运行时 URL，构建不改写）
+        function applyArt() {
+          var portrait = window.innerHeight >= window.innerWidth
+            ? 'loading-bg-m.webp'
+            : 'loading-bg.webp'
+          layer.style.setProperty('--boot-bg-img', 'url("' +
+            new URL('splash/' + portrait, base).href + '")')
+        }
+
+        applyUnit()
+        applyArt()
+        window.addEventListener('resize', function () {
+          applyUnit()
+          applyArt()
+        })
+
+        document.getElementById('boot-mark').style.backgroundImage =
+          'url("' + new URL('splash/deco.svg', base).href + '")'
+        document.getElementById('boot-triangles').style.backgroundImage =
+          'url("' + new URL('splash/triangles.svg', base).href + '")'
+
+        // ---- 随机角色 + 该角色自己的语音 ----
+        /** 某角色的立绘地址（运行时 URL，构建不改写） */
+        function portraitUrl(who) {
+          return new URL('splash/portraits/' + encodeURIComponent(who) + '.webp', base).href
+        }
+
+        var name = NAMES.length > 0 ? NAMES[Math.floor(Math.random() * NAMES.length)] : ''
+        var lines = VOICE[name] || []
+        var plate = document.getElementById('boot-plate')
+        if (name) {
+          plate.src = portraitUrl(name)
+          plate.alt = name
+        } else {
+          plate.remove()
+        }
+
+        /**
+         * 进场后台预热立绘
+         *
+         * 每次启动只随机取一张立绘，其余那 32 张从来没进过缓存 —— 刷新到没缓存过的
+         * 角色就得现场下载，于是「卡片都能点了，立绘才刚冒出来」。这里在**进入页面主体
+         * 之后**把剩下的按顺序抓一遍写进 HTTP 缓存：串行、低优先级、彼此留间隔，绝不跟
+         * 首屏抢带宽；下次刷新随机到谁都是缓存直出。
+         *
+         * 用 fetch 而不是 new Image()：前者只存字节、不解码，不会为了一张用不上的图
+         * 白占解码线程。省流量模式 / 2G 网络直接放弃预热。
+         */
+        function warmPortraits() {
+          var conn = navigator.connection || {}
+          if (conn.saveData || /(^|-)2g$/.test(conn.effectiveType || '')) return
+          var rest = NAMES.filter(function (who) { return who !== name })
+          var at = 0
+          var opts = { cache: 'force-cache', credentials: 'same-origin' }
+          // 低优先级：Chrome 认这个键，别的浏览器忽略即可
+          opts.priority = 'low'
+          function step() {
+            if (at >= rest.length) return
+            var url = portraitUrl(rest[at++])
+            fetch(url, opts)
+              .then(function (res) { return res.ok ? res.arrayBuffer() : null })
+              .catch(function () { /* 预热失败无所谓，下次现下就是 */ })
+              .then(function () { window.setTimeout(step, 150) })
+          }
+          // 先让首屏自己那些图（背景 / 卡面头像 / 字体）跑完，再来排这 32 张
+          window.setTimeout(step, 1200)
+        }
+
+        var lineEl = document.getElementById('boot-line')
+        var lineIndex = 0
+
+        function paintLine() {
+          lineEl.textContent = lines[lineIndex] || ''
+          // 重挂载式重播：先摘掉动画，强制重排，再放回去
+          lineEl.style.animation = 'none'
+          void lineEl.offsetWidth
+          lineEl.style.animation = ''
+        }
+
+        paintLine()
+        if (lines.length > 1) {
+          window.setInterval(function () {
+            lineIndex = (lineIndex + 1) % lines.length
+            paintLine()
+          }, 2000)
+        }
+
+        // ---- 进度 ----
+        // 真实加载进度拿不到（主包下载 / 读本地库都在后面），所以是占位的平滑推进：
+        // 用 ease-out 曲线（前段快、后段慢）爬到 92% 停住；真正挂载时由 exit()
+        // 从**当前值**再平滑补到 100 —— 不会瞬跳。
+        var numEl = document.getElementById('boot-num')
+        var CAP = 92
+        var startedAt = performance.now()
+        var DURATION = 1800
+        var raf = 0
+        var current = 0
+
+        /** rAF 给的是帧起始时刻，可能早于这里的 performance.now() → 夹到 0 起 */
+        function progressT(now, from, span) {
+          return Math.max(0, Math.min((now - from) / span, 1))
+        }
+
+        function paint(pct) {
+          current = pct
+          layer.style.setProperty('--p', pct.toFixed(2) + '%')
+          numEl.textContent = String(Math.round(pct))
+        }
+
+        function tick(now) {
+          var t = progressT(now, startedAt, DURATION)
+          var eased = 1 - Math.pow(1 - t, 2)
+          paint(Math.min(CAP, CAP * eased))
+          if (t < 1) raf = requestAnimationFrame(tick)
+        }
+
+        paint(0)
+        raf = requestAnimationFrame(tick)
+
+        // ---- 退场：从当前进度平滑补满 → 黄幕擦过 → 淡出 → 移除 → 广播 ----
+        var leaving = false
+
+        /**
+         * 把进度从当前值推到 100
+         *
+         * 之前直接 paint(100)：加载快的时候会从 20% 一帧跳到 100%，看着像"飙到底"。
+         * 现在用 750ms、两端都平滑的曲线追上去；慢加载时也只收个尾。
+         */
+        function climbToFull(done) {
+          var from = current
+          if (from >= 99.5) {
+            paint(100)
+            done()
+            return
+          }
+          var t0 = performance.now()
+          var SPAN = 750
+          var step = function (now) {
+            var t = progressT(now, t0, SPAN)
+            var eased = t * t * (3 - 2 * t)
+            paint(from + (100 - from) * eased)
+            if (t < 1) requestAnimationFrame(step)
+            else done()
+          }
+          requestAnimationFrame(step)
+        }
+
+        function exit() {
+          if (leaving) return
+          leaving = true
+          cancelAnimationFrame(raf)
+          climbToFull(function () {
+            layer.classList.add('boot--wipe')
+            window.setTimeout(function () {
+              layer.classList.add('boot--fadeout')
+              window.setTimeout(function () {
+                layer.remove()
+                // App 收到这个事件才允许弹公告 / 首次偏好
+                window.dispatchEvent(new Event('baker:boot-done'))
+                // 主体已经可用了，才开始后台把剩下的立绘灌进缓存
+                warmPortraits()
+              }, 520)
+            }, 620)
+          })
+        }
+
+        // 后备：万一应用永远没起来，也不该一直挡着（4 分钟）
+        window.setTimeout(exit, 240000)
+
+        window.__bakerBoot = { exit: exit }
+      })()
+    </script>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

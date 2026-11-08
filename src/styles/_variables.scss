@@ -1,17 +1,12 @@
-// =============================================================================
-// 全局设计令牌(UI 视觉规范的唯一来源)
-// -----------------------------------------------------------------------------
-// 此文件定义 SCSS 变量,供组件 <style scoped lang="scss"> 引用。
-// 用于 SVG 属性 / inline style 的颜色定义在 constants/colors.ts(SCSS 无法引用)。
-//
-// 修改任意令牌前,必须确认其影响的所有 UI 区块,避免破坏像素级一致性。
-// =============================================================================
+// _variables —— 全局设计令牌（SCSS 变量的唯一来源）
+// 用于 SVG 属性 / inline style 的颜色在 constants/colors.ts（SCSS 引用不到）。
+// ⚠️ 改任何令牌前先确认它影响的所有 UI 区块，否则会破坏像素级一致性。
 
-// ---- 画布尺寸 -------------------------------------------------------------
+// 画布尺寸
 $design-w: 1920px;
 $design-h: 1080px;
 
-// ---- 字体 -----------------------------------------------------------------
+// 字体
 $font-harmony: 'HarmonyOS Sans SC Medium', 'HarmonyOS Sans SC', 'MiSans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 $font-bubble: 'HarmonyOS Sans SC Medium', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif;
 
@@ -20,7 +15,7 @@ $font-size-name: 24.12px;    // 干员名 / 聊天条姓名
 $font-size-subcard: 20.88px; // 子卡文字
 $font-size-bubble: 20.88px;  // 气泡文字
 
-// ---- 颜色(SCSS 专用,inline 颜色见 constants/colors.ts) -----------------
+// 颜色（SCSS 专用；inline 颜色见 constants/colors.ts）
 $color-bg-root: #141413;             // html/body 背景
 
 $color-text-primary: #fff;
@@ -42,7 +37,7 @@ $color-hover-overlay: rgba(255, 255, 255, 0.12); // 主卡/子卡 hover 白层
 $color-hover-overlay-gray: rgba(0, 0, 0, 0.2);   // 输入面板圆形按钮 hover 灰遮罩
 $color-chat-tint: rgba(255, 255, 255, 0.05);     // 聊天条 detail 浅色叠加
 
-// ---- 聊天框(CSS 绘制边框,替代 chat_strip_detail.png) ----------------------
+// 聊天框（CSS 绘制边框，替代 chat_strip_detail.png）
 $color-chat-frame: rgb(202, 201, 201);        // 框线(1.5px)
 $color-chat-bar-magenta: rgb(226, 2, 226);    // 三色条:品红
 $color-chat-bar-yellow: rgb(243, 241, 0);     // 三色条:黄
@@ -59,7 +54,7 @@ $color-speaker-name: #b8b6b4;      // 聊天气泡上方角色名称(小号灰�
 
 $icon-hover-gray-filter: brightness(0) invert(1) brightness(0.6); // 图标 hover 染为 #999898 灰
 
-// ---- 动画时长 / 缓动 ------------------------------------------------------
+// 动画时长 / 缓动
 $ease-default: ease;
 $ease-out: ease-out;
 

@@ -1,9 +1,6 @@
-// =============================================================================
-// zipWorkerClient.ts —— 导入/导出 Worker 客户端封装
-// -----------------------------------------------------------------------------
-// 优先使用 Web Worker 执行 ZIP 序列化/解压(防主线程卡顿与 OOM);
-// Worker 不可用(极老 WebView/SSR)时回退主线程直接执行。
-// =============================================================================
+// zipWorkerClient —— 导入导出的执行入口
+// 实际在主线程直接执行：跨线程传 Blob/ArrayBuffer 在安卓 WebView / Electron 上
+// 有兼容问题（DataCloneError）。Worker 通道保留但未启用，失败时同样回退主线程。
 import { exportToZip, importFromZip, type ProjectPayload } from './zipExport'
 
 interface Pending {
@@ -39,9 +36,7 @@ function getWorker(): Worker | null {
       }
     }
     worker.onerror = (e) => {
-      // Worker 运行崩溃:标记为不可用并终止,在途任务统一以 worker_crashed 拒绝,
-      // 由调用方(exportToZipInWorker/importFromZipInWorker)回退主线程执行。
-      const err = new Error('worker_crashed')
+      // 崩溃后标记不可用，在途任务统一拒绝，由调用方回退主线程
       const errMsg = e.message || 'Worker 运行错误'
       pending.forEach((p) => p.reject(new Error(errMsg)))
       pending.clear()
@@ -68,18 +63,15 @@ function callWorker<T>(msg: Record<string, unknown>): Promise<T> {
 
 export interface WorkerExportResult {
   base64: string
-  /** 被剔除(退回 [图片] 占位)的图片张数 */
+/** 被剔除（退回 [图片] 占位）的图片张数 */
   filteredImages: number
-  /** 被 canvas 重编码(仍是图,只是压小了)的图片张数 */
+  /** 被 canvas 重编码压小的图片张数 */
   reencodedImages: number
-  /** 真实字节:浏览器端=ZIP blob.size;原生分块通道另有回读校验过的落盘字节 */
+  /** 真实字节：浏览器端 = ZIP blob.size；原生分块通道为回读校验过的落盘字节 */
   totalBytes: number
 }
 
-/**
- * Worker 内执行 ZIP 导出,返回 base64(打包端直接可用)。
- * Worker 不可用时回退主线程执行。
- */
+/** 仍在主线程执行，理由见文件头 */
 export async function exportToZipInWorker(
   cards: unknown,
   myGender: 'male' | 'female',
@@ -87,12 +79,8 @@ export async function exportToZipInWorker(
   promptOverrides: Record<string, string>,
   settingsSnapshot?: Record<string, unknown> | null,
 ): Promise<WorkerExportResult> {
-  // 直接在主线程执行(不再走 Web Worker):
-  // 跨平台(Android WebView / Electron / 浏览器)下 Worker 的跨线程 Blob/ArrayBuffer
-  // 传递存在兼容性问题(如 Chrome 120+ 对不可克隆对象抛 DataCloneError,
-  // 表现为 "could not be cloned / could not be closed")。
-  // JSZip 3.10 的 generateAsync 本身就是异步 API(内部同步流处理),不会阻塞主线程;
-  // base64 转换采用分片(8K 参数)避免栈溢出。稳定性优先。
+  // 不走 Worker：跨平台下 Blob/ArrayBuffer 的跨线程传递有兼容问题。
+  // JSZip 的 generateAsync 本身就是异步 API，不会阻塞主线程；base64 分片转换避免栈溢出。
   const { blob, filteredImages, reencodedImages, totalBytes } = await exportToZip(
     cards as never,
     myGender,
@@ -104,12 +92,12 @@ export async function exportToZipInWorker(
   return { base64, filteredImages, reencodedImages, totalBytes }
 }
 
-/** 导入解析:直接在主线程执行(与导出一致,避免跨线程 Blob 兼容问题) */
+/** 导入解析同样在主线程执行 */
 export async function importFromZipInWorker(blob: Blob): Promise<ProjectPayload> {
   return importFromZip(blob)
 }
 
-/** 主线程回退用的分片 base64 转换 */
+/** 分片转换：外层 8MB，内层每次只拼 8K —— apply 传参过多会 RangeError */
 async function blobToBase64Fallback(blob: Blob): Promise<string> {
   const buf = await blob.arrayBuffer()
   const bytes = new Uint8Array(buf)

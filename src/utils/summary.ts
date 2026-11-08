@@ -1,19 +1,6 @@
-// =============================================================================
-// 智能总结(summary)
-// -----------------------------------------------------------------------------
-// 实验性功能:当对话历史超过 50 条时,将超出部分(前 N 条)交给总结 API
-// 压缩成摘要,插入 history 最前面,再连同最近 50 条一起发送给后端。
-//
-// - 使用 OpenAI 兼容 /chat/completions 格式
-// - 默认模式:内置 Agnes API(配置由 settings store 提供,界面不显示)
-// - 自定义模式:用户填写的 Base URL / Key / 模型名
-// - 请求失败(配置错误/超时/返回异常)时静默降级:不插入摘要,不阻断聊天
-//
-// ⚠ 审计结论(2026-10-04):本模块本身不写死后端地址,url 完全由调用方传入的
-//   baseUrl 决定,因此不存在"custom 模式打后端"的问题;真正的泄漏点在
-//   stores/settings.ts 的 getSummaryApi()(custom 模式下会去取后端 key),
-//   已在该处修复。
-// =============================================================================
+// summary —— 智能总结：历史超 50 条时把超出部分压成摘要插到最前
+// OpenAI 兼容格式；默认走内置 Agnes，自定义模式用用户填的配置。
+// 请求失败静默降级：不插摘要、不阻断聊天。url 完全由调用方传入的 baseUrl 决定。
 
 /** 智能总结固定 system 提示词(前端内置,用户无需配置) */
 export const SUMMARY_SYSTEM_PROMPT =
@@ -25,12 +12,7 @@ const SUMMARY_TIMEOUT_MS = 20000
 /** 总结输入长度上限(超出截断,避免请求体过大) */
 const SUMMARY_INPUT_MAX = 6000
 
-/**
- * 将历史消息按 user/assistant 格式拼成纯文本
- *
- * @param history 要总结的消息列表(side: mine→用户 / other→角色)
- * @returns 拼好的对话文本
- */
+/** 超出上限时截掉开头，保留最近的对话 */
 export function formatHistoryForSummary(
   history: Array<{ side: 'other' | 'mine'; text: string }>,
 ): string {
@@ -46,25 +28,15 @@ export function formatHistoryForSummary(
   return text
 }
 
-/**
- * 调用总结 API,返回总结文本
- *
- * @param baseUrl API Base URL(如 https://api.agnes-ai.cn/v1)
- * @param apiKey  API Key
- * @param model   模型名
- * @param history 要总结的历史(前 N 条)
- * @returns       总结文本;失败抛出异常(由调用方降级)
- */
+/** 失败时抛异常，由调用方降级 */
 export async function requestSummary(
   baseUrl: string,
   apiKey: string,
   model: string,
   history: Array<{ side: 'other' | 'mine'; text: string }>,
 ): Promise<string> {
-  // 配置缺失时直接抛错,由调用方降级 —— 避免拼出 "undefined/chat/completions"
-  // 这种注定失败、且报错难懂的请求。
-  // (custom 模式下 getSummaryApi 可能返回空配置:用户没填自定义 API,
-  //  而自定义模式又禁止回退到后端 key 接口,见 stores/settings.ts。)
+  // 直接抛错而不拼 "undefined/chat/completions"：custom 模式下用户可能没填自定义
+  // API，而该模式又禁止回退到后端 key 接口（见 stores/settings.ts）。
   if (!baseUrl || !apiKey || !model) {
     throw new Error('总结 API 未配置（自定义模式下请先在设置中填写 Base URL / API Key / 模型名）')
   }

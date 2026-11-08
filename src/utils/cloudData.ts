@@ -1,20 +1,7 @@
-// =============================================================================
-// 云同步（临时数据中转）—— utils/cloudData.ts
-// -----------------------------------------------------------------------------
-// 干什么：
-//   · uploadCloudData(json, onProgress)  把导出的 JSON 传到 local.peilika.beer，拿回取件码
-//   · fetchCloudData(code, onProgress)   用取件码把那份 JSON 取回来（交给 importFromJson 导入）
-//
-// 为什么用 XMLHttpRequest 而不是 fetch：
-//   fetch **拿不到上传进度**（没有 upload.onprogress）；XHR 两边都能拿到，
-//   于是上传/下载都能画出真实进度条与速度。
-//
-// 服务端策略（见 /run/media/y/游戏/local-data/local_data_service.py）：
-//   · 数据**不永久保存**：每天 12:00 检查一次，时间戳超过 24 小时就删除
-//     → 实际存活 24~48 小时（多十几个小时 / 少十几个小时都不影响使用）
-//   · 取件码 8 位（32 字符表，去掉 0O1I 等易混字符）；/fetch 有限速
-//   · 数据落盘前 gzip，单份上限 64MB
-// =============================================================================
+// cloudData —— 云同步临时中转：上传拿取件码 / 用取件码取回
+// 用 XHR 而不是 fetch：fetch 拿不到上传进度，XHR 上传下载都有 onprogress，能画真实进度条。
+// 服务端不永久保存：每天 12 点清理一次，时间戳超 24h 删除；取件码 8 位（去掉易混字符），
+// /fetch 有限速，数据 gzip 落盘、单份上限 64MB。
 
 /** 云同步服务地址（专属子域名；换域名只改这里） */
 export const CLOUD_DATA_URL = 'https://local.peilika.beer'
@@ -52,20 +39,16 @@ export interface CloudProgress {
   /** 预计剩余（毫秒）；算不出来时为 null */
   etaMs: number | null
   /**
-   * 字节已传完、正在**等服务器处理**（2026-09-30 新增）
-   *
-   * 为什么需要：上传的字节跑完后，服务器还要解压/组装/写盘（实测约 1 分钟），
-   * 此时旧实现直接报 100%，界面看起来"传完了却卡着不动"，用户以为坏了。
-   * 置 true 后 UI 会显示"已上传，正在等待服务器处理…"并走不确定动画。
+   * 字节已传完、正在等服务器处理（解压/组装/写盘约 1 分钟）。
+   * 此间若直接报 100%，界面看起来「传完了却卡着不动」，故置 true 让 UI 走不确定动画。
    */
   waitingServer?: boolean
 }
 
 export type CloudProgressFn = (p: CloudProgress) => void
 
-/** 超时：大包上传/取回给 5 分钟（进度条会显示实时速度，卡住一眼能看出来）；轻量接口 60 秒 */
+/** 超时：大包上传/取回给 5 分钟（进度条会显示实时速度，卡住一眼能看出来） */
 const TIMEOUT_BULK_MS = 300_000
-const TIMEOUT_LIGHT_MS = 60_000
 
 /** 字节 → 人类可读（云同步区块显示用） */
 export function formatBytes(bytes: number): string {
@@ -93,9 +76,7 @@ export function formatDuration(ms: number | null): string {
   return `${Math.floor(s / 60)}分${String(s % 60).padStart(2, '0')}秒`
 }
 
-/**
- * 速度计：滑动窗口（默认最近 1 秒）+ 指数平滑，避免数字乱跳。
- */
+/** 滑动窗口（默认 1 秒）+ 指数平滑，避免数字乱跳 */
 function makeSpeedMeter(windowMs = 1000) {
   const samples: Array<[number, number]> = []
   let smoothed = 0
@@ -142,8 +123,7 @@ function request(
     if (body !== null) xhr.setRequestHeader('Content-Type', 'application/json')
 
     if (phase === 'upload' && xhr.upload) {
-      // 上传阶段：进度**最多到 99%**，不用 100% —— 100% 留给"服务器确认收妥"。
-      // 原因见 CloudProgress.waitingServer 注释：字节传完 ≠ 服务端处理完。
+      // 上传进度最多到 99%：100% 留给「服务器确认收妥」，字节传完 ≠ 服务端处理完
       xhr.upload.onprogress = (e) => {
         const total = e.lengthComputable ? e.total : needUploadBytes
         const capped = total > 0 ? Math.min(e.loaded, total - 1) : e.loaded
@@ -240,15 +220,4 @@ export async function fetchCloudData(
   if (res.status === 429) throw new Error('尝试过于频繁，请稍等一分钟再试')
   if (res.status !== 200) throw new Error(`取回失败 (${res.status})`)
   return res.text
-}
-
-/** 云端当前存放情况（可选） */
-async function cloudStats(): Promise<{ items: number; bytes: number; max_age_hours: number | null } | null> {
-  try {
-    const res = await request(`${CLOUD_DATA_URL}/stats`, 'GET', null, 'download', undefined, TIMEOUT_LIGHT_MS)
-    if (res.status !== 200) return null
-    return JSON.parse(res.text)
-  } catch {
-    return null
-  }
 }

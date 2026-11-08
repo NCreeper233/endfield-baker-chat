@@ -1,22 +1,11 @@
 <script setup lang="ts">
-// =============================================================================
-// 左侧列表容器(第三版:单聊 / 群聊双模式)
-// -----------------------------------------------------------------------------
-// 职责:
-// 1. 顶部渲染操作带:左组(新建 / 删除) + 中间搜索框 + 右组(公告 / 用量 / 设置),
-//    不随列表滚动;单聊 / 群聊的切换已搬到页面顶栏(AppHeader)的页签上
-// 2. 单聊模式:渲染非群聊主卡(沿用原 CharacterCardItem)
-// 3. 群聊模式:渲染群聊主卡(GroupCardItem:成员头像叠层 + 群名 + 末条预览)
-// 4. 按当前模式的可见卡片重新计算 top 偏移(两种模式各自连续排布)
-// 5. 动态排序:最近来过消息的主卡排最上面(见 orderedIndexes,只改展示顺序)
-// 6. 搜索:按卡名/群成员名实时过滤(纯本地,不发请求)
-//
-// 位置计算复用 constants/characterCard 的 computeUnitTops / computeCardPadTop:
-// 传入"当前模式下的折叠状态 + 子卡数",即可得到该模式下各卡片的 top。
-// =============================================================================
-import { computed, ref } from 'vue'
+// CharacterCardList —— 左侧列表（顶部操作带 + 单聊 / 群聊两种卡片 + 搜索）
+// 只渲染当前模式的卡片，并各自连续排布：top 由 computeUnitTops / computeCardPadTop
+// 按当前模式的折叠状态与子卡数算出；最近活跃的主卡排最上（只改展示顺序）。
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useChatStore, GROUP_MIN_MEMBERS } from '../../stores/chat'
+import { useChatStore } from '../../stores/chat'
+import { isGroupCard } from '../../domain/chat/group'
 import { useSettingsStore } from '../../stores/settings'
 import {
   computeUnitTops,
@@ -25,7 +14,6 @@ import {
 import CharacterCardItem from './CharacterCardItem.vue'
 import GroupCardItem from './GroupCardItem.vue'
 import { MATERIALS } from '../../constants/materials'
-import type { Card } from '../../types/chat'
 
 const props = withDefaults(defineProps<{
   /**
@@ -79,11 +67,6 @@ const searchQuery = ref('')
 /** 归一化后的搜索词 */
 const searchKeyword = computed(() => searchQuery.value.trim().toLowerCase())
 
-/** 是否群聊主卡(成员 ≥2) */
-function isGroupCard(c: Card): boolean {
-  return (c.members ?? []).length >= GROUP_MIN_MEMBERS
-}
-
 /**
  * 当前模式下可见卡片的真实下标
  *
@@ -110,16 +93,9 @@ const visibleIndexes = computed(() => {
 const searchEmpty = computed(() => !!searchKeyword.value && visibleIndexes.value.length === 0)
 
 /**
- * 列表的展示顺序:最近来过消息的主卡排最上面
- *
- * 排的是**卡片在 store 里的下标**,不是 cards 数组本身 —— 展示顺序与数据顺序
- * 分离:cards / activeCardIndex / cardSubRanges / 删除勾选全都按原始下标工作,
- * 这里换个次序不会影响任何一处。
- *
- * 时间章按"卡片身份"取(chatStore.cardActiveKey,见 store 里的说明),所以
- * 增删卡片、导入数据都不会串号,刷新后顺序也照旧。
- * 从没来过消息的卡时间章为 0,靠 Array#sort 的稳定性保持它们原有的先后
- * (新卡永远按"内置干员表"的顺序排在有消息的卡之后)。
+ * 排的是卡片在 store 里的下标，不是 cards 本身 —— 展示顺序与数据顺序分离，
+ * activeCardIndex / cardSubRanges / 删除勾选仍按原始下标工作。
+ * 时间章按卡片身份取，增删与导入都不串号；从未来过消息的卡章为 0，靠 sort 稳定性保持原序。
  */
 const orderedIndexes = computed(() =>
   [...visibleIndexes.value].sort(
@@ -149,6 +125,110 @@ const unitTops = computed(() =>
 const cardPadTop = computed(() =>
   computeCardPadTop(visibleCollapsed.value, visibleSubCounts.value, unitTops.value),
 )
+
+// ---- 列表窗口化 ------------------------------------------------------------
+// 只渲染当前视口附近的卡片：卡高是算出来的（unitTops），不测 DOM；卡片全是绝对定位，
+// 少渲染几张不会改变滚动高度（尾部留白按最后一张卡定位）。
+// 视口上下各多渲染 OVERSCAN：快速滚动时不会先看到空白。
+
+/** 上下各多渲染的设计口径高度(px) */
+const OVERSCAN = 700
+/** 滚动位置量化步长：同一格内不重建渲染数组，避免逐帧 slice + patch */
+const SCROLL_STEP = 200
+/** 容器在设计口径下的可视高度，必须与样式里 `.character-card` 的 height 一致 */
+const LIST_VIEWPORT_H = 897.27
+
+/** 列表滚动容器 */
+const listEl = ref<HTMLElement | null>(null)
+/** 浏览器给的原始 scrollTop（单位随 zoom 变化，只用来算比例） */
+const scrollRaw = ref(0)
+/** 最大可滚动距离 = scrollHeight - clientHeight（与 scrollRaw 同单位） */
+const scrollRange = ref(0)
+
+/** 列表内容在设计口径下的总高度（最后一张卡底边 + 尾部留白） */
+const contentH = computed(() => cardPadTop.value + props.bottomPad)
+
+/**
+ * 滚动位置换算到设计口径
+ *
+ * 桌面画布用 CSS `zoom` 缩放，scrollTop / clientHeight 的量纲可能与设计 px 不一致；
+ * 按「已滚比例 × 设计口径可滚距离」换算，就与缩放系数无关了。
+ */
+const scrollDesignTop = computed(() => {
+  if (scrollRange.value <= 0) return 0
+  const maxScroll = Math.max(0, contentH.value - LIST_VIEWPORT_H)
+  const ratio = Math.min(1, Math.max(0, scrollRaw.value / scrollRange.value))
+  return ratio * maxScroll
+})
+
+/** 量化后的滚动位置：只有跨过一格才会重算窗口 */
+const quantizedTop = computed(() =>
+  Math.floor(scrollDesignTop.value / SCROLL_STEP) * SCROLL_STEP,
+)
+
+/** 二分找出第一个 top ≥ limit 的下标 */
+function firstTopAtLeast(tops: number[], limit: number): number {
+  let lo = 0
+  let hi = tops.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (tops[mid] < limit) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+/** 窗口起始下标(含 overscan) */
+const winStart = computed(() => {
+  const limit = quantizedTop.value - OVERSCAN
+  if (limit <= 0) return 0
+  return firstTopAtLeast(unitTops.value, limit)
+})
+
+/** 窗口结束下标(不含，含 overscan) */
+const winEnd = computed(() => {
+  const tops = unitTops.value
+  const limit = quantizedTop.value + LIST_VIEWPORT_H + OVERSCAN
+  let lo = winStart.value
+  let hi = tops.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (tops[mid] <= limit) lo = mid + 1
+    else hi = mid
+  }
+  return Math.max(lo, winStart.value)
+})
+
+/** 窗口内各卡的 top（与 orderedIndexes 同序，下标 = winStart + k） */
+const windowTops = computed(() => unitTops.value.slice(winStart.value, winEnd.value))
+
+/** 读一次滚动指标（读布局属性，只在滚动/结构变化时调用） */
+function syncScroll(): void {
+  const el = listEl.value
+  if (!el) return
+  scrollRaw.value = el.scrollTop
+  scrollRange.value = Math.max(0, el.scrollHeight - el.clientHeight)
+}
+
+/** 滚动处理：rAF 节流，一帧最多读一次 */
+let scrollRaf = 0
+function onScroll(): void {
+  if (scrollRaf) return
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0
+    syncScroll()
+  })
+}
+
+onMounted(syncScroll)
+// 列表变长/变短、切换模式后滚动高度会变，重新取一次比例
+watch(cardPadTop, () => { nextTick(syncScroll) })
+watch(chatMode, () => { nextTick(syncScroll) })
+
+onBeforeUnmount(() => {
+  if (scrollRaf) cancelAnimationFrame(scrollRaf)
+  scrollRaf = 0
+})
 /** 群聊列表为空时的提示(搜索无命中的情况单独提示,不显示这句) */
 const groupListEmpty = computed(
   () => chatMode.value === 'group' && visibleIndexes.value.length === 0 && !searchKeyword.value,
@@ -242,16 +322,16 @@ const groupListEmpty = computed(
     </div>
   </div>
 
-  <!-- 列表滚动容器 -->
-  <section class="character-card">
+  <!-- 列表滚动容器。只在窗口内的卡片才会挂载（见脚本的 winStart / winEnd） -->
+  <section ref="listEl" class="character-card" @scroll.passive="onScroll">
     <div class="card-pad card-pad--top" />
 
     <!-- 单聊列表(顺序 = orderedIndexes:最近来过消息的排最前) -->
     <template v-if="chatMode === 'single'">
       <CharacterCardItem
-        v-for="(top, k) in unitTops"
-        :key="orderedIndexes[k]"
-        :index="orderedIndexes[k]"
+        v-for="(top, k) in windowTops"
+        :key="orderedIndexes[winStart + k]"
+        :index="orderedIndexes[winStart + k]"
         :top="top"
       />
     </template>
@@ -259,11 +339,11 @@ const groupListEmpty = computed(
     <!-- 群聊列表 -->
     <template v-else>
       <GroupCardItem
-        v-for="(top, k) in unitTops"
-        :key="orderedIndexes[k]"
-        :card-index="orderedIndexes[k]"
+        v-for="(top, k) in windowTops"
+        :key="orderedIndexes[winStart + k]"
+        :card-index="orderedIndexes[winStart + k]"
         :top="top"
-        :card="cards[orderedIndexes[k]]"
+        :card="cards[orderedIndexes[winStart + k]]"
         @settings="(i: number) => emit('group-settings', i)"
       />
     </template>

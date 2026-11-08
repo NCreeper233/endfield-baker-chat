@@ -1,17 +1,7 @@
-﻿<script setup lang="ts">
-// =============================================================================
-// 公告页(AnnouncementPage)
-// -----------------------------------------------------------------------------
-// 全屏公告窗口:顶部深色横幅里两个分类页签(公告 / 关于),
-// 「公告」是「左侧日期列表 + 右侧正文」两栏;「关于」直接铺满正文区。
-// 移动端退化成「列表 → 详情」两级(详情带返回按钮)。
-//
-// 数据来源:
-//   · 公告条目来自 constants/announcements(纯前端常量,新增公告只改那一处)
-//   · 交流群 / 相关链接来自 constants/contact(与站内其它入口共用同一份)
-//
-// 本页只做展示,不写持久化状态;打开/关闭由 App 持有。
-// =============================================================================
+<script setup lang="ts">
+// AnnouncementPage —— 全屏公告页：「公告」左日期列表 + 右正文，「关于」铺满正文区
+// 移动端退化为列表 → 详情两级。条目来自 constants/announcements，群与链接来自 constants/contact。
+// 只做展示，打开/关闭由 App 持有。
 import { computed, ref, watch } from 'vue'
 
 import { ANNOUNCEMENTS, type AnnouncementEntry } from '../../constants/announcements'
@@ -20,8 +10,6 @@ import { MATERIALS } from '../../constants/materials'
 import { copyText } from '../../utils/clipboard'
 import { useAnnouncementRead } from '../../composables/useAnnouncementRead'
 import { isMobileView } from '../../composables/useMobile'
-// 兑换码彩蛋:状态与文案都在 easteregg/moon/redeem(删法见该目录 README)
-import { MOON_HINT, moonRedeemed, redeemMoon } from '../../easteregg/moon/redeem'
 
 const props = withDefaults(
   defineProps<{
@@ -41,7 +29,7 @@ const emit = defineEmits<{
 type PageTab = 'log' | 'about'
 const tab = ref<PageTab>('log')
 
-// ---- 未读提醒 ---------------------------------------------------------------
+// 未读提醒
 // 规则:没点开过的公告挂 NEW 角标;只要还有未读,「公告」页签右上角挂橙点。
 const { isRead, markRead, hasUnreadOf } = useAnnouncementRead()
 
@@ -148,21 +136,7 @@ const blocks = computed<ContentBlock[]>(() => {
   return out
 })
 
-// ---- 关于(原设置里的「关于」,迁移到这里) ----------------------------------
-/** 兑换码输入草稿 */
-const eggCode = ref('')
-/** 上一次兑换是否失败 */
-const eggWrong = ref(false)
-
-/** 点「兑换」/ 回车:对了才置位(月亮从这一刻起才会被渲染、才会开始下载) */
-function onRedeemEgg(): void {
-  if (redeemMoon(eggCode.value)) {
-    eggWrong.value = false
-    eggCode.value = ''
-  } else {
-    eggWrong.value = true
-  }
-}
+// 关于（设置里的「关于」迁到这里）
 </script>
 
 <template>
@@ -390,26 +364,6 @@ function onRedeemEgg(): void {
                     </a>
                   </div>
                 </section>
-
-                <!-- ⛔ 临时彩蛋(可删):中秋兑换码;删法见 src/easteregg/moon/README.md -->
-                <section class="an__about-sec">
-                  <h3 class="an__about-heading">兑换码</h3>
-                  <div class="an__about-card an__about-card--pad">
-                    <div class="an__about-redeem">
-                      <input
-                        v-model="eggCode"
-                        class="pn-input an__about-input"
-                        type="text"
-                        placeholder="输入兑换码"
-                        @keyup.enter="onRedeemEgg"
-                      />
-                      <button class="pn-pill" type="button" @click="onRedeemEgg">兑换</button>
-                    </div>
-                    <p v-if="eggWrong" class="an__about-warn">兑换码不正确</p>
-                    <p v-else-if="moonRedeemed" class="an__about-ok">{{ MOON_HINT }}</p>
-                  </div>
-                </section>
-                <!-- /⛔ 临时彩蛋 -->
               </div>
             </div>
           </section>
@@ -429,14 +383,8 @@ function onRedeemEgg(): void {
 <style scoped lang="scss">
 @use '../../styles/variables' as *;
 
-// =============================================================================
-// 公告页样式
-// -----------------------------------------------------------------------------
-// 卡片固定 16:9,整体按视口等比缩小(62vw 与 84vh 取小)。
-// 内部尺寸都按 1500×844 的设计稿等比给值:
-//   页签 / 标题条 / 列表行 / 正文字号全部按 0.8 系数缩放,
-//   两张页签底图用 aspect-ratio 保持原图比例,不再拉伸变形。
-// =============================================================================
+// 公告页样式：卡片固定 16:9，按视口等比缩小（62vw 与 84vh 取小）。
+// 内部尺寸按 1500×844 设计稿乘 0.8 给值；页签底图用 aspect-ratio 保持原比例。
 
 $an-body-top: #7e8185;
 
@@ -446,9 +394,7 @@ $an-body-top: #7e8185;
   z-index: 520;
 }
 
-// ---------------------------------------------------------------------------
-// 卡片(16:9)
-// ---------------------------------------------------------------------------
+// 卡片（16:9）
 .an__card {
   position: absolute;
   top: 50%;
@@ -548,9 +494,7 @@ $an-body-top: #7e8185;
   }
 }
 
-// ---------------------------------------------------------------------------
 // 顶部深色横幅 + 页签
-// ---------------------------------------------------------------------------
 .an__head {
   position: relative;
   display: flex;
@@ -716,9 +660,7 @@ $an-body-top: #7e8185;
   }
 }
 
-// ---------------------------------------------------------------------------
-// 主体:左日期列表 + 右正文
-// ---------------------------------------------------------------------------
+// 主体：左日期列表 + 右正文
 .an__body {
   display: flex;
   flex: 1;
@@ -730,7 +672,7 @@ $an-body-top: #7e8185;
   background: linear-gradient(180deg, $an-body-top 0%, #6f7276 24%, #4c4e50 58%, #383a3b 100%);
 }
 
-// ---- 左:日期列表 ----------------------------------------------------------
+// 左：日期列表
 .an__listcol {
   position: relative;
   z-index: 2;
@@ -906,7 +848,7 @@ $an-body-top: #7e8185;
   }
 }
 
-// ---- 右:正文面板 ----------------------------------------------------------
+// 右：正文面板
 .an__detail {
   position: relative;
   z-index: 1;
@@ -1059,9 +1001,7 @@ $an-body-top: #7e8185;
   }
 }
 
-// ---------------------------------------------------------------------------
 // 关于页
-// ---------------------------------------------------------------------------
 .an__scroll--about {
   color: #1b1b1b;
   padding-right: 12px;
@@ -1210,32 +1150,7 @@ $an-body-top: #7e8185;
   font-size: 12px;
 }
 
-.an__about-redeem {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 340px;
-}
-
-.an__about-input {
-  flex: 1;
-}
-
-.an__about-warn {
-  margin: 8px 0 0;
-  color: #c0392b;
-  font-size: 12px;
-}
-
-.an__about-ok {
-  margin: 8px 0 0;
-  color: #2e7d32;
-  font-size: 12px;
-}
-
-// ---------------------------------------------------------------------------
-// 移动端:列表 / 详情两级切换
-// ---------------------------------------------------------------------------
+// 移动端：列表 / 详情两级切换
 @media (prefers-reduced-motion: reduce) {
   .an__tab-dot::after {
     animation: none !important;

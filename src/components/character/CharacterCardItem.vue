@@ -1,16 +1,7 @@
 <script setup lang="ts">
-// =============================================================================
-// 单张主卡(可折叠,内含任意数量子卡 ≥1)
-// -----------------------------------------------------------------------------
-// 职责:
-// 1. 渲染主卡视觉(rect/texture/faint/name/underline/corner/avatar/badge/btn)
-// 2. 折叠按钮:点击切换 store.collapsed[index]
-// 3. 折叠联动:箭头旋转 + 子卡 v-if 隐藏(配合 <transition name="collapse">)
-// 4. hover 状态:局部 ref 管理(主卡 + 每张子卡)
-//
-// 子卡渲染:v-for 遍历该主卡下的所有子卡(由 store.cardSubRanges 提供全局索引),
-// 用 subTopInCard(k) 计算第 k 张子卡的 top 偏移。
-// =============================================================================
+// CharacterCardItem —— 单张主卡（可折叠，内含 ≥1 张子卡）
+// 折叠状态存 store.collapsed[index]；子卡 top 由 subTopInCard(k) 计算，
+// 全局索引来自 store.cardSubRanges。
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
@@ -18,6 +9,7 @@ import { useSettingsStore } from '../../stores/settings'
 import { MATERIALS } from '../../constants/materials'
 import { isOriginalScaleAvatar } from '../../constants/character'
 import { subTopInCard } from '../../constants/characterCard'
+import { sortSubIndices } from '../../domain/chat/activity'
 import SubCard from './SubCard.vue'
 
 const props = defineProps<{
@@ -40,12 +32,26 @@ const isCardSelected = computed(() => chatStore.activeCardIndex === props.index)
 /** 该主卡下的全局子卡索引区间 [start, start+count) */
 const range = computed(() => cardSubRanges.value[props.index] ?? { start: 0, count: 0 })
 
-/** 该主卡下所有子卡的全局索引列表(用于 v-for) */
+/**
+ * 该主卡下所有子卡的全局索引列表(用于 v-for)
+ *
+ * 最近来过消息的子对话排到最前（与主卡列表同一套规则）。这里只改**渲染顺序**：
+ * 全局下标仍然是 start + k，所以 activeSub、预览文本、点击行为全都不受影响。
+ */
 const subIndices = computed(() => {
   const { start, count } = range.value
-  const list: number[] = []
-  for (let k = 0; k < count; k++) list.push(start + k)
-  return list
+  const card = chatStore.cards[props.index]
+  if (!card) {
+    const list: number[] = []
+    for (let k = 0; k < count; k++) list.push(start + k)
+    return list
+  }
+  return sortSubIndices(
+    start,
+    count,
+    chatStore.cardActiveKey(card),
+    chatStore.subActiveAt,
+  )
 })
 
 /** 该主卡对应的干员数据(name + avatar) */
@@ -222,7 +228,7 @@ function leave(event: PointerEvent) {
 @use '../../styles/variables' as *;
 @use '../../styles/mixins' as *;
 
-// ---- 卡片单元:折叠时整块上下位移的载体 --------------------------------------
+// 卡片单元：折叠时整块上下位移的载体
 .card-unit {
   position: absolute;
   left: 0;
@@ -232,7 +238,7 @@ function leave(event: PointerEvent) {
   transition: top 0.3s ease;
 }
 
-// ---- 主卡 ----------------------------------------------------------------
+// 主卡
 .card {
   // 机体(矩形底/纹理/淡纹/名字/下划线/转角装饰/hover 白层/选中白层)、
   // 头像框、右上角消息浮标 —— 三块与群聊卡(GroupCardItem)共用同一组 mixin,

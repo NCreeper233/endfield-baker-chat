@@ -1,88 +1,53 @@
-// =============================================================================
-// customApi —— 自定义 API(OpenAI 兼容 /chat/completions)直连助手
-// -----------------------------------------------------------------------------
-// 定位:为"自定义 API 模式(apiMode === 'custom')"下所有**非单聊流式**的调用
-// 提供统一入口。目前有两类使用方:
-//   1. utils/customGroupBackend.ts —— 群聊的"判断下一位发言人 / 生成发言 / 推荐"
-//   2. composables/useAiChat.ts    —— 单聊「AI 推荐回复」在 custom 模式下的降级实现
-//      (原先无论什么模式都打后端网关 /chat/suggestions,这是审计出的问题之一)
-//
-// 为什么不复用 utils/llm.ts 的 streamChat:
-//   群聊链路的形态是"一次 POST 拿完整文本"(与后端群聊服务一致),不需要 SSE;
-//   而 llm.ts 只实现了流式分支。这里补一个**非流式**的 OpenAI 兼容调用,
-//   思考模式(think)参数也在这里统一处理。
-//
-// 思考模式约定:
-//   src/utils/llm.ts 现有直连**没有**传任何思考参数 —— 也就是说 custom 模式下
-//   "思考模式"开关原本是失效的。这里按 OpenAI 兼容生态里最常见的做法传
-//   `chat_template_kwargs: { enable_thinking: <bool> }`
-//   (vLLM / SGLang / Qwen 系自建端点均识别该字段;不识别的服务商通常会忽略)。
-//   单聊流式分支用同一约定,见 utils/llm.ts 的 StreamChatParams.think。
-// =============================================================================
+// customApi —— 自定义 API 的 OpenAI 兼容直连（非流式 POST）
+// 不复用 llm.ts 是因为它只有流式分支；这里补非流式调用，并统一处理思考模式
+// `chat_template_kwargs.enable_thinking`（vLLM / SGLang / Qwen 系识别，其余忽略）。
 
 import type { ApiConfig } from '../stores/settings'
 import { normalizeUsage } from './usage'
 import type { NormalizedUsage } from './usage'
 import { isOReasoningModel, usesMaxCompletionTokens } from './llm'
 
-/** OpenAI 兼容消息(仅文本;群聊/推荐都不需要多模态) */
+/** 仅文本：群聊与推荐都不需要多模态 */
 export interface CustomChatMessage {
   role: 'system' | 'user' | 'assistant'
   content: string
 }
 
-/** 非流式调用参数 */
 export interface CustomChatOptions {
-  /** 温度;o 系列 reasoning 模型会自动省略(与 llm.ts 同口径) */
+  /** o 系列 reasoning 模型会自动省略，与 llm.ts 同口径 */
   temperature?: number
-  /** 最大输出 token;按模型自动选择 max_tokens / max_completion_tokens */
   maxTokens?: number
-  /** 思考模式开关(enable_thinking);缺省 = 不带该字段,由服务商默认 */
+  /** 缺省 = 不带该字段，由服务商默认 */
   think?: boolean
-  /** 外部中止信号(群聊回合的 controller.signal) */
   signal?: AbortSignal
-  /** 超时(ms);缺省 60000。与外部 signal 取"先到先中止" */
+  /** 与 signal 取「先到先中止」，缺省 60000 */
   timeoutMs?: number
 }
 
-/** 非流式调用结果 */
 export interface CustomChatResult {
-  /** 回复文本(已去首尾空白) */
+  /** 已去首尾空白 */
   text: string
-  /** 服务商上报的用量;未上报为 undefined */
   usage?: NormalizedUsage
 }
 
-/** 自定义 API 的 chat/completions 地址 */
 export function customChatUrl(config: ApiConfig): string {
   return `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`
 }
 
-/** custom 模式是否已配置完整(baseUrl / apiKey / model 三件套) */
 export function isCustomApiConfigured(config: ApiConfig): boolean {
   return !!config.baseUrl && !!config.apiKey && !!config.model
 }
 
-/**
- * 写入思考模式参数(OpenAI 兼容约定:chat_template_kwargs.enable_thinking)
- *
- * 直接改传入的 body 对象;缺省不调用本函数 = 请求体里不带该字段,
- * 行为与改动前完全一致。
- */
+/** 缺省不调用本函数 = 请求体不带该字段，行为与此前完全一致 */
 export function applyThinkMode(body: Record<string, unknown>, think: boolean): void {
-  // 只在**开启**思考时才发送这个扩展字段：不少 OpenAI 兼容服务端会拒绝未知字段
-  // （400 unrecognized_keys: 'chat_template_kwargs'），关着思考还发它纯属自找失败。
+  // 只在开启思考时发送：不少兼容服务端会拒绝未知字段（400 unrecognized_keys）
   if (!think) return
   const prev = body.chat_template_kwargs
   const merged = prev && typeof prev === 'object' ? { ...(prev as object) } : {}
   body.chat_template_kwargs = { ...merged, enable_thinking: !!think }
 }
 
-/**
- * 单次非流式调用(自定义 API)
- *
- * @throws 配置缺失 / HTTP 非 2xx / 响应缺少内容时抛 Error(消息为中文可读文案)
- */
+/** 配置缺失 / 非 2xx / 内容为空时抛 Error，消息为中文可读文案 */
 export async function customChatCompletion(
   config: ApiConfig,
   messages: CustomChatMessage[],
@@ -168,16 +133,9 @@ export async function customChatCompletion(
   }
 }
 
-// =============================================================================
-// 推荐回复的解析(后端 common.py parse_suggestions_text 的 TS 移植)
-// =============================================================================
+// 推荐回复的解析：后端 parse_suggestions_text 的 TS 移植
 
-/**
- * 从模型输出里解析推荐候选句
- *
- * 容忍:JSON 数组 / ```json 代码围栏 / 编号列表 / 项目符号列表。
- * 与后端口径一致:去重、截断到 maxChars、最多 count 条。
- */
+/** 容忍 JSON 数组 / ```json 围栏 / 编号列表 / 项目符号列表；与后端同口径去重、截断 */
 export function parseSuggestionList(
   rawText: string,
   count = 3,
@@ -226,12 +184,8 @@ export function parseSuggestionList(
   return out
 }
 
-// =============================================================================
-// 单聊「AI 推荐回复」在 custom 模式下使用的提示词
-// -----------------------------------------------------------------------------
-// 与后端 prompt_core.py 的 SUGGEST_SYSTEM_SINGLE 逐字一致 ——
-// 这样 custom 模式的推荐风格与后端模式不会出现明显差异。
-// =============================================================================
+// 单聊「AI 推荐回复」在 custom 模式下的提示词
+// 与后端 SUGGEST_SYSTEM_SINGLE 逐字一致，两种模式的推荐风格才不会有差异。
 
 export const SUGGEST_SYSTEM_SINGLE = `你在帮用户想"接下来可以跟这个角色说什么"。
 

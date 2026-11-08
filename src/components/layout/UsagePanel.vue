@@ -1,20 +1,6 @@
 <script setup lang="ts">
-// =============================================================================
-// 实时用量面板(UsagePanel)
-// -----------------------------------------------------------------------------
-// 非模态浮层:不拦截背景交互,可在聊天过程中一直开着看数字变化。
-//
-// 显示四组信息:
-//   1. 最近一次请求:输入 / 输出 / 缓存命中 / 命中率
-//   2. 上下文占用:已用 ÷ 窗口 + 构成堆叠条(固定前缀 / 冻结摘要 / 历史 / 草稿)
-//   3. 累计用量:跨刷新保留(由 useChatPersistence 写入独立 IndexedDB key)
-//   4. 缓存状态:前缀是否稳定 / 本轮是否压缩 / 该端点是否上报缓存字段
-//
-// "实时"来源:输入框草稿(usageStore.draftText)+ 历史变化 + 响应完成,
-// 三者任一变化都会让下一次请求的预估体积立即重算。
-//
-// 面板可通过标题栏拖动到任意位置,位置持久化(localStorage)。
-// =============================================================================
+// UsagePanel —— 非模态实时用量面板：最近一次请求、上下文占用构成、累计用量、缓存状态
+// 「实时」来自草稿 + 历史 + 响应完成三者任一变化即重算。标题栏可拖动，位置持久化。
 import { computed, nextTick, ref, watch } from 'vue'
 import { useChatStore } from '../../stores/chat'
 import { useSettingsStore } from '../../stores/settings'
@@ -28,7 +14,6 @@ import {
 } from '../../utils/contextBudget'
 import { estimateText } from '../../utils/tokenEstimate'
 import { describeDataStatus, formatPercent, formatTokenCount } from '../../utils/usage'
-import type { UsageSource } from '../../utils/usage'
 
 /** 面板位置持久化的 localStorage key(沿用 endfield-baker- 前缀族) */
 const PANEL_POS_KEY = 'endfield-baker-usage-panel-pos'
@@ -220,7 +205,7 @@ function onReset() {
   usageStore.resetAll()
 }
 
-// ---- 手动压缩 ---------------------------------------------------------------
+// 手动压缩
 /** 是否正在压缩(会调用总结 API,可能耗时数秒) */
 const compacting = ref(false)
 /** 压缩结果提示 */

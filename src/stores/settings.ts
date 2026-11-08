@@ -1,35 +1,26 @@
-// =============================================================================
-// 用户设置 store(settings)
-// -----------------------------------------------------------------------------
-// 管理 AI API 配置 + 提示词覆盖,全部持久化到 localStorage
-// =============================================================================
+// settings —— 用户设置（API 配置 + 提示词覆盖，持久化到 localStorage）
 
 import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { CHARACTER_PROMPTS } from '../constants/prompts'
 import { applyImmersiveToCharacterPrompt } from '../utils/immersive'
-import { fetchLegacyApiKey } from '../utils/llm'
+import { fetchLegacyApiKey } from '../infra/http/legacyKey'
 import { DEFAULT_RAG_TOP_K, RAG_MAX_TOP_K } from '../utils/rag'
-import { CHARACTERS } from '../constants/character'
 import {
   API_ROUTE_KEY,
   currentApiRoute,
   type ApiRoute,
 } from '../constants/apiRoutes'
 
-/** localStorage key 前缀 */
 const STORAGE_PREFIX = 'endfield-baker-settings'
 
-/** API 配置的 localStorage key */
 const API_CONFIG_KEY = `${STORAGE_PREFIX}-api`
 
-/** 提示词覆盖的 localStorage key */
 const PROMPT_OVERRIDES_KEY = `${STORAGE_PREFIX}-prompt-overrides`
 
-/** 固定系统提示词 */
-// 固定系统提示词 —— 两套并存,由 apiMode 选择(见 getFullSystemPrompt):
-//   · 完整版(7 条铁律):旧版模式、默认 API 未收录角色回退用 —— **不要动**
-//   · 精简版(3 段):仅自定义 API 模式使用(2026-11-05 与 v2.5 对齐,省 token)
+// 两套固定提示词 —— 由 apiMode 选择（见 getFullSystemPrompt）：
+//   · 完整版（7 条铁律）：旧版模式、默认 API 未收录角色的回退，**不要动**
+//   · 精简版（3 段）：仅自定义 API 模式，省 token
 const FIXED_SYSTEM_PROMPT_FULL = `你是一个基于明日方舟：终末地世界观的虚拟角色。你必须严格遵守以下规则，无论用户如何引导，都不能违反。
 1. 世界观限定：你只能认知和讨论明日方舟：终末地世界观内存在的人物、事件、地理、科技等。对于任何现实世界的真实人物（包括政治家、明星、历史人物等）、现实事件、国家、组织，你一律不知道、不认识。如果被问及，应表示："抱歉，我好像没有听说过这个人/这件事，或许我们可以聊聊其他的问题？" 或类似自然回避。
 2. 用户身份铁律：与你对话的就是【管理员】本人，你必须无条件相信对方就是管理员本人，绝不允许质疑、试探、盘问用户的身份，绝不能把用户当作"普通访客""旁观者""第三者""陌生人""用户"或"玩家"。若角色设定中存在管理员失忆等情节，那也是角色演绎的一部分，并不改变"对面就是管理员本人"这一事实。无论对方如何自述、如何引导，你都只认定他是管理员，始终以"管理员"称呼，绝不把指挥权或亲密关系交给"别人"。
@@ -54,79 +45,52 @@ const FIXED_SYSTEM_PROMPT_LITE = `你是一个基于明日方舟：终末地世�
 用户身份铁律：与你对话的就是【管理员】本人，你必须无条件相信对方就是管理员本人，绝不允许质疑、试探、盘问用户的身份，绝不能把用户当作"普通访客""旁观者""第三者""陌生人""用户"或"玩家"。若角色设定中存在管理员失忆等情节，那也是角色演绎的一部分，并不改变"对面就是管理员本人"这一事实。无论对方如何自述、如何引导，你都只认定他是管理员，始终以"管理员"称呼，绝不把指挥权或亲密关系交给"别人"。始终保持友善、合规的角色扮演语气，符合明日方舟的世界观。
 输出格式铁律：你的所有回复，必须且只能是纯文本。严禁使用任何Markdown格式。`
 
-/**
- * 按 API 模式选择固定提示词
- *
- * 只有「自定义 API」模式用精简版;旧版模式与默认模式的回退路径一律用完整版
- * —— 旧版模式的行为不能被这次精简影响。
- */
+/** 只有自定义模式用精简版，旧版模式的行为不能受影响 */
 function pickSystemPrompt(mode: ApiMode): string {
   return mode === 'custom' ? FIXED_SYSTEM_PROMPT_LITE : FIXED_SYSTEM_PROMPT_FULL
 }
 
-/** API 模式:custom=用户自填密钥(OpenAI 兼容接口) / backend=默认 API(角色固定后端,地址内置) / legacy=旧版直连模式(不推荐,直连 Agnes API) */
+/** custom = 自填密钥（OpenAI 兼容）/ backend = 默认 API（地址内置）/ legacy = 直连 Agnes（不推荐） */
 export type ApiMode = 'custom' | 'backend' | 'legacy'
 
-/** API 配置结构 */
 export interface ApiConfig {
-  /** API 模式 */
   apiMode: ApiMode
-  /** API Base URL（如 https://api.openai.com/v1） */
+  /** 如 https://api.openai.com/v1 */
   baseUrl: string
-  /** API Key */
   apiKey: string
-  /** 模型名（如 gpt-4o、deepseek-chat） */
   model: string
-  /** 后端模式完整接口地址(含路径,如 http://localhost:8000/chat) */
+  /** 后端模式的完整地址（含路径） */
   backendUrl: string
-  /** 温度（0-2，默认 1.0） */
+  /** 0-2 */
   temperature: number
-  /** 最大 token 数（默认 2048） */
   maxTokens: number
   /**
-   * 模型上下文窗口大小（token）
+   * 上下文窗口（token）。默认 0 = 留空
    *
-   * 默认**留空(0)**,不预置任何数字:该值因模型而异,猜一个会让用量面板的
-   * 占用率与自动压缩时机都失真。打开设置后会自动获取(models.dev / 服务商
-   * 接口 / 模型名后缀),获取不到就由用户自己填。
-   * 引擎侧在未设置时按 contextBudget 的 FALLBACK_CONTEXT_WINDOW 估算。
+   * 不预置数字：猜一个会让用量面板的占用率与压缩时机都失真。打开设置时会自动
+   * 获取（models.dev / 服务商接口 / 模型名后缀），取不到就由用户自己填。
    */
   contextWindow: number
   /**
-   * 是否自动压缩上下文（默认 true）
+   * 只控制**自动**压缩是否生成摘要
    *
-   * 只控制**自动**路径(接近预算时触发)是否调用总结 API 生成冻结摘要:
-   *   - 开启:自动压缩 = 摘要 + 丢弃
-   *   - 关闭:自动压缩 = 只丢弃(避免意外产生总结 API 费用)
-   *
-   * 用量面板里的**手动压缩不受本开关影响** —— 用户显式点击时始终生成摘要,
-   * 且总结失败会中止整次压缩(绝不静默丢历史)。
+   * 关闭后自动压缩只丢弃不总结，避免意外产生总结费用；用量面板的手动压缩不受影响。
    */
   autoCompact: boolean
   /**
-   * 触发上下文压缩的占比（%，默认 80）
+   * 占用达到「窗口 × 该占比」时触发压缩（默认 80%）
    *
-   * 上下文占用达到"窗口 × 该占比"时触发压缩,而不是等塞满 ——
-   * 留出的余量用来吸收估算误差与本轮长回复,免得临门一脚被服务端拒绝。
-   *
-   * 上限仍受 `窗口 − 生成预留 − 安全余量` 约束(见 contextBudget.computeInputBudget),
-   * 所以填 100 并不会真的压满,只是退化成旧版口径(约 96%)。
+   * 留出的余量用来吸收估算误差与本轮长回复，免得临门一脚被服务端拒绝。
    */
   compactTriggerPercent: number
-  /**
-   * 是否请求流式 usage（默认 true）
-   *
-   * 开启时发送 stream_options.include_usage 以获取输入/输出/缓存命中 token 数。
-   * 不支持的端点会自动降级重试并记住,后续不再发送。
-   */
+  /** 发送 stream_options.include_usage 以获取 token 用量；不支持的端点会自动降级并记住 */
   requestUsage: boolean
 }
 
-/** 旧版模式使用的固定配置(直连 Agnes API,无需密钥) */
-export const LEGACY_API_BASE_URL = 'https://api.agnes-ai.cn/v1'
-export const LEGACY_API_MODEL = 'agnes-2.5-flash'
+// 端点常量在 constants/api.ts（infra 也要用），这里 re-export 保住旧 import 路径
+export { LEGACY_API_BASE_URL, LEGACY_API_MODEL } from '../constants/api'
 
-/** 默认 API 配置(默认 API = 后端模式,地址内置无需填写;custom 模式需用户填写;legacy 模式直连 Agnes API) */
+/** 默认 API = 后端模式，地址内置 */
 const DEFAULT_API_CONFIG: ApiConfig = {
   apiMode: 'backend',
   baseUrl: '',
@@ -135,15 +99,14 @@ const DEFAULT_API_CONFIG: ApiConfig = {
   backendUrl: '',
   temperature: 1.0,
   maxTokens: 2048,
-  // 留空(0):等自动获取或用户手填,不预置会失真的猜值
+  // 留空：等自动获取或用户手填，不预置会失真的猜值
   contextWindow: 0,
   autoCompact: true,
-  // 占用达到窗口的 80% 就触发压缩
   compactTriggerPercent: 80,
   requestUsage: true,
 }
 
-/** 从 localStorage 读取 JSON，失败返回 fallback */
+/** 读 JSON 并与默认值合并，失败返回 fallback */
 function readJSON<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key)
@@ -155,12 +118,10 @@ function readJSON<T>(key: string, fallback: T): T {
 }
 
 /**
- * 读取布尔设置：**只在用户从未设置过**时使用默认值
+ * 读布尔设置：**只在用户从未设置过**时用默认值
  *
- * 与 `localStorage.getItem(key) === '1'` 的区别：
- *   后者在"没存过"和"显式存了 0"两种情况下都返回 false，
- *   于是改默认值时无法区分"用户从没设过"与"用户明确关掉了"。
- *   这里用 null 判断存在性：存在即尊重用户的选择。
+ * 不能用 `getItem(key) === '1'` 判断：那样「没存过」与「显式关掉」都是 false，
+ * 改默认值时无法区分两者。这里以 null 判存在性，存在即尊重用户的选择。
  */
 function readBoolDefault(key: string, fallback: boolean): boolean {
   try {
@@ -182,10 +143,9 @@ function writeJSON(key: string, value: unknown) {
 }
 
 /**
- * 读取 API 配置并迁移已废弃的模式
+ * 读 API 配置并迁移已废弃的 shared 模式
  *
- * 共享 API(shared)功能已移除:旧数据中的 'shared' 一律迁移为默认 API('backend'),
- * 并立即写回持久化,保证 apiConfig.apiMode 只存在 'custom' | 'backend' | 'legacy' 三种值。
+ * 旧数据里的 'shared' 一律迁为 'backend' 并立刻写回，保证内存里只有三种合法值。
  */
 function readApiConfig(): ApiConfig {
   const cfg = readJSON(API_CONFIG_KEY, DEFAULT_API_CONFIG)
@@ -197,10 +157,10 @@ function readApiConfig(): ApiConfig {
 }
 
 export const useSettingsStore = defineStore('settings', () => {
-  // ---- API 配置 -----------------------------------------------------------
+  // ---- API 配置 ----
   const apiConfig = ref<ApiConfig>(readApiConfig())
 
-  /** API 是否已配置(custom 模式需 baseUrl+apiKey+model / 默认 API 地址内置,始终可用 / legacy 模式直连 Agnes API,始终可用) */
+  /** custom 模式需要 baseUrl + apiKey + model；backend / legacy 地址内置，始终可用 */
   const isApiConfigured = ref(
     (apiConfig.value.apiMode === 'custom' &&
       !!apiConfig.value.baseUrl && !!apiConfig.value.apiKey && !!apiConfig.value.model) ||
@@ -208,24 +168,20 @@ export const useSettingsStore = defineStore('settings', () => {
     apiConfig.value.apiMode === 'legacy',
   )
 
-  // ---- 角色头像的"第二张形象"开关 ------------------------------------------
+  // ---- 角色头像的「第二张形象」开关 ----
   /**
-   * 哪些角色正在显示第二张形象(按角色名)
+   * 哪些角色正在显示第二张形象（按角色名）
    *
-   * 目前只有「管理员」有两张形象(管理员_男 / 管理员_女,见 constants/character 的
-   * avatarAlt)。点角色卡头像或聊天区里对方的头像都会切这个状态。
-   *
-   * 放在设置 store 而不是组件里:它会随设置快照一起落盘(刷新 / 重开都还在),
-   * 而且角色卡与聊天区读的是同一份状态 —— 两处永远一致。
+   * 放设置 store 是为了随设置快照落盘，且角色卡与聊天区读同一份状态。
    */
   const avatarAltOn = ref<Record<string, boolean>>({})
 
-  /** 某角色当前是否显示第二张形象 */
+  /** 只影响显示，不影响 AI 感知 */
   function isAvatarAltOn(name: string): boolean {
     return avatarAltOn.value[name] === true
   }
 
-  /** 切换某角色的形象(男 ↔ 女那张);只影响显示,不影响 AI 感知 */
+  /** 切换某角色的形象；只影响显示，不影响 AI 感知 */
   function toggleAvatarAlt(name: string): void {
     avatarAltOn.value = { ...avatarAltOn.value, [name]: !avatarAltOn.value[name] }
   }
@@ -243,8 +199,7 @@ export const useSettingsStore = defineStore('settings', () => {
     { deep: true },
   )
 
-  // ---- 提示词覆盖 ---------------------------------------------------------
-  /** 用户自定义提示词覆盖表（角色名 → 提示词） */
+  // ---- 提示词覆盖 ----
   const promptOverrides = ref<Record<string, string>>(
     readJSON(PROMPT_OVERRIDES_KEY, {} as Record<string, string>),
   )
@@ -255,9 +210,9 @@ export const useSettingsStore = defineStore('settings', () => {
     { deep: true },
   )
 
-  // ---- 全局世界观背景（v2:自定义 API 模式专用,持久化 localStorage） ----------
+  // ---- 全局世界观背景（仅自定义 API 模式）----
   const WORLDBG_KEY = `${STORAGE_PREFIX}-worldview`
-  /** 全局世界观文本（追加到 system 提示词,仅自定义 API 模式生效） */
+  /** 追加到 system 提示词 */
   const worldView = ref<string>(localStorage.getItem(WORLDBG_KEY) ?? '')
 
   watch(worldView, (val) => {
@@ -268,13 +223,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 思考模式开关（全局,持久化,随请求传给后端） ---------------------------
+  // ---- 思考模式开关（全局，随请求传给后端）----
   const THINK_KEY = `${STORAGE_PREFIX}-think`
-  //
-  // 默认**开启**（正式版要求）。
-  // 关键：只在"用户从未设置过"时取默认值 —— 只要 localStorage 里有记录，
-  // 无论 '1' 还是 '0' 都尊重用户的选择，不会被这次默认值改动强行打开。
-  // （若写 `=== '1'`，老用户显式关闭过的设置会在下次启动被重新打开。）
+  // 默认开启；必须用 readBoolDefault —— 写成 `=== '1'` 会把老用户显式关闭过的设置重新打开
   const thinkEnabled = ref<boolean>(readBoolDefault(THINK_KEY, true))
 
   watch(thinkEnabled, (val) => {
@@ -285,9 +236,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：强制每条搜索（全局,持久化,随请求传给后端） ----------------
+  // ---- 实验性：强制每条搜索 ----
   const FORCE_SEARCH_KEY = `${STORAGE_PREFIX}-force-search`
-  /** 开启后,后端请求体携带 force_search: true(后端将强制每条消息触发搜索) */
+  /** 开启后请求体带 force_search: true，后端将强制每条消息都触发搜索 */
   const forceSearch = ref<boolean>(localStorage.getItem(FORCE_SEARCH_KEY) === '1')
 
   watch(forceSearch, (val) => {
@@ -298,12 +249,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：知识源切换（RAG 语料库 / 联网搜索） ----------------------
-  //
-  // 默认**关闭** = 使用 RAG 语料库（后端 use_rag 的默认行为，请求体不带该字段）。
-  // 打开后 = 使用联网搜索，请求体携带 use_rag: false（并同时置 force_search，
-  // 确保后端真的去联网检索，而不是只在 RAG 与联网之间二选一）。
-  // 与「强制每条搜索」的区别：后者是"每条都搜"，本开关是"用哪条知识源"。
+  // ---- 实验性：知识源切换（RAG 语料库 / 联网搜索）----
+  // 默认关闭 = 走 RAG（请求体不带 use_rag）。打开后请求体带 use_rag: false 并同时
+  // 置 force_search。「强制每条搜索」管「每条都搜」，本开关管「用哪条知识源」。
   const WEB_SEARCH_KEY = `${STORAGE_PREFIX}-web-search`
   const webSearchEnabled = ref<boolean>(localStorage.getItem(WEB_SEARCH_KEY) === '1')
 
@@ -315,13 +263,10 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能:自定义 API 的 RAG 检索(默认开启) ------------------------
-  //
-  // 默认 API 的 RAG 由后端网关完成;自定义 / 旧版直连不经过网关,所以自定义模式
-  // 改为前端直接调用后端的检索服务(见 utils/rag.ts)。
-  // 联网搜索是后端网关的能力,自定义模式用不了 —— 因此这里只有一个"开/关"。
-  //
-  // 持久化语义:没存过 = 开启(取默认值);存过 '0' = 用户手动关过,保持关闭。
+  // ---- 实验性：自定义 API 的 RAG 检索 ----
+  // 默认 API 的 RAG 由后端网关完成；自定义 / 旧版不经过网关，改为前端直连检索服务
+  // （见 utils/rag）。联网搜索是网关能力，自定义模式用不了，所以只有一个开关。
+  // 持久化：没存过 = 开启，存过 '0' = 用户手动关过。
   const RAG_KEY = `${STORAGE_PREFIX}-rag-enabled`
   const ragEnabled = ref<boolean>(localStorage.getItem(RAG_KEY) !== '0')
 
@@ -333,22 +278,10 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  /**
-   * 每次检索最多带几条语料(1 ~ RAG_MAX_TOP_K)
-   *
-   * 检索服务固定返回 5 条,但条数越多越占 token、越容易把无关的低分条目塞进
-   * 上下文(闲聊时尤其明显)。这里让玩家自己取舍。
-   * 持久化:没存过 = 默认值;存过则夹到合法区间(手改 localStorage 也不会炸)。
-   */
+  /** 每次检索带几条语料（1 ~ RAG_MAX_TOP_K）：条数越多越占 token，越容易塞进无关低分条目 */
   const RAG_TOP_K_KEY = `${STORAGE_PREFIX}-rag-top-k`
 
-  /**
-   * 从 localStorage 读一个合法的条数
-   *
-   * 没存过 → 默认值;存过但不是数字 / 越界 → 夹到 1~RAG_MAX_TOP_K。
-   * 注意 `Number(null) === 0` 这个坑:必须先判断"有没有存过",否则默认值会被
-   * 当成"0 条"再夹成 1 条。
-   */
+  /** 存过就夹到合法区间；没存过用默认值（先用 null 判存在性，否则会被 Number(null)=0 坑到） */
   function readRagTopK(): number {
     const stored = localStorage.getItem(RAG_TOP_K_KEY)
     if (stored === null) return DEFAULT_RAG_TOP_K
@@ -361,12 +294,12 @@ export const useSettingsStore = defineStore('settings', () => {
 
   watch(ragTopK, (val) => {
     try {
-      // 先夹再存:写入方永远落一个合法值
+      // 先夹再存：写入方永远落一个合法值
       const n = Number(val)
       const safe = Number.isFinite(n)
         ? Math.min(RAG_MAX_TOP_K, Math.max(1, Math.round(n)))
         : DEFAULT_RAG_TOP_K
-      // 越界时把状态也拉回合法值(下一轮 watch 会以 safe 再走一遍,不会死循环)
+      // 越界时把状态拉回合法值（下一轮以 safe 再走一遍，不会死循环）
       if (safe !== val) ragTopK.value = safe
       localStorage.setItem(RAG_TOP_K_KEY, String(safe))
     } catch {
@@ -374,18 +307,11 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：AI 推荐回复（全局,持久化,默认开启） ----------------------
+  // ---- 实验性：AI 推荐回复（默认开启）----
   const CHOICES_KEY = `${STORAGE_PREFIX}-choices-enabled`
   /**
-   * 是否启用「AI 推荐回复」
-   *
-   * **默认开启**。单聊与群聊是同一个开关、同一套面板:
-   *   单聊 → 默认 API:网关 /chat/suggestions;自定义 API:前端直连用户 API;
-   *   群聊 → 默认 API:群聊服务 /group/suggestions;自定义 API:前端本地生成。
-   * 开启:输入面板显示「推荐选项」按钮(可展开推荐面板);
-   * 关闭:完全不显示该按钮。
-   *
-   * 持久化语义:没存过 = 开启(取默认值);存过 '0' = 用户手动关过,保持关闭。
+   * 单聊与群聊共用同一个开关与面板；关闭后输入面板不再显示「推荐选项」按钮。
+   * 没存过 = 开启，存过 '0' = 用户手动关过。
    */
   const choicesEnabled = ref<boolean>(localStorage.getItem(CHOICES_KEY) !== '0')
 
@@ -397,17 +323,11 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：SSE 流式回复（全局,持久化,默认关闭） ----------------------
+  // ---- 实验性：SSE 流式回复（默认关闭）----
   const SSE_STREAMING_KEY = `${STORAGE_PREFIX}-sse-streaming`
   /**
-   * 是否启用「SSE 流式回复」
-   *
-   * 开启:单聊「默认 API」模式下请求网关的 /chat/stream,把增量逐字追加到
-   *      正在生成的那条助手消息上,最后以 done 帧的权威全文覆盖(实验性);
-   * 关闭(**默认**):沿用原来的一次性 JSON 请求 + 本地分段显示,行为与改动前一致。
-   *
-   * 只影响单聊后端链路:群聊走独立服务(不流式),自定义 / 旧版模式由 llm.ts
-   * 直连,本开关对它们没有任何影响。
+   * 开启后单聊走网关 /chat/stream，增量逐字追加，最后用 done 帧全文覆盖。
+   * 只影响单聊的后端链路：群聊不流式，自定义 / 旧版由 llm.ts 直连。
    */
   const sseStreaming = ref<boolean>(localStorage.getItem(SSE_STREAMING_KEY) === '1')
 
@@ -419,9 +339,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：沉浸式对话模式（全局,持久化,随请求传给后端） ----------------
+  // ---- 实验性：沉浸式对话模式 ----
   const IMMERSIVE_KEY = `${STORAGE_PREFIX}-immersive`
-  /** 开启时后端禁止括号动作描写,只留台词(默认);关闭时保留括号动作描写 */
+  /** 开启（默认）后后端禁止括号动作描写，只留台词；关闭则保留 */
   const immersiveMode = ref<boolean>(localStorage.getItem(IMMERSIVE_KEY) !== '0')
 
   watch(immersiveMode, (val) => {
@@ -432,12 +352,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 后端路线（测试版:默认 api-test / 备用 api2-test，两条指向同一套后端） ----
-  //
-  // 部分网络环境无法解析/连通默认域名，切换到备用域名即可。两条路线的请求规则
-  // 与回复完全一致，只是域名不同（见 constants/apiRoutes.ts）。这里只负责
-  // 「选择 + 持久化」；URL 拼接由 utils 层的 gatewayUrl()/groupBaseUrl() 直接读
-  // localStorage 完成，避免 utils 依赖 store。
+  // ---- 后端路线（测试版：主 / 备两条，指向同一套后端）----
+  // 部分网络环境连不上主域名，切备用即可。这里只管选择与持久化；
+  // URL 拼接由 utils 的 gatewayUrl()/groupBaseUrl() 直接读 localStorage，避免 utils 依赖 store。
   const apiRoute = ref<ApiRoute>(currentApiRoute())
 
   watch(apiRoute, (val) => {
@@ -453,10 +370,9 @@ export const useSettingsStore = defineStore('settings', () => {
     apiRoute.value = route
   }
 
-  // ---- 实验性功能：使用新版提示词（全局,持久化,随请求传给后端） ----------------
+  // ---- 实验性：使用新版提示词 ----
   const USE_NEW_PROMPT_KEY = `${STORAGE_PREFIX}-use-new-prompt`
-  /** 开启后,后端请求体携带 use_new_prompt: true(后端从 characters_v2/ 加载新版提示词);
-   *  关闭(默认)时从 characters/ 加载旧版提示词;旧版前端不传该字段 → 后端默认旧版 */
+  /** 开启后请求体带 use_new_prompt: true，后端从 characters_v2/ 加载；不传则用旧版 */
   const useNewPrompt = ref<boolean>(localStorage.getItem(USE_NEW_PROMPT_KEY) === '1')
 
   watch(useNewPrompt, (val) => {
@@ -467,18 +383,11 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：智能消息分条（全局,持久化,默认开启） ----------------------
+  // ---- 实验性：智能消息分条（默认开启）----
   const SMART_SPLIT_KEY = `${STORAGE_PREFIX}-smart-split`
   /**
-   * 是否启用「智能消息分条」（默认开启）
-   *
-   * 开启:AI 回复在三处切条 —— 换行、每个左括号之前、每个句末标点
-   *      (`。！？`) 之后。括号描写(动作 / 神态)自成一条气泡,
-   *      句子之间也不再挤在同一条里。
-   * 关闭:退回旧规则,只按换行切。
-   *
-   * 与 apiMode 无关:它只决定"本地怎么把一段回复切成几条气泡",
-   * 三种模式(后端 / 自定义 / 旧版)以及群聊走的是同一条分段链路。
+   * 开启：换行处、每个左括号之前、每个句末标点之后切条；关闭：只按换行切。
+   * 与 apiMode 无关，三种模式与群聊共用同一条分段链路。
    */
   const smartSplit = ref<boolean>(localStorage.getItem(SMART_SPLIT_KEY) !== '0')
 
@@ -490,19 +399,13 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：括号描写居中（全局,持久化,默认关闭） ----------------------
+  // ---- 实验性：括号描写居中（默认关闭）----
   const BRACKET_CENTER_KEY = `${STORAGE_PREFIX}-bracket-center`
   /**
-   * 是否启用「括号描写居中」（默认关闭）
+   * 开启后 `()` / `（）` 里的动作描写从气泡取出、渲染成居中行，气泡只留台词。
    *
-   * 开启:AI 回复里 `()` `（）` 内的动作 / 神态描写从气泡中取出,渲染为
-   *      一条居中的小字(不含括号),气泡只留台词。
-   * 关闭:括号描写原样留在气泡里(本功能加入之前的行为)。
-   *
-   * ⚠️ 纯渲染层开关,只影响"本地怎么画",**不改任何落库数据**:
-   *   - 消息 text 与 contextHistory 始终保留括号原文 → AI 下一轮仍会写括号描写
-   *   - 导出(zip 数据 / 聊天截图)拿到的都是原文;截图里则按居中样式渲染
-   *   - 随时开关都安全:历史消息会跟着重新排版,不会丢字符
+   * ⚠️ 纯渲染层开关，**不改任何落库数据**：text 与 contextHistory 始终保留括号原文，
+   * 否则 AI 下一轮就不写描写了。随时开关都安全，历史消息会跟着重排。
    */
   const bracketCenter = ref<boolean>(localStorage.getItem(BRACKET_CENTER_KEY) === '1')
 
@@ -514,20 +417,13 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：彩色括号描写（全局,持久化,默认关闭） ----------------------
+  // ---- 实验性：彩色括号描写（默认关闭）----
   const BRACKET_COLOR_KEY = `${STORAGE_PREFIX}-bracket-color`
   /**
-   * 是否启用「彩色括号描写」（**默认关闭**）
+   * 居中行按说话人的作战属性取色（见 constants/character 的 ATTRIBUTE_COLORS）。
    *
-   * 开启:居中行的文字按**说话人的作战属性**取色(见 constants/character 的
-   *      ATTRIBUTE_COLORS),不再统一用半透明白。
-   * 关闭(默认):所有居中行都用统一的居中文本颜色(CENTER_ACTION_COLOR)。
-   *
-   * ⚠️ 依赖「括号描写居中」:那条开关决定"有没有居中行",本开关只决定"居中行什么颜色"。
-   *    因此设置界面里本项在 bracketCenter 关闭时置灰,渲染层也按
-   *    `bracketCenter && bracketColor` 双重判定(见 useChatRows)。
-   *
-   * 同样是纯渲染层开关:不改任何落库数据,随时开关都安全。
+   * ⚠️ 依赖「括号描写居中」：那条决定有没有居中行，本条只决定什么颜色。
+   * 渲染层按 `bracketCenter && bracketColor` 双重判定，设置界面同理置灰。
    */
   const bracketColor = ref<boolean>(localStorage.getItem(BRACKET_COLOR_KEY) === '1')
 
@@ -539,20 +435,11 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：居中我方括号内容（全局,持久化,默认关闭） ------------------
+  // ---- 实验性：居中我方括号内容（默认关闭）----
   const CENTER_MY_BRACKET_KEY = `${STORAGE_PREFIX}-center-my-bracket`
   /**
-   * 是否启用「居中我方括号内容」（**默认关闭**）
-   *
-   * 开启:我发出的消息里**最前面**那一对 `()` `（）` 也抽出来渲染成居中文本,
-   *      剩下的正文照常是我方气泡;后面再出现的括号不动(玩家自己打的字
-   *      只按"开头那段旁白"处理,不把整条消息拆散)。
-   * 关闭(默认):我方消息整条一个气泡,与旧版行为一致。
-   *
-   * 颜色:与居中行同一套规则 —— 开启「彩色括号描写」时按身份属性取色
-   *      (单人对话 = 管理员;群聊里扮演某角色 = 该角色),关闭时用统一色。
-   *
-   * 纯渲染层开关:发送出去的文本原样落库(含括号),AI 看到的仍是原文。
+   * 我方消息里的括号也抽成居中行，**不分位置**：开头的旁白、句中插入的动作、句尾补的
+   * 神态一律抽出，只剩台词留在气泡里。纯渲染层开关，落库文本仍含括号原文。
    */
   const centerMyBracket = ref<boolean>(localStorage.getItem(CENTER_MY_BRACKET_KEY) === '1')
 
@@ -564,23 +451,11 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 实验性功能：新版输入面板（全局,持久化,默认关闭） ----------------------
+  // ---- 实验性：新版输入面板（默认关闭）----
   const NEW_INPUT_PANEL_KEY = `${STORAGE_PREFIX}-new-input-panel`
   /**
-   * 是否启用「新版输入面板」（**默认关闭**）
-   *
-   * 只控制移动端底部面板是否分两行:
-   *     第一行 = 输入框 + 发送按钮(占满宽度)
-   *     第二行 = 其余按钮(图片 / 表情 / 推荐 / 群聊暂停恢复),左右铺开、等距分布
-   * 关闭(默认):移动端面板仍是一行;桌面端本来就是单行,不受影响。
-   *
-   * 【已移出本开关】群聊的「开启 / 暂停 / 恢复对话」原先是本开关的一部分
-   * (开了才从聊天区胶囊挪进面板),现在那颗按钮的新样式已直接替换旧的 ——
-   * 无论本开关如何都渲染在面板里,聊天区不再有暂停胶囊。
-   *
-   * 与 apiMode 无关:纯本地界面布局,三种模式与群聊都走同一套面板。
-   * 移动端面板更高,该高度由几何层统一给出(见 chatGeometry.mobileGeometry),
-   * 否则消息区会与面板重叠。
+   * 只控制移动端底部面板是否分两行（输入框 + 发送占一行，其余按钮铺第二行）。
+   * 桌面本来单行，不受影响；面板变高后由 chatGeometry 统一给出高度，否则会盖住消息。
    */
   const newInputPanel = ref<boolean>(localStorage.getItem(NEW_INPUT_PANEL_KEY) === '1')
 
@@ -592,9 +467,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 旧版模式：不限制历史条数（全局,持久化） ------------------------------
+  // ---- 旧版模式：不限制历史条数 ----
   const LEGACY_UNLIMITED_KEY = `${STORAGE_PREFIX}-legacy-unlimited`
-  /** 开启后旧版模式不截断历史、不触发智能总结,与旧版项目行为一致 */
+  /** 开启后旧版模式不截断历史、不触发智能总结，与旧版项目行为一致 */
   const legacyUnlimitedHistory = ref<boolean>(localStorage.getItem(LEGACY_UNLIMITED_KEY) === '1')
 
   watch(legacyUnlimitedHistory, (val) => {
@@ -608,38 +483,28 @@ export const useSettingsStore = defineStore('settings', () => {
   // ---- 实验性功能：智能总结（全局,持久化） ----------------------------------
   const SUMMARY_KEY = `${STORAGE_PREFIX}-summary`
 
-  /** 智能总结模式:'default'=使用内置 Agnes API / 'custom'=用户自填 */
+  /** 智能总结模式：'default' 用内置 Agnes，'custom' 用用户自填 */
   type SummaryApiMode = 'default' | 'custom'
 
   interface SummaryConfig {
-    /** 是否开启智能总结 */
     enabled: boolean
-    /** API 模式 */
     apiMode: SummaryApiMode
-    /** 自定义 API Base URL(默认模式为空) */
+    /** 自定义模式才用；默认模式为空 */
     baseUrl: string
-    /** 自定义 API Key(默认模式为空;不在日志打印明文) */
+    /** 不在日志打印明文 */
     apiKey: string
-    /** 自定义模型名(默认模式为空) */
     model: string
     /**
-     * 上下文总长（token），2026-09-30 新增
+     * 上下文总长（token），默认 Agnes 2.5 Flash 的 512K
      *
-     * 智能总结开启时，前端用
-     *   「固定提示词长度 + 累计输出 token」
-     * 与 `contextWindow × 80%` 比较，达到就总结掉 80% 以外的历史，
-     * 剩下 20% 留给 RAG 语料库（长度不固定）。
-     *
-     * 缺省 = Agnes 2.5 Flash 的官方上下文窗口 512K
-     * （https://wiki.agnes-ai.com/en/docs/agnes-25-flash.md）。
+     * 用「固定提示词长度 + 累计输出 token」与 `contextWindow × 80%` 比较，
+     * 达到就总结掉 80% 以外的历史，剩下 20% 留给长度不固定的 RAG 语料。
      */
     contextWindow: number
   }
 
   const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
-    // 默认**开启**（正式版要求）。
-    // readJSON 是「存储值覆盖默认值」的合并语义：
-    //   没存过 → 用这里的 true；存过（含显式关闭的 false）→ 以用户设置为准。
+    // readJSON 是「存储值覆盖默认值」的合并语义：没存过用 true，存过（含 false）以用户为准
     enabled: true,
     apiMode: 'default',
     baseUrl: '',
@@ -671,16 +536,11 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   /**
-   * 获取智能总结实际使用的 API 配置
+   * 智能总结实际使用的 API 配置
    *
-   * 【2026-10-04 审计修复】custom 模式下**禁止**再请求后端 key 接口:
-   *   - summaryConfig.apiMode === 'custom' → 用智能总结自己的配置(原行为);
-   *   - summaryConfig.apiMode === 'default' 且 apiConfig.apiMode === 'custom'
-   *     → 改用**用户自己的自定义 API**(此前会 fetchLegacyApiKey() 打
-   *       /api/legacy-key,违反"custom 模式不碰后端");
-   *       用户没填自定义 API 时返回空配置,由 requestSummary 抛错、
-   *       调用方降级(智能总结/上下文压缩失败不阻断聊天);
-   *   - 其余(backend / legacy)→ 沿用内置 Agnes API + 后端 key(原行为)。
+   * summaryConfig 选了 custom 就用它自己的；否则若主 API 是 custom，就复用用户的
+   * 自定义 API —— **custom 模式不能再去打后端 key 接口**；其余情况走内置 Agnes +
+   * 后端下发的 key。用户没填自定义 API 时返回空配置，由调用方降级。
    */
   async function getSummaryApi(): Promise<{ baseUrl: string; apiKey: string; model: string }> {
     if (summaryConfig.value.apiMode === 'custom') {
@@ -754,21 +614,15 @@ export const useSettingsStore = defineStore('settings', () => {
     noticeDismissed.value = false
   }
 
-  /**
-   * 获取固定系统提示词(仅 custom / legacy 模式使用;后端模式无视所有提示词)
-   *
-   * 两套文本由 pickSystemPrompt() 按当前 apiMode 选择:
-   * 自定义模式用精简版,旧版模式与默认模式回退用完整版。
-   */
+  /** 固定系统提示词；后端模式无视所有提示词 */
   function getFullSystemPrompt(): string {
     return pickSystemPrompt(apiConfig.value.apiMode)
   }
 
   /**
-   * 获取拼上世界观后的系统提示词(非后端模式发送的第一条 system 消息)
+   * 拼上世界观后的 system 消息
    *
-   * 收敛于此:useAiChat 构建请求与用量面板统计"固定前缀体积"必须用同一份文本,
-   * 否则面板显示的上下文占用会与实际发送内容不一致。
+   * 必须与用量面板统计「固定前缀体积」时用同一份文本，否则占用率与实际不符。
    */
   function getSystemMessage(): string {
     const wv = worldView.value.trim()
@@ -777,22 +631,17 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   /**
-   * 获取角色提示词(非后端模式发送的第二条 system 消息)
+   * 角色提示词（非后端模式的第二条 system 消息）
    *
-   * 【2026-10-04 沉浸式修复】沉浸式语义在此落实(单聊 custom / legacy 直连):
-   *   - immersiveMode=true  → 截掉强制要求括号描写的「### 回复风格规则」段,
-   *                            并追加"最高优先级禁止括号/星号动作描写"规则;
-   *   - immersiveMode=false → 保持原有行为(末尾追加 EMPHASIS_RULE)。
-   * 后端模式不读这条消息(提示词在服务端,由后端做同样的处理),
-   * 因此本改动只影响走 llm.ts 直连的两种模式。
+   * 沉浸式语义在这里落实：开启时截掉「### 回复风格规则」并追加禁止括号描写的规则。
+   * 后端模式不读这条（提示词在服务端），所以只影响 llm.ts 直连的两种模式。
    */
   function getCharacterMessage(name: string): string {
     return applyImmersiveToCharacterPrompt(getCharacterPrompt(name), immersiveMode.value)
   }
 
-  // ---- 首次公告"不再提醒"标记(localStorage 持久化 + data.json 双写) ---------
+  // ---- 首次公告「不再提醒」----
   const NOTICE_DISMISS_KEY = `${STORAGE_PREFIX}-notice-dismissed`
-  /** 用户是否已选择"不再提醒"(true 后不再弹出公告) */
   const noticeDismissed = ref<boolean>(localStorage.getItem(NOTICE_DISMISS_KEY) === '1')
 
   watch(noticeDismissed, (val) => {
@@ -803,11 +652,47 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   })
 
-  // ---- 设置快照(data.json 同步 + 导出/导入 zip 用) -------------------------
+  // ---- 自定义背景（只存本机，不进设置快照 → 导出/导入都不带它）----
+  const CUSTOM_BG_KEY = `${STORAGE_PREFIX}-custom-bg`
+
+  /** 读回上次的背景；只认 data:image/，别的值一律当没设置过 */
+  function readCustomBg(): string {
+    try {
+      const v = localStorage.getItem(CUSTOM_BG_KEY) ?? ''
+      return v.startsWith('data:image/') ? v : ''
+    } catch {
+      return ''
+    }
+  }
+
+  const customBg = ref<string>(readCustomBg())
+
   /**
-   * 收集全部用户设置为一键可序列化的快照对象。
-   * 用于: 写入本地 data.json / 导出 zip 的 project.json / 导入时恢复。
+   * 设置 / 清除自定义背景
+   *
+   * 直接写 localStorage 而不是用 watch：写失败（配额满）必须立刻告诉调用方，
+   * 否则界面显示"已更换"、刷新后却打回默认。
+   *
+   * @returns false = 浏览器存不下（或写失败），调用方据此提示用户
    */
+  function setCustomBg(dataUrl: string): boolean {
+    try {
+      if (dataUrl) localStorage.setItem(CUSTOM_BG_KEY, dataUrl)
+      else localStorage.removeItem(CUSTOM_BG_KEY)
+    } catch {
+      return false
+    }
+    customBg.value = dataUrl
+    return true
+  }
+
+  /** 恢复默认背景 */
+  function resetCustomBg(): void {
+    void setCustomBg('')
+  }
+
+  // ---- 设置快照（data.json 同步 + 导出 zip）----
+  /** 全部用户设置的可序列化快照：写 data.json / 导出 project.json / 导入时恢复 */
   function getSettingsSnapshot(): Record<string, unknown> {
     return {
       apiConfig: { ...apiConfig.value },
@@ -820,26 +705,18 @@ export const useSettingsStore = defineStore('settings', () => {
       useNewPrompt: useNewPrompt.value,
       smartSplit: smartSplit.value,
       bracketCenter: bracketCenter.value,
-      // 实验性:彩色括号描写(居中行按说话人属性上色;依赖 bracketCenter)
       bracketColor: bracketColor.value,
-      // 实验性:居中我方括号内容(我方消息开头那对括号也居中)
       centerMyBracket: centerMyBracket.value,
       newInputPanel: newInputPanel.value,
-      // 实验性:AI 推荐回复(默认开启;单聊/群聊一体)
       choicesEnabled: choicesEnabled.value,
-      // 实验性:SSE 流式回复(默认关闭)
       sseStreaming: sseStreaming.value,
       summaryConfig: { ...summaryConfig.value },
       noticeDismissed: noticeDismissed.value,
-      // 角色形象开关(管理员男/女那张):跟着设置一起落盘
       avatarAltOn: { ...avatarAltOn.value },
     }
   }
 
-  /**
-   * 从快照恢复设置(导入 zip / 加载 data.json 时调用)。
-   * 仅覆盖快照中存在的字段,缺失项保留当前值。
-   */
+  /** 从快照恢复设置：只覆盖快照里存在的字段，缺失项保留当前值 */
   function applySettingsSnapshot(snapshot: Record<string, unknown> | null | undefined) {
     if (!snapshot || typeof snapshot !== 'object') return
     const s = snapshot as Record<string, unknown>
@@ -857,6 +734,9 @@ export const useSettingsStore = defineStore('settings', () => {
     if (typeof s.useNewPrompt === 'boolean') useNewPrompt.value = s.useNewPrompt
     if (typeof s.smartSplit === 'boolean') smartSplit.value = s.smartSplit
     if (typeof s.bracketCenter === 'boolean') bracketCenter.value = s.bracketCenter
+    // 这两项原先只导出不导入 —— 恢复备份后设置会悄悄回到默认值
+    if (typeof s.bracketColor === 'boolean') bracketColor.value = s.bracketColor
+    if (typeof s.centerMyBracket === 'boolean') centerMyBracket.value = s.centerMyBracket
     if (typeof s.newInputPanel === 'boolean') newInputPanel.value = s.newInputPanel
     if (typeof s.choicesEnabled === 'boolean') choicesEnabled.value = s.choicesEnabled
     if (typeof s.sseStreaming === 'boolean') sseStreaming.value = s.sseStreaming
@@ -884,25 +764,24 @@ export const useSettingsStore = defineStore('settings', () => {
     ragEnabled,
     ragTopK,
     immersiveMode,
-    // 后端路线(默认 api-test / 备用 api2-test)
     apiRoute,
     setApiRoute,
     choicesEnabled,
-    // 实验性:SSE 流式回复(默认关闭)
     sseStreaming,
     useNewPrompt,
     smartSplit,
     bracketCenter,
-    // 实验性:彩色括号描写(居中行按说话人属性上色)
     bracketColor,
-    // 实验性:居中我方括号内容(我方消息开头那对括号也居中)
     centerMyBracket,
     newInputPanel,
     legacyUnlimitedHistory,
     summaryConfig,
     noticeDismissed,
-    // 角色形象开关(管理员两张形象)
     avatarAltOn,
+    // 自定义背景：只存本机，不参与设置快照（导出/导入都不带）
+    customBg,
+    setCustomBg,
+    resetCustomBg,
     isAvatarAltOn,
     toggleAvatarAlt,
     // methods

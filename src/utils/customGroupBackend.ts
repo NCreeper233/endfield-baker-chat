@@ -1,36 +1,7 @@
-// =============================================================================
-// customGroupBackend —— 自定义 API 模式下的"前端本地群聊链路"
-// -----------------------------------------------------------------------------
-// 背景(问题):
-//   群聊此前**无论什么模式**都打后端群聊服务(/group/*),因此在
-//   apiMode === 'custom'(用户自填 Base URL / Key / 模型)时群聊直接不可用 ——
-//   用户明明选了自定义 API,群聊却还在请求后端。
-//
-// 本模块做的事:
-//   把后端 group_chat_service.py 的**调度语义**搬到前端,并让所有模型调用
-//   直连用户自己的 OpenAI 兼容 API(customApi.ts)。导出的函数与
-//   utils/groupBackend.ts **同名同签名**,由 utils/groupTransport.ts 按 apiMode
-//   二选一 —— useGroupChat 的回合/循环/打断逻辑一行都不用改。
-//
-// 与后端对齐的部分(逐条对照 group_chat_service.py):
-//   - create_session : members 去重校验(≥2)、speak_mode / my_role / assign_target
-//                      校验,身份与发言模式在创建时确定;
-//   - judge_next_speaker : 智能模式判断下一位发言人(严格 JSON,含 END / 降级轮转);
-//   - generate_reply : 组装"世界观 + 角色提示词 + 群聊规则 + 历史 + 话题"后生成,
-//                      并把群里其他人的发言铺成 user 侧、自己的历史发言铺成 assistant 侧;
-//   - 三种发言模式     : round 每人一条 / assign 指定一条 / smart 判断后一条
-//                      (smart 恒 done=false,由前端循环请求 = "持续进行");
-//   - suggestions    : 玩家点开推荐面板时按需生成(旁观身份不生成);
-//   - 会话生命周期     : 300s 空闲回收 → 返回 session_expired,前端会自动重建。
-//
-// ⚠ 明确降级(纯前端没有的能力,注释写清原因,绝不偷偷打后端):
-//   1. 联网搜索 / RAG 语料库:知识源前置(do_prepare)只在后端存在,
-//      前端没有检索服务 → 第三段"实时情报"整段省略,判断给出的 search 字段忽略;
-//   2. 角色关系表:关系数据在后端本机文件 /home/y/下载/全角色关系表.md 中,
-//      前端没有该数据源 → 第四段省略,群聊规则里只保留"遵照关系设定"的原则性要求;
-//   3. 沉浸式:不受影响 —— 提示词层 + 文本层都在本地落实(见 utils/immersive.ts),
-//      这正是"没有后端兜底"时更需要前端自己做的那一层。
-// =============================================================================
+// customGroupBackend —— 自定义 API 模式下的前端本地群聊链路
+// 把后端 group_chat_service 的调度语义搬到前端，模型调用直连用户的 OpenAI 兼容端点；
+// 导出函数与 utils/groupBackend 同名同签名，由 groupTransport 按 apiMode 二选一。
+// ⚠️ 纯前端没有知识源与角色关系表，联网/RAG 与关系段整段省略，绝不偷偷打后端。
 
 import { useSettingsStore } from '../stores/settings'
 import { customChatCompletion, parseSuggestionList } from './customApi'
@@ -49,7 +20,7 @@ import type {
   PostResult,
 } from './groupBackend'
 
-// ---- 常量(与后端 group_chat_service.py 对齐) --------------------------------
+// 常量（与后端 group_chat_service 对齐）
 
 /** 会话空闲超时(ms):与后端 SESSION_TTL=300s 一致,超时按"会话已过期"处理 */
 const SESSION_TTL_MS = 300_000
@@ -61,20 +32,12 @@ const MAX_TURNS = 60
 const HISTORY_LIMIT = 50
 
 /**
- * 历史裁剪的"块大小"
- *
- * 直接 `slice(-HISTORY_LIMIT)` 会让窗口每轮往前滑一条,前缀每轮都变 →
- * 服务商的前缀缓存**永远不命中**。这里改成:超出上限时一次丢掉一整块
- * (向上取整到块大小),窗口在接下来的 8 轮里保持完全一致,缓存能吃满。
+ * 直接 slice(-HISTORY_LIMIT) 会让窗口每轮滑一条、前缀每轮都变，服务商的前缀缓存
+ * 永远不命中。这里超额时一次丢掉一整块，窗口能在接下来的 8 轮里保持一致。
  */
 const HISTORY_TRIM_CHUNK = 8
 
-/**
- * 计算本轮历史的起始下标(从尾部往前保留,最多 HISTORY_LIMIT 条)
- *
- * 超额部分向上取整到块大小的倍数:例如上限 50、历史 51 条 → 从第 8 条起,
- * 保留 43 条;到 59 条仍是同一个起点;到 60 条才再跳 8 条。
- */
+/** 超额部分向上取整到块大小：上限 50、历史 51 条 → 从第 8 条起保留 43 条 */
 function windowStart(total: number): number {
   if (total <= HISTORY_LIMIT) return 0
   const excess = total - HISTORY_LIMIT
@@ -145,14 +108,8 @@ const SUGGEST_SYSTEM = `你在一个多人聊天群里帮玩家想"接下来可�
 ["候选1", "候选2", "候选3"]
 `
 
-// =============================================================================
-// 本地会话状态(模块级单例 Map)
-// -----------------------------------------------------------------------------
-// 后端把"调度状态"存在 SQLite 里;前端没有服务端,就存在这个模块级 Map 中。
-// 页面刷新 / 应用重启后 Map 为空 → 卡片上的旧 session_id 查不到,
-// requestGroupReply 返回 sessionExpired=true,useGroupChat 会自动重建一次
-// (与后端 300s 空闲回收后的自愈路径完全同一条)。
-// =============================================================================
+// 本地会话状态：后端存在 SQLite，前端存在这个模块级 Map 里。刷新或重启后 Map 为空，
+// 旧 session_id 查不到 → 返回 sessionExpired，useGroupChat 会自动重建。
 
 interface LocalGroupSession {
   sessionId: string
@@ -252,21 +209,11 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-// =============================================================================
-// 提示词组装(对应后端五段提示词)
-// =============================================================================
+// 提示词组装（对应后端五段提示词）
 
 /**
- * 群聊 system 提示词
- *
- * 后端顺序:1 世界观 / 2 角色提示词(单独一条 system) / 3 搜索情报 /
- *           4 角色关系 / 5 玩家新话题,另加"群聊行为规则"。
- * 前端 custom 链路:
- *   - 第 1 段用 settingsStore.getSystemMessage()(固定世界观提示 + 用户世界观背景),
- *     与单聊 custom 链路同源;
- *   - 第 3、4 段没有数据源 → 整段省略(见文件头"明确降级");
- *   - 第 2 段单独成一条 system(见 generateReply 的 messages 组装);
- *   - 第 5 段与群聊规则照后端文本组装。
+ * 后端顺序：世界观 / 角色提示词（单独一条 system）/ 搜索情报 / 角色关系 / 话题。
+ * 前端第 3、4 段没有数据源，整段省略（见文件头）；第 1 段与单聊 custom 链路同源。
  */
 function buildGroupSystemPrompt(s: LocalGroupSession): string {
   const store = useSettingsStore()
@@ -299,11 +246,8 @@ function buildGroupSystemPrompt(s: LocalGroupSession): string {
 }
 
 /**
- * 本轮发言的"临时简报":谁在说话 + 玩家刚抛出的话题 + 催促语
- *
- * 全是**每轮都会变**的内容,所以放在本轮最后一条 user 的**前面**
- * (与 RAG 语料同一位置),让前面的固定前缀(世界观 + 群规则 + 角色提示词 +
- * 历史)保持完全一致 —— 换人发言也能命中前缀缓存。
+ * 每轮都会变的内容，故放在本轮最后一条 user 之前（与 RAG 语料同一位置），
+ * 让前面的固定前缀保持一致 —— 换人发言也能命中前缀缓存。
  */
 function buildSpeakerBriefing(speaker: string, topic: string, nudge: string): string {
   const parts = [`【本轮发言】你正在扮演「${speaker}」,只输出这一个角色的发言。`]
@@ -324,11 +268,8 @@ interface GeneratedReply {
 }
 
 /**
- * 让 speaker 说一条(对应后端 generate_reply)
- *
- * - 组装 worldview + 群聊规则 + 角色提示词(沉浸式已处理) + 历史 + 话题 + 收尾指令;
- * - 历史两轨:自己的历史发言 = assistant,其余(含玩家与其他角色)= user 并带"某某:";
- * - 去掉模型偶尔自带的前缀,沉浸式开启时再过一遍文本层过滤。
+ * 历史两轨：自己的发言 = assistant，其余（含玩家与其他角色）= user 并带「某某:」前缀；
+ * 沉浸式开启时再过一遍文本层过滤。
  */
 async function generateReply(
   s: LocalGroupSession,
@@ -347,13 +288,8 @@ async function generateReply(
   const system = buildGroupSystemPrompt(s)
   const messages: CustomChatMessage[] = [{ role: 'system', content: system }]
 
-  // 第 2 段:角色提示词
-  // 沉浸式以**本次请求的 opts.immersive** 为准(与后端 ReplyRequest.immersive_mode
-  // 同口径):截掉强制括号的「### 回复风格规则」并追加禁止规则,或保留原风格。
-  // 刻意不用 settingsStore.getCharacterMessage():那条消息读的是 store 全局开关,
-  // 而这里要跟随请求参数,避免"提示词层用 A、文本层用 B"的分叉。
-  // 长度策略：角色卡里若带 {LENGTH_TARGET} 占位符，必须在这里按角色填掉，
-  // 否则发给模型的是字面量（fillLengthTarget 无占位符时原样返回，可无条件调用）。
+  // 沉浸式以本次请求的 opts 为准，不读全局开关，避免提示词层与文本层分叉
+  // 长度策略：角色卡里的 {LENGTH_TARGET} 必须在这里按角色填掉
   const character = applyLengthPolicy(
     applyImmersiveToCharacterPrompt(store.getCharacterPrompt(speaker), opts.immersive), speaker)
   if (character) messages.push({ role: 'system', content: character })
@@ -580,9 +516,7 @@ async function generateSuggestions(
   return out.slice(0, SUGGESTION_COUNT)
 }
 
-// =============================================================================
-// 对外接口(与 utils/groupBackend.ts 同名同签名)
-// =============================================================================
+// 对外接口（与 utils/groupBackend 同名同签名）
 
 /** 创建群聊会话(身份与发言模式在这一刻确定,之后不可切换) */
 export async function createGroupSession(
@@ -647,11 +581,8 @@ export async function createGroupSession(
 }
 
 /**
- * 取"下一步"回复(与后端 /group/reply 同语义)
- *
- * - round : 一次返回全部 AI 成员各一条,done=true
- * - assign: 只返回指定角色一条,done=true
- * - smart : 只返回一条,done=false(前端循环请求 = 持续进行)
+ * round 一次返回 AI 成员各一条（done=true）；assign 只返回指定角色（done=true）；
+ * smart 只返回一条且 done=false，由前端循环请求实现「持续进行」。
  */
 export async function requestGroupReply(
   sessionId: string,
@@ -712,7 +643,7 @@ export async function requestGroupReply(
     } else if (s.speakMode === 'round') {
       // ---- 轮流模式:所有【由 AI 接管】的成员按顺序各回一条 ----
       // 逐成员独立容错:单个成员失败只跳过该成员,其余照常返回
-      // (对应后端 2026-09-30 的 round 修复)。
+      // (与后端 round 模式的容错口径一致)。
       let acc = history
       for (const name of aiMembers(s)) {
         if (signal?.aborted) return fail('aborted')

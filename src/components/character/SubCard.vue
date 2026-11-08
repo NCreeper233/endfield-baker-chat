@@ -1,15 +1,6 @@
 <script setup lang="ts">
-// =============================================================================
-// 子卡(可选中,选中后切换当前对话)
-// -----------------------------------------------------------------------------
-// 职责:
-// 1. 渲染子卡视觉(rect/texture/faint/icon-box/icon/arrow/text/deco/line)
-// 2. 选中态联动:rect::after 黄层 scaleX + texture/icon-box 透明 + icon 暗化 +
-//    text 变色 + deco 显示 + arrow 显示
-// 3. click:调用 store.selectSub(subIndex)
-//
-// 单文件渲染,由 CharacterCardItem 传入 subIndex/isSecond/isHover。
-// =============================================================================
+// SubCard —— 子卡（点击切换当前对话）
+// 选中态联动：黄层 scaleX、纹理与图标框透明、图标暗化、文字变色、装饰与箭头显示。
 import { computed, inject } from 'vue'
 import { useChatStore } from '../../stores/chat'
 import { MATERIALS } from '../../constants/materials'
@@ -33,15 +24,8 @@ const props = defineProps<{
 const enterMobileChat = inject<(() => void) | null>('enterMobileChat', null)
 
 /**
- * 点按:移动端**单击即进入对话**(并同时选中它)
- *
- * 以前是"单击选中、双击进入",双击在列表里既慢又容易点空(尤其 iOS 上
- * 两次点按还会被系统当作缩放手势);既然单击已经明确了"我要跟这个角色聊",
- * 再要求点第二次没有意义。桌面端没有"进入聊天视图"这回事 ——
- * enterMobileChat 内部判 isMobile,桌面上是空操作,单击只选中。
- *
- * 删除模式下点击的含义变成"勾选 / 取消勾选"(不切会话、也不进聊天视图),
- * 否则无法多选:点一下就把选中态挪走了,底部条上的"已选"跟列表对不上。
+ * 移动端单击即进入对话（双击在列表里既慢又容易点空）；桌面端 enterMobileChat 内判
+ * isMobile，是空操作。删除模式下点击改为勾选，否则无法多选。
  */
 function onTap(): void {
   if (chatStore.deleteMode) {
@@ -136,6 +120,9 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
   top: 100.86px;
   width: 0;
   height: 0;
+  // top 由父组件通过 :style 传入；带过渡，最近活跃的子卡换到最前时整列会滑过去
+  // （与主卡 .card-unit 的 0.3s 一致）。挂载时不会播：首帧没有上一个 top 值。
+  transition: top 0.3s ease;
   // hover 白层(与主卡共用 hover-overlay mixin)
   @include hover-overlay(435.53px, 68.95px, 4.12px);
 

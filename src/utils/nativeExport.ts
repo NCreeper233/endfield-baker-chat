@@ -1,26 +1,7 @@
-// =============================================================================
-// 大数据量导出：分块写入 + 逐块校验（nativeExport.ts）
-// -----------------------------------------------------------------------------
-// 为什么需要它：
-//   工程数据大的时候（30MB+，主要是内联图片），旧的导出流程会把整包内容拼成
-//   一个超长 base64 字符串、一次跨 JS→Java 桥交给原生层保存。手机 WebView
-//   的内存顶不住这种峰值 → **导出时闪退**（JSON 和 ZIP 都一样，因为都要先
-//   在内存里把整包造出来）。
-//
-// 现在的做法：
-//   1. 内容**按块生成**（JSON 逐张卡拼、ZIP 用 JSZip 的流式生成），
-//      任意时刻内存里只有一块（默认 512KB）；
-//   2. 每块算出 SHA-256 一起交给原生插件，原生侧先校验再落盘；
-//   3. 全部写完让原生侧**把文件重新读一遍**，按同样的分块边界再算一次哈希
-//      和前端清单比对 —— 这就是"导出后一定要检查一遍"。
-//
-// 平台：
-//   · Android(APK)：走本文件（原生 SaveFile 插件）
-//   · 浏览器 / Electron：没有该插件 → hasChunkedWriter() 返回 false，
-//     调用方回退原有下载逻辑
-// =============================================================================
+// nativeExport —— 大数据量导出：按块（默认 512KB）生成，每块带 SHA-256 交原生校验后落盘，
+// 写完再整文件回读比对。非 Android 无此插件，调用方回退普通下载。
 
-import { Capacitor, registerPlugin } from '@capacitor/core'
+import { registerPlugin } from '@capacitor/core'
 import { isNative, isAndroid } from './platform'
 import { Directory, Filesystem } from '@capacitor/filesystem'
 
@@ -73,27 +54,15 @@ interface SaveFilePluginLike {
 }
 
 /**
- * 原生 SaveFile 插件（静态注册）
- *
- * ⚠ 这里**故意不用** `await import('@capacitor/core')`：
- *   动态 import 在没有网络/资源缺失时可能永远不 settle，表现就是
- *   「一直卡在数据准备中」——2026-09-29 实测确认过这个卡死点，改成静态导入后
- *   插件对象在模块加载时就绪，不存在等待。
+ * 全工程唯一被验证可用的 SaveFile 连接点（zipExport 也复用它）。
+ * ⚠️ 用静态注册而非 `await import()`：动态 import 在资源缺失时可能永不 settle，
+ * 界面就会一直卡在「正在准备数据中」。
  */
-// 本句柄是全工程**唯一被验证可用**的 SaveFile 连接点（分块写入 beginWrite/appendWrite
-// 就是经它调通的）。zipExport.getNativeSaveFile() 也复用它，避免"二次注册拿到空代理"。
 export const SaveFilePlugin = registerPlugin<SaveFilePluginLike>('SaveFile')
 
 /**
- * 是否处于**真正的**原生平台（android / ios）
- *
- * ⚠️ 为什么不用 `isNativePlatform()`：Capacitor 的 `registerPlugin()` 返回万能代理 ——
- * 对任何属性都返回函数，只有**调用时**才抛
- * `"SaveFile" plugin is not implemented on web`。
- * 因此 `typeof plugin.saveFile === 'function'` 在浏览器里也成立，
- * 会让流程误判"原生保存可用"，最终把这个插件异常报给用户（网页版导出的实际 bug）。
- *
- * 这里用 `getPlatform()` 明确排除 web：只有 android / ios 才走原生分支。
+ * ⚠️ 不能用 typeof plugin.saveFile 试探：registerPlugin 返回万能代理，任何属性都是函数，
+ * 只在调用时才抛 "not implemented on web"，试探法会让网页版误判为原生可用。
  */
 function isCapacitorNative(): boolean {
   // 统一走 utils/platform（内部用 getPlatform()，只有 android/ios 才算原生）
@@ -126,22 +95,10 @@ const FINISH_TIMEOUT_MS = 180_000
 const PROBE_TIMEOUT_MS = 4_000
 
 /**
- * 导出链路的"硬超时"护栏（2026-09-30）
- *
- * 为什么必须每一步都包：安卓 WebView 上 JSZip 压缩 + base64 拼接 + 原生 SAF 保存
- * 这三步都可能长时间不返回（大工程、桥不应答）。只要有一处永久挂起，界面就会
- * 停在「正在准备数据…」且**没有任何报错** —— 这正是用户实际遇到的现象。
- * 这里保证每个 await 都有上限，超时抛可读错误 → 界面必然给出原因。
+ * 每一步 await 都必须有上限：安卓 WebView 上压缩、base64 拼接、SAF 保存都可能不返回，
+ * 一处永久挂起就会停在「正在准备数据…」且没有任何报错。
  */
-/**
- * 导出时间线（2026-09-30）：记录每一步的开始/结束，用于"卡住了到底卡在哪"。
- *
- * 用法：
- *   const tl = new ExportTimeline()
- *   tl.step('pack')            // 进入某阶段
- *   tl.done('pack')            // 该阶段完成
- *   tl.report()                // 生成人类可读的进度报告
- */
+/** 导出时间线：记录每步开始/结束，用于定位「卡住了到底卡在哪」 */
 export class ExportTimeline {
   private t0 = Date.now()
   private marks: string[] = []
@@ -183,42 +140,6 @@ export class ExportTimeline {
   }
 }
 
-/**
- * **按钮级强制超时**（2026-09-30 用户要求）
- *
- * 点按钮即开始计时；到点无论内部在等什么，都抛出一个带上**完整时间线**的错误。
- * 这样界面必然显示"卡在哪一步、已经走完哪些步骤"，而不是无限"正在准备数据…"。
- */
-function withForceTimeout<T>(
-  p: Promise<T>,
-  ms: number,
-  tl: ExportTimeline,
-  what: string,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(
-        `${what}超过强制上限 ${(ms / 1000).toFixed(0)} 秒仍未完成。${tl.report()}`))
-    }, ms)
-    p.then(
-      (v) => { clearTimeout(timer); resolve(v) },
-      (e) => { clearTimeout(timer); reject(e) },
-    )
-  })
-}
-
-function withHardTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${what} 超时（${Math.round(ms / 1000)} 秒无响应）`))
-    }, ms)
-    p.then(
-      (v) => { clearTimeout(timer); resolve(v) },
-      (e) => { clearTimeout(timer); reject(e) },
-    )
-  })
-}
-
 /** 给任意 Promise 加超时（超时抛带说明的错误，而不是永远挂着） */
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -239,12 +160,8 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 /**
- * 探测原生插件能力（结果缓存）
- *
- * 为什么不能只看 typeof beginWrite === 'function'：
- *   Capacitor 的插件代理对任何属性都返回函数，插件其实没注册时也会"看起来有"，
- *   这时候发出去的调用永远不会有人应答 —— 表现就是界面一直卡在"准备中"。
- *   所以这里真的调一次 pluginInfo 并加超时，拿到原生侧回话才算数。
+ * 不能只看 typeof beginWrite：插件代理对任何属性都返回函数，未注册时调用永远不会有人应答。
+ * 这里真调一次 pluginInfo 并加超时，拿到原生回话才算数。
  */
 export async function probePlugin(): Promise<PluginProbe> {
   if (probePromise) return probePromise
@@ -253,11 +170,9 @@ export async function probePlugin(): Promise<PluginProbe> {
     if (!p) return { available: false, chunked: false, reason: '非原生平台或插件未挂载' }
     let declared = true
     try {
-      // 关键修复（2026-09-30）：`isPluginAvailable('SaveFile')` 只有在**本页已经调用过
-      // registerPlugin('SaveFile')** 之后才为真。冷启动后如果没有任何代码先注册它，
-      // 这里会误判成「插件未注册」，而 probe 结果还会被缓存一整个页面生命周期 ——
-      // 于是之后每一次导出都走兜底路径（在安卓 WebView 里静默失败）。
-      // 所以这里**先注册**（registerPlugin 幂等），再判定。
+      // isPluginAvailable 只在**本页调用过 registerPlugin** 之后才为真，而 probe 结果会
+      // 缓存整个页面生命周期；冷启动时不先注册，就会一直走兜底路径并静默失败。
+      // 故先注册（幂等）再判定。
       if (isCapacitorNative()) {
         const plugin = registerPlugin<SaveFilePluginLike>('SaveFile')
         declared = !!plugin && typeof (plugin as { saveFile?: unknown }).saveFile === 'function'
@@ -311,7 +226,7 @@ export async function hasLegacySave(): Promise<boolean> {
   return !!p && typeof p.saveFile === 'function'
 }
 
-// ---- 字节/编码工具 -----------------------------------------------------------
+// 字节 / 编码工具
 
 const textEncoder = new TextEncoder()
 
@@ -348,7 +263,7 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   }
 }
 
-// ---- 分块写入器 --------------------------------------------------------------
+// 分块写入器
 
 /** 一次导出的结果（JSON / ZIP 共用） */
 export interface ExportOutcome {
@@ -384,25 +299,7 @@ export interface ExportProgress {
   total: number
   /** 0~100；total 未知时为 -1 */
   percent: number
-  /**
-   * 当前阶段（2026-09-30 新增）
-   *
-   *   pack   —— 正在把卡片序列化成 ZIP/JSON（纯 JS，最耗时的一步）
-   *   begin  —— 正在让原生侧建立目标文件（安卓会弹"另存为"）
-   *   append —— 正在分块写入
-   *   finish —— 正在收尾 + 回读校验
-   *
-   * 有它之后，界面能显示"卡在哪一步"，不再是一个含糊的「正在准备数据…」。
-   */
-  /**
-   * 当前阶段（越细越好定位）：
-   *   pack      序列化+压缩（JSZip）
-   *   encode    blob → base64 过桥前的编码
-   *   getplugin 取原生保存句柄
-   *   begin     已调起原生保存（安卓=拉起文件管理器，等用户选位置）
-   *   append    分块写入中
-   *   finish    收尾/回读校验
-   */
+  /** 当前阶段，界面据此显示「卡在哪一步」 */
   stage?: 'pack' | 'encode' | 'getplugin' | 'begin' | 'append' | 'finish'
 }
 
@@ -424,25 +321,9 @@ export interface ChunkWriteSession {
 }
 
 /**
- * 开始一次分块导出
- *
- * @param fileName  文件名（JSON/ZIP 各自的名字）
- * @param mime      MIME
- * @param emergency true = 应急导出（直接写手机「下载/BAKER」，不弹选择框）
- * @param totalBytes 预计总字节（只用于算进度，可为 0）
- * @param onProgress 进度回调
+ * 兜底写入后端：官方 @capacitor/filesystem（老包或 SaveFile 注册失败时用），
+ * 顺序 Documents → Data。它没有逐块回读校验，只能核对总长，故 SaveFile 可用时优先。
  */
-// =============================================================================
-// 兜底写入后端：官方 @capacitor/filesystem
-// -----------------------------------------------------------------------------
-// 为什么要有它：SaveFile 是自研插件，万一某个安装包里没有（老包/注册失败），
-// 应急导出就彻底没救。而 @capacitor/filesystem 是官方依赖、一定在包里，
-// 所以拿它当兜底：
-//   Documents（公共文档目录，文件管理器可见）→ Data（应用私有目录）
-// 代价：这套接口没有"分块回读校验"，只能按总字节长度核对；
-//       所以**只要 SaveFile 可用就优先走它**（那条路有逐块 SHA-256 校验）。
-// =============================================================================
-
 const EMERGENCY_TEXT_SUBDIR = 'BAKER'
 
 async function beginFilesystemSession(opts: {
@@ -539,29 +420,13 @@ async function beginFilesystemSession(opts: {
   }
 }
 
-// ============================================================================
-// 统一导出保存（2026-10-04 修复「导出 0 字节空文件」）
-// ----------------------------------------------------------------------------
-// 背景：v2.2 起导出走的是「整包 base64 一次性过 Capacitor 桥」的老路。
-// 聊天记录一多（尤其带图片），base64 字符串过大时桥层会**静默丢弃/截断**，
-// 原生侧 Base64.decode 拿到空串 → 落盘就是一个 0 字节空文件
-// —— 就是用户看到的"导出数据得到一个空数据集"。
-//
-// 因此这里按体积分流：
-//   · 小文件 → 继续走 saveFile（简单、弹系统"保存到"框）
-//   · 大文件 → 走 beginWrite/appendChunk/finishWrite
-//             （分块过桥 + 逐块 SHA-256 + 收尾回读校验，桥层不可能吞掉内容）
-// 并且：内容为空直接报错（绝不生成空文件）；分块写入回读校验失败也报错，
-// 而不是当成"导出成功"糊弄过去。
-// ============================================================================
+// 统一导出保存：小文件走 saveFile（弹系统「保存到」），大文件走分块写入
+// （逐块 SHA-256 + 回读校验）。整串 base64 过桥时字符串过大会被桥层截断、落盘成
+// 0 字节空文件；内容为空或校验失败一律报错，绝不当成「导出成功」。
 
 /**
- * 整串 base64 过桥的安全上限：超过它就必须分块写入
- *
- * 2026-10-17：6MB → 2MB。
- * 原因：整串 base64 会被 Capacitor 桥序列化成一个巨大的 JSON 字符串
- * 传给 Java 层，峰值内存约为原文的 3~4 倍；鸿蒙/低端机上 6MB 就可能
- * 直接 OOM 闪退。2MB 以内仍是一次调用，体验不变，但峰值砍掉 2/3。
+ * 整串 base64 过桥的安全上限：桥层会把整串序列化成一个巨大 JSON 传给 Java，
+ * 峰值内存约原文的 3~4 倍，低端机上 6MB 就可能闪退。取 2MB，峰值砍掉 2/3。
  */
 export const BRIDGE_SAFE_BASE64 = 2 * 1024 * 1024
 /** 分块保存时的单块字节数（原生侧上限 4MB；取 256KB 降低桥层峰值） */
@@ -575,11 +440,7 @@ export function base64ToBytes(b64: string): Uint8Array {
   return out
 }
 
-/**
- * 统一保存导出文件（ZIP / JSON 共用）
- *
- * @returns via: 'legacy' = 整包过桥（小文件）; 'chunked' = 分块写入（大文件，带回读校验）
- */
+/** 统一保存导出文件（ZIP / JSON 共用）；via 区分整包过桥与分块写入 */
 export async function saveExportFileSmart(opts: {
   fileName: string
   base64: string
@@ -687,20 +548,18 @@ export async function beginExportWrite(opts: {
   }
 
   /**
-   * 应急导出：逐级换落点重试
-   *   auto（公共下载目录，失败自动往下退）→ external（应用外部目录）→ internal（私有目录）
-   * 每次都有超时：某些机型 MediaStore 一卡就是几分钟，绝不能干等。
+   * 应急导出逐级换落点：公共下载目录 → 应用外部目录 → 私有目录。
+   * 每步都有超时：某些机型 MediaStore 一卡就是几分钟。
    */
   const order: Array<'auto' | 'external' | 'internal'> = opts.emergency
     ? ['auto', 'external', 'internal']
     : ['auto']
   let handle: NativeWriteHandle | null = null
   const failures: string[] = []
-  // 2026-09-30：非应急导出原先这一档超时是 30 分钟（"用户挑目录可能很久"）。
-  // 但 Capacitor 的插件代理对**任意属性都返回函数**，当原生侧没有应答时
-  // `plugin.beginWrite(...)` 这个 Promise 永远不会 settle —— 界面就永久停在
-  // 「正在准备数据…」，这正是用户反馈的现象。这里给一个足够长（够用户选目录）、
-  // 但**有限**的上限；到点明确报错并带上原生自检信息，绝不无限等。
+  // Capacitor 的插件代理对**任意属性都返回函数**：原生侧没有应答时
+  // `plugin.beginWrite(...)` 这个 Promise 永远不会 settle，界面就永久停在
+  // 「正在准备数据…」。这里给一个足够长（够用户选目录）、但**有限**的上限；
+  // 到点明确报错并带上原生自检信息，绝不无限等。
   const PICK_LOCATION_TIMEOUT_MS = 180_000
   for (const loc of order) {
     try {
@@ -780,12 +639,7 @@ export async function beginExportWrite(opts: {
   }
 }
 
-/**
- * 文本分块打包器：攒够一块就交给会话写出去
- *
- * 逐块把文本转成 UTF-8 字节，任意时刻只有一块在内存里 ——
- * 这是"不再把 30MB 整包拼成一个字符串"的关键。
- */
+/** 攒够一块就写出：逐块转 UTF-8，任意时刻只有一块在内存里，不必把 30MB 拼成整串 */
 export class TextChunkPacker {
   private buf = ''
 
@@ -819,10 +673,8 @@ export class TextChunkPacker {
 }
 
 /**
- * 把一个（异步）字符串生成器写出去，并把生成器的 return 值原样返回
- *
- * 生成器常用 `return {过滤了几张图, 总字节}` 这类统计，for-await 会把它丢掉，
- * 所以这里手工迭代。
+ * for-await 会丢掉生成器的 return 值，而它常带「过滤了几张图 / 总字节」这类统计，
+ * 所以这里手工迭代并把返回值原样传出。
  */
 export async function packAsyncGenerator<T>(
   source: AsyncGenerator<string, T, void>,
@@ -850,12 +702,8 @@ export async function writeBlobChunks(session: ChunkWriteSession, blob: Blob): P
 }
 
 /**
- * 给写入会话套一层"看门狗"
- *
- * 作用：**任何一步卡住超过 stallMs 没进展，立刻中止并抛错**。
- * 为什么必须要有：原生/桥层某些调用会让 Promise 永远不 settle（插件没注册、
- * MediaStore 卡死等），光靠单次调用超时覆盖不全 —— 之前"一直数据准备中"
- * 就是这么来的。这里把 append 与"卡死信号"赛跑，卡住就一定有人先醒。
+ * 任何一步卡住超过 stallMs 没进展就中止并抛错：原生/桥层某些调用会让 Promise 永不
+ * settle（插件未注册、MediaStore 卡死），单次调用超时覆盖不全。
  */
 export function withWatchdog(session: ChunkWriteSession, stallMs = 30_000): ChunkWriteSession {
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -887,7 +735,7 @@ export function withWatchdog(session: ChunkWriteSession, stallMs = 30_000): Chun
     isPublic: session.isPublic,
     uri: session.uri,
     async append(bytes: Uint8Array) {
-      if (stalled) throw new Error('导出已中止（此前卡住过）')
+      if (stalled) throw new Error('导出已中止（上一步超时未应答）')
       kick()
       await Promise.race([session.append(bytes), stallPromise])
       kick()
@@ -906,24 +754,4 @@ export function withWatchdog(session: ChunkWriteSession, stallMs = 30_000): Chun
       await session.abort()
     },
   }
-}
-
-/**
- * 把已导出的文件交给系统"分享"（微信/QQ/邮件/网盘…）
- *
- * 兜底落点（应用外部/私有目录）在部分机型上文件管理器看不到，
- * 这时"分享出去"就是用户把数据拿出来的唯一办法。
- */
-async function shareExportedFile(opts: {
-  uri?: string
-  path?: string
-  mime?: string
-}): Promise<void> {
-  const plugin = await getPlugin()
-  if (!plugin?.share) throw new Error('当前版本不支持分享，请更新应用')
-  await withTimeout(
-    plugin.share({ uri: opts.uri, path: opts.path, mime: opts.mime }),
-    30_000,
-    '调起系统分享',
-  )
 }

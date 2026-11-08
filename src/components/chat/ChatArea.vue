@@ -1,27 +1,8 @@
 <script setup lang="ts">
-// =============================================================================
-// 右侧聊天区
-// -----------------------------------------------------------------------------
-// 职责:
-// 1. 渲染顶部聊天条(strip + name + detail + tint)
-// 2. 渲染滚动容器 chat-scroll(双 mask + chat-in 动画)
-// 3. 计算每条已发送消息的布局(left/top/avatarTop/showAvatar/stack)
-// 4. 末尾按需渲染 LoadingBubble(AI 回复加载占位)
-// 5. 渲染末尾装饰 + 尾部留白 + 固定底部装饰
-//
-// AI 聊天:消息流来自 store.playedMessages(当前对话全部消息)。
-//   AI 回复加载中(loading 阶段)末尾渲染 LoadingBubble,
-//   方向取 pendingAiSpeaker 的 side。
-//
-// 尺寸过渡链:
-//   加载气泡(100×单行高) → 首条 chunk → 文字气泡(prevRect=加载气泡尺寸)
-//   → 文字气泡停留 → 下一条 AI 回复的加载气泡(prevRect=上一文字气泡尺寸)
-//   每个气泡出现都从上一气泡尺寸平滑过渡到自身尺寸(见 ChatBubble)。
-//
-// 关键交互:`:key="chatStore.activeSub"` 强制 chat-scroll 重新挂载,
-// 触发 chat-in 入场动画(必须保留)。重挂载时所有气泡首屏无 prevRect。
-// =============================================================================
-import { computed, inject, nextTick, onMounted, ref, toRef, toValue, useId, watch, type Ref } from 'vue'
+// ChatArea —— 右侧聊天区：顶部聊天条、滚动容器、消息排版、末尾装饰
+// 布局由 useChatRows 计算；`:key="activeSub"` 强制重挂载以触发 chat-in 入场动画，
+// 重挂载时所有气泡首屏没有 prevRect，因此不会误播尺寸过渡。
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, toRef, toValue, useId, watch, type Ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
 import { useBubbleMeasure } from '../../composables/useBubbleMeasure'
@@ -36,7 +17,6 @@ import {
 import { MATERIALS } from '../../constants/materials'
 import {
   pos,
-  // speakerNameStyle, // 【已注释停用】角色名称显示功能整体停用
   type BoxStyle,
 } from '../../utils/chatPosition'
 import type { ChatMessage, ChatRow } from '../../types/chat'
@@ -124,7 +104,6 @@ const segRStyle = computed(() => ({
 const {
   playedMessages,
   isLoading,
-  // showCharacterNames, // 【已注释停用】角色名称显示功能整体停用
 } = storeToRefs(chatStore)
 const { measure } = useBubbleMeasure()
 
@@ -133,10 +112,9 @@ const { measure } = useBubbleMeasure()
  *
  * layoutContext.fresh 由下方 watcher 翻转(切换对话 → true;首条加载气泡 → false)。
  */
-// ---- 群聊流程控制条(指定发言)----------------------------------------------
-// 渲染在最后一条消息下方、随消息滚动;高度须计入布局,否则会压住末尾装饰。
-// 流程控制条的尺寸统一取自 constants/groupFlow(与 GroupFlowControl 共用同一份,
-// 按端取值)。此前两处各写一份字面量,改一端就会静默错位:少留被裁、多留空一块。
+// 群聊流程控制条（指定发言）：渲染在最后一条消息下方、随消息滚动。
+// 高度必须计入布局，否则会压住末尾装饰；尺寸取自 constants/groupFlow，
+// 与 GroupFlowControl 共用同一份，否则少留会被裁、多留会空一块。
 const flow = computed(() => flowMetrics(geom.value.stripSegmented))
 
 /** 需要显示几颗胶囊(非群聊 / 无控件时为 0) */
@@ -178,7 +156,6 @@ const {
   resolveSpeakerAvatar,
   /** 该行头像能否点击切换形象(决定聊天区头像是否显示手型光标) */
   isAvatarSwitchable,
-  // resolveSpeakerName, // 【已注释停用】角色名称显示功能整体停用
 } = useChatRows({
   measure,
   extraBottomHeight: () => flowExtraH.value,
@@ -207,7 +184,7 @@ function onFlowHint(text: string): void {
   emit('hint', text)
 }
 
-// ---- 头像点击 ---------------------------------------------------------------
+// 头像点击
 /**
  * mine 侧:切换我方(管理员)性别 —— 仅头像,AI 不感知
  * 群聊中「扮演某角色」发出的消息,头像属于该角色,点击不再切换管理员性别
@@ -245,6 +222,91 @@ onMounted(() => {
   scrollToBottom()
 })
 
+// ---- 渲染窗口（分页加载）---------------------------------------------------
+// rows 仍按**全部**消息计算 —— 每行的 top 是从首条累计出来的绝对坐标，窗口化只能
+// 作用在「挂不挂载」上。未挂载的历史由顶部占位块撑出同样的高度，滚动几何与全量
+// 渲染逐像素一致；占位块里放一颗 sticky 的「加载更早」按钮，滚到空白处也点得到。
+
+/** 默认挂载最近多少行 */
+const DEFAULT_KEEP_ROWS = 60
+/** 每次展开多少行 */
+const KEEP_STEP = 60
+
+/** 当前挂载的行数（从末尾往前数） */
+const keepRows = ref(DEFAULT_KEEP_ROWS)
+
+/** 导出（含「导出选中消息」）必须渲染全部，否则截出来的图会缺消息 */
+const windowDisabled = computed(
+  () => props.exportMode === true || props.messages !== undefined,
+)
+
+/** 实际交给 v-for 的行 */
+const renderRows = computed<ChatRow[]>(() => {
+  const all = rows.value
+  if (windowDisabled.value) return all
+  const keep = Math.max(DEFAULT_KEEP_ROWS, keepRows.value)
+  return all.length <= keep ? all : all.slice(all.length - keep)
+})
+
+/** 还有多少行没挂载 */
+const hiddenRowCount = computed(() =>
+  windowDisabled.value ? 0 : Math.max(0, rows.value.length - renderRows.value.length),
+)
+
+/** 占位块高度 = 第一条已挂载行的绝对 top（未挂载部分正好这么多） */
+const windowPadH = computed(() =>
+  hiddenRowCount.value > 0 ? renderRows.value[0]?.bubbleTop ?? 0 : 0,
+)
+
+const windowPadRef = ref<HTMLElement | null>(null)
+
+/** 展开一页 */
+function loadEarlier(): void {
+  if (hiddenRowCount.value <= 0) return
+  keepRows.value += KEEP_STEP
+}
+
+/** 切会话 / 换数据源时回到默认窗口 */
+watch(() => chatStore.activeSub, () => {
+  keepRows.value = DEFAULT_KEEP_ROWS
+})
+
+/**
+ * 自动展开：占位块仍然压在视口里，就继续往回加载
+ *
+ * 用 getBoundingClientRect 判断而不是比 scrollTop —— 桌面画布是 zoom 缩放的，
+ * scrollTop 的量纲与设计 px 不一定一致，rect 则是同一套视觉坐标。
+ */
+let expandAt = 0
+function maybeAutoExpand(): void {
+  if (hiddenRowCount.value <= 0) return
+  const pad = windowPadRef.value
+  const root = scrollRef.value
+  if (!pad || !root) return
+  const now = performance.now()
+  // 一页 60 行最多也就几毫秒，限流只是防止快速滚动时连开好几页
+  if (now - expandAt < 120) return
+  if (pad.getBoundingClientRect().bottom > root.getBoundingClientRect().top - 200) {
+    expandAt = now
+    loadEarlier()
+  }
+}
+
+/** 滚动处理：rAF 节流，一帧最多判一次 */
+let chatScrollRaf = 0
+function onChatScroll(): void {
+  if (chatScrollRaf) return
+  chatScrollRaf = requestAnimationFrame(() => {
+    chatScrollRaf = 0
+    maybeAutoExpand()
+  })
+}
+
+onBeforeUnmount(() => {
+  if (chatScrollRaf) cancelAnimationFrame(chatScrollRaf)
+  chatScrollRaf = 0
+})
+
 /** 聊天条名字的绝对定位样式 */
 const stripNameStyle = computed(() => {
   const isMobile = geom.value.stripSegmented
@@ -254,17 +316,9 @@ const stripNameStyle = computed(() => {
   }
 })
 
-// ---- 尺寸过渡链状态 -------------------------------------------------------
-// 文字气泡出现时,从加载气泡尺寸(100×单行高)过渡到真实尺寸。
-// 加载气泡出现时,从宽度 0 展开到 100(自身逻辑,无需 prevRect)。
-//
-// prevRect 传递规则:
-//   - chat-in 期间(layoutContext.fresh=true):无 LoadingBubble,无文字气泡,空状态
-//   - chat-in 结束后(layoutContext.fresh=false):文字气泡 prevRect=LOADING_RECT
-//
-// layoutContext.fresh 清除时机:首条 LoadingBubble 显示时(post flush)
-//   保证首条文字气泡 advance 出现时 fresh 已 false,正确拿到 prevRect
-// --------------------------------------------------------------------------
+// 尺寸过渡链：文字气泡从加载气泡尺寸过渡到真实尺寸，加载气泡自身从 0 展开。
+// fresh 期间没有 LoadingBubble 也没有文字气泡，故不传 prevRect；首条 LoadingBubble
+// 显示后（post flush）翻成 false，之后出现的文字气泡才拿到 LOADING_RECT。
 watch(
   () => chatStore.activeSub,
   () => {
@@ -303,7 +357,7 @@ const overlayLeft = computed(() => geom.value.detailX)
 const overlayTop = computed(() => geom.value.detailY)
 const overlayWidth = computed(() => geom.value.detailW)
 
-// ---- 导出模式表现(exportMode) ---------------------------------------------
+// 导出模式表现（exportMode）
 // 只改表现不动数据:滚动区溢出可见 + 高度自适应、聊天框随内容生长、
 // 底部装饰贴新帧底、末尾装饰仅导出模式显示、动画全部关闭(见文件尾非 scoped 块)。
 
@@ -508,8 +562,23 @@ const decoTop = computed(() => {
       class="chat-scroll"
       :class="{ 'chat-scroll--export': exportMode }"
       :style="scrollStyle"
+      @scroll.passive="onChatScroll"
     >
-      <!-- 角色名称悬浮功能已注释停用:原先的 :resolve-speaker-name / :show-character-names 属性绑定与加载气泡上方的名称 span 一并停用 -->
+      <!--
+        历史占位块：只挂载最近 renderRows 条，前面的历史用这块撑出同样的高度，
+        滚动条与坐标都不变。里面那颗按钮 sticky 吸在视口顶部，滚进空白区也点得到。
+      -->
+      <div
+        v-if="hiddenRowCount > 0"
+        ref="windowPadRef"
+        class="chat-window-pad"
+        :style="{ height: windowPadH + 'px' }"
+      >
+        <button type="button" class="chat-window-pad__more" @click="loadEarlier">
+          加载更早的消息<span class="chat-window-pad__count">（还有 {{ hiddenRowCount }} 条）</span>
+        </button>
+      </div>
+
       <!--
         v-memo:依赖只写 row。
         useChatRows 按 row.key 复用行对象,**只有渲染字段发生变化时才换新引用**,
@@ -519,7 +588,7 @@ const decoTop = computed(() => {
         这一行停在旧坐标上(且 v-memo 会连子组件 props 一起跳过更新)。
       -->
       <ChatMessageRow
-        v-for="row in rows"
+        v-for="row in renderRows"
         :key="row.key"
         v-memo="[row]"
         :row="row"
@@ -538,12 +607,6 @@ const decoTop = computed(() => {
           :portrait-url="loadingLayout.portraitUrl"
           :style="pos(loadingLayout.avatarX, loadingLayout.avatarTop, geom.avatarBox, geom.avatarBox)"
         />
-        <!-- 角色名称悬浮:加载气泡上方也显示下一条消息的说话人名(与真实气泡位置一致)【已注释停用】 -->
-        <!-- <span
-          v-if="showLoadingAvatar && showCharacterNames"
-          class="chat-speaker-name"
-          :style="speakerNameStyle(loadingLayout.side, loadingLayout.left, loadingLayout.left + loadingLayout.loadW, loadingLayout.top)"
-        >{{ loadingLayout.speakerName }}</span> -->
         <LoadingBubble
           :side="loadingLayout.side"
           :left="loadingLayout.left"
@@ -617,6 +680,47 @@ const decoTop = computed(() => {
     -webkit-mask-image: none;
     mask-image: none;
     animation: none;
+  }
+}
+
+// 未挂载历史的占位块：撑出与已挂载部分相同的滚动高度，里面放一颗吸顶按钮
+.chat-window-pad {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  z-index: 2;
+  // 块本身只是高度占位，不能吃掉气泡的点击
+  pointer-events: none;
+
+  &__more {
+    position: sticky;
+    // 让开滚动区顶部约 40px 的渐隐遮罩
+    top: 36px;
+    padding: 6px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 999px;
+    background: rgba(24, 24, 24, 0.86);
+    color: #d8d8d8;
+    font-family: $font-harmony;
+    font-size: 12px;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+
+    &:hover {
+      border-color: rgba(255, 255, 255, 0.38);
+      background: rgba(48, 48, 48, 0.92);
+    }
+  }
+
+  &__count {
+    color: rgba(255, 255, 255, 0.45);
   }
 }
 

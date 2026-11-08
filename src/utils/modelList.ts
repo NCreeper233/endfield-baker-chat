@@ -1,36 +1,18 @@
-// =============================================================================
-// 模型列表获取(modelList)
-// -----------------------------------------------------------------------------
-// 从用户填写的 Base URL 拉取该端点提供的全部模型(GET {baseUrl}/models),
-// 供设置里的"模型名"直接选,省得手敲 —— 模型名敲错是最常见的 404 来源。
-//
-// 这是 OpenAI 兼容端点的事实标准接口,但各家返回形状不一致,故做了归一化:
-//   - { data: [{ id }] }              OpenAI / DeepSeek / 多数代理(标准)
-//   - { models: [{ name }] }          Ollama 风格网关
-//   - { models: ["a", "b"] }          部分自建网关
-//   - ["a", "b"]                      裸数组
-//
-// 成功与失败**都**按 (url, apiKey) 缓存:设置弹窗每次打开都会自动拉一次,
-// 没有缓存的话同一个坏端点会被反复打,每次都白等一个超时。
-// =============================================================================
+// modelList —— 从 baseUrl 拉 /models 供设置里直接选（模型名敲错是最常见的 404 来源）
+// 各家返回形状不一，统一归一化。成功与失败都按 (url, apiKey) 缓存：设置弹窗每次打开
+// 都会拉一次，不缓存的话同一个坏端点会被反复打、每次白等一个超时。
 
-/** 拉取超时(ms):/models 只是列表接口,不该让用户干等 */
 const FETCH_TIMEOUT_MS = 12000
 
-/** 缓存有效期(ms):模型列表变动不频繁,这段时间内不重复请求 */
 const CACHE_TTL_MS = 10 * 60 * 1000
 
-/** 错误正文截断长度(端点可能返回整页 HTML,原样塞进提示框会撑爆面板) */
+/** 端点可能返回整页 HTML，原样塞进提示框会撑爆面板 */
 const ERROR_TEXT_MAX = 160
 
 /**
- * 服务商可能用来表达"上下文窗口"的字段名(顶层)
- *
- * 标准 OpenAI 形状**不含**该字段(DeepSeek 就只有 id/object/owned_by),
- * 但部分服务商/网关扩展了它:
- *   OpenRouter  context_length        vLLM       max_model_len
- *   聚合站      max_context_length    models.dev limit.context(嵌套)
- * 这些名字都足够专门,不会误命中无关字段,故顶层即可放心探测。
+ * 标准 OpenAI 形状不含该字段，但部分网关扩展了它：
+ * context_length / context_window / max_context_length / max_model_len / max_input_tokens。
+ * 这些名字足够专门，顶层放心探测。
  */
 const CONTEXT_FIELD_KEYS = [
   'context_length',
@@ -40,32 +22,23 @@ const CONTEXT_FIELD_KEYS = [
   'max_input_tokens',
 ] as const
 
-/**
- * 嵌套容器内的候选字段
- *
- * 额外接受裸 `context`:models.dev 的形状是 limit:{context, input, output}。
- * 只在已确认的容器对象内查,避免顶层 `context` 这种过于宽泛的名字误命中。
- */
+/** 额外接受裸 context（models.dev 的 limit:{context}），只在已确认的容器内查 */
 const NESTED_CONTEXT_FIELD_KEYS = ['context', ...CONTEXT_FIELD_KEYS] as const
 
-/** 嵌套容器字段:这些对象里也可能放上下文字段 */
 const CONTEXT_NESTED_KEYS = ['top_provider', 'limits', 'limit', 'architecture'] as const
 
-/** 远端模型条目 */
 export interface RemoteModel {
-  /** 模型 id(填入请求体 model 字段的那个) */
+  /** 填入请求体 model 字段的值 */
   id: string
-  /** 服务商给出的上下文窗口(未提供为 undefined,由 modelContext 本地推断兜底) */
+  /** 服务商上报的窗口；未提供时由 modelContext 本地推断兜底 */
   contextLength?: number
 }
 
-/** 一次拉取的结果 */
 export interface ModelListResult {
-  /** 是否成功拿到列表 */
   ok: boolean
-  /** 模型条目(已去重排序);ok=false 时为空数组 */
+  /** ok=false 时为空数组 */
   models: RemoteModel[]
-  /** 失败原因(ok=true 时为 '') */
+  /** ok=true 时为 '' */
   error: string
 }
 
@@ -74,22 +47,18 @@ interface CacheEntry {
   result: ModelListResult
 }
 
-/** 模块级缓存:key = `${endpoint}\u0000${apiKey}` */
+/** key = `${endpoint}\u0000${apiKey}` */
 const cache = new Map<string, CacheEntry>()
 
-/** 截断过长的错误正文(压缩空白,便于单行展示) */
+/** 压缩空白并截断，便于单行展示 */
 function shorten(text: string): string {
   const flat = String(text || '').replace(/\s+/g, ' ').trim()
   return flat.length > ERROR_TEXT_MAX ? `${flat.slice(0, ERROR_TEXT_MAX)}…` : flat
 }
 
 /**
- * 鉴权类失败(401 / 403)的补充说明
- *
- * 为什么要补:服务商对"没带 Key"和"Key 不对"往往返回**同一句** 401 原文
- * (DeepSeek 就是一句 "Authentication Fails (governor)"),用户看到后第一反应
- * 是去查 Base URL —— 而地址通常是对的。这里把"这次到底带没带 Key"讲清楚,
- * 把排查方向直接指到 Key 上。
+ * 「没带 Key」与「Key 不对」多数服务商返回同一句 401，用户会误以为是地址问题，
+ * 故把「这次到底带没带 Key」讲清楚，把排查方向指到 Key 上。
  */
 function authHint(status: number, apiKey: string): string {
   if (status !== 401 && status !== 403) return ''
@@ -98,17 +67,7 @@ function authHint(status: number, apiKey: string): string {
     : ' (本次请求未携带 API Key —— 上方「API Key」输入框是空的,请先填写)'
 }
 
-/**
- * 由 Base URL 推出 /models 地址
- *
- * 容忍两种常见的填写方式:
- *   - `https://api.deepseek.com/v1`        → …/v1/models
- *   - `https://api.deepseek.com/v1/`       → 末尾斜杠去掉
- *   - `https://…/v1/chat/completions`      → 用户直接粘了完整对话地址,把尾巴剥掉
- *     (llm.ts 会自行追加 /chat/completions,粘贴完整地址是很自然的误操作)
- *
- * @returns 完整地址;baseUrl 为空时返回空串
- */
+/** 容忍末尾斜杠，以及用户直接粘贴完整 /chat/completions 地址的情况 */
 export function modelsEndpoint(baseUrl: string): string {
   const base = String(baseUrl || '')
     .trim()
@@ -127,12 +86,7 @@ function readObject(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null
 }
 
-/**
- * 从一个模型条目里挖出上下文长度
- *
- * 逐层探测:先看顶层候选字段,再看嵌套容器;取第一个正整数。
- * 挖不到返回 undefined —— 由 utils/modelContext 用后缀/内置表兜底。
- */
+/** 先看顶层候选字段，再看嵌套容器；取第一个正整数 */
 export function extractContextLength(entry: unknown): number | undefined {
   const obj = readObject(entry)
   if (!obj) return undefined
@@ -154,11 +108,7 @@ export function extractContextLength(entry: unknown): number | undefined {
   return undefined
 }
 
-/**
- * 把各家的返回形状归一化成模型条目数组
- *
- * 纯函数,便于单独验证:拿真实端点的返回体直接喂进来即可。
- */
+/** 纯函数，便于拿真实端点的返回体直接验证 */
 export function extractModels(payload: unknown): RemoteModel[] {
   const byId = new Map<string, RemoteModel>()
 
@@ -245,13 +195,7 @@ async function requestModels(url: string, apiKey: string): Promise<ModelListResu
   }
 }
 
-/**
- * 拉取端点提供的模型列表(带缓存)
- *
- * @param baseUrl 用户填写的 Base URL
- * @param apiKey  API Key
- * @param force   true 忽略缓存(用户手动点"获取模型列表"时用)
- */
+/** force = true 用于用户手动点「获取模型列表」 */
 export async function fetchModelList(
   baseUrl: string,
   apiKey: string,

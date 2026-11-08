@@ -1,13 +1,8 @@
 import { isElectron, isNative } from './utils/platform'
 
 /**
- * 按平台注册品牌字体（@font-face）
- *
- * - Electron（EXE）/ Capacitor（APK）：字体文件在包内，本地 IO，几乎零成本，
- *   保留 HarmonyOS Sans 的品牌观感。
- * - 网页版：不注册。全量中文字体 4.3MB，实测在测试版链路上单这一个文件就要
- *   ~29 秒（149 KB/s），是首屏最大的单项开销；不注册时文字自动回退到
- *   MiSans / PingFang SC / 微软雅黑 —— 观感几乎无差别，首屏却快一个数量级。
+ * 只有打包端注册品牌字体：字体在包内、本地 IO 几乎零成本。
+ * 网页版不注册 —— 4.3MB 中文字体在测试链路上要 ~29 秒，回退到系统字体的观感差别很小。
  */
 function registerBrandFont(): void {
   if (!isElectron() && !isNative()) return
@@ -34,6 +29,18 @@ import { BUBBLE_FONT_SIZE, BUBBLE_FONT } from './utils/measure'
 import './styles/main.scss'
 
 /**
+ * 让启动层退场
+ *
+ * 启动层是 index.html 里的静态层（在 #app 外面），挂载不会替换它；这里补满进度、
+ * 播黄幕擦过 + 淡出，再把它从 DOM 移除。它播完会广播 `baker:boot-done`，
+ * App 收到后才允许弹公告 / 首次偏好。
+ */
+function exitBootLayer(): void {
+  const win = window as unknown as { __bakerBoot?: { exit: () => void } }
+  win.__bakerBoot?.exit()
+}
+
+/**
  * 启动失败兜底页
  *
  * 启动链路(读本地库 / 建应用 / 首次挂载)任何一步抛错, #app 里就只剩
@@ -45,11 +52,18 @@ function renderBootError(error: unknown): void {
   const host = document.getElementById('app')
   if (!host) return
 
+  // 启动层是 #app 的兄弟节点：不先摘掉，它会一直盖在错误页上面
+  document.getElementById('boot-layer')?.remove()
+
   const detail = error instanceof Error ? error.message : String(error)
 
   const wrap = document.createElement('div')
   wrap.className = 'boot-error'
   wrap.setAttribute('role', 'alert')
+
+  const eyebrow = document.createElement('p')
+  eyebrow.className = 'boot-error__eyebrow'
+  eyebrow.textContent = '// BOOT FAULT'
 
   const title = document.createElement('h1')
   title.className = 'boot-error__title'
@@ -69,7 +83,7 @@ function renderBootError(error: unknown): void {
   retry.textContent = '重新加载'
   retry.addEventListener('click', () => location.reload())
 
-  wrap.append(title, hint, pre, retry)
+  wrap.append(eyebrow, title, hint, pre, retry)
   host.replaceChildren(wrap)
 }
 
@@ -127,6 +141,8 @@ async function bootstrap(): Promise<void> {
   await loadProject()
 
   app.mount('#app')
+  // 挂载完成才撤启动层：黄幕盖在已经画好的应用上，再淡出露出界面
+  exitBootLayer()
   prewarmBubbleFont()
 }
 

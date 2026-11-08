@@ -1,15 +1,8 @@
 <script setup lang="ts">
-// =============================================================================
-// 导出聊天截图弹窗(ChatExportDialog)
-// -----------------------------------------------------------------------------
-// 入口只有一个 —— 选中消息模式底部条的「导出选中消息」/「导出全部消息」:
-// 离屏渲染当前对话消息 → 预览 PNG(固定 1×) → 下载。
-// 结构沿用 DataManagerDialog 的 dialog-shell 外壳(类前缀 ce);
-// 离屏画布 v-if 按需挂载(打开才渲染、关闭即卸载),不常驻占用内存。
-// =============================================================================
+// ChatExportDialog —— 导出聊天截图：离屏渲染 → 预览 PNG → 下载
+// 入口是选中消息模式底部条的两个导出按钮；离屏画布 v-if 按需挂载，关闭即卸载。
 import { computed, ref, watch } from 'vue'
 import { useChatStore } from '../../stores/chat'
-import { MATERIALS } from '../../constants/materials'
 import { downloadDataUrl } from '../../utils/captureImage'
 import ChatExportStage from '../chat/ChatExportStage.vue'
 import VersionDialogShell from './VersionDialogShell.vue'

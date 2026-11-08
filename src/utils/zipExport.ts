@@ -1,33 +1,10 @@
-// =============================================================================
-// ZIP 工程导入导出(zipExport)
-// -----------------------------------------------------------------------------
-// 职责:
-//   - exportToZip: 卡片树 + 全局设置 → ZIP 压缩包(文本 JSON + 独立图片文件)
-//   - importFromZip: ZIP → 校验 → ProjectPayload(含卡片树、提示词覆盖、系统提示词)
-//   - 类型守卫 + 白名单净化(导出给 useChatPersistence 的 IndexedDB 恢复复用)
-//
-// ZIP 结构:
-//   project.json                          元数据(version/myGender/stripVariantIndex/stats
-//                                         + cards[]:群聊卡片级字段,下标与 cards/NN 对齐)
-//   cards/XX/conversations/YY-name.json   每段对话(messages + contextHistory)
-//   cards/XX/images/YY-ZZZ.ext            图片消息(从 dataURL 提取为独立二进制文件)
-//   prompts/characters/角色名.txt          角色提示词覆盖(仅自定义时存在)
-//
-// 设计原则:
-//   - ZIP 内全部是可读文本(JSON/TXT) + 二进制图片,用户可直接解压编辑
-//   - 图片从 dataURL 提取为独立文件,JSON 中只存 ZIP 内路径引用
-//   - contextHistory 与 messages 并列存储,AI 上下文完整保留
-//   - 仅导出自定义提示词覆盖,内置默认提示词不导出
-//   - 仅导出有消息或有 AI 记忆的对话;两者皆空的对话/卡片不导出
-//   - 未知图片格式(avif/heic 等)保留 dataURL 内联,不做降级提取
-//   - 群聊是**卡片级**属性:project.json 的 cards[] 必须与 cards/NN 同步写读,
-//     否则群聊导出去再导回来会退化成单聊壳(见 utils/groupMeta)
-// =============================================================================
+// zipExport —— ZIP 工程导入导出与卡片白名单净化
+// ZIP 内全是可读 JSON/TXT + 独立图片文件。群聊是卡片级属性：project.json 的 cards[]
+// 按卡片下标与 cards/NN 对齐写读，漏写会让群聊导出再导入后退化成单聊壳。
 
 import JSZip from 'jszip'
 import { isNative as isNativePlatformReal } from './platform'
-// 只需要"插件句柄"与"导出结果类型"：本文件已恢复为正式版的导出路径
-import { SaveFilePlugin, type ExportOutcome, saveExportFileSmart } from './nativeExport'
+import { SaveFilePlugin, saveExportFileSmart } from './nativeExport'
 import { CHAT_IMAGE } from '../constants/design'
 import {
   extractCardGroupMeta,
@@ -54,20 +31,14 @@ export interface ProjectPayload {
   /** v6: 完整设置快照(API 配置/think/force_search/智能总结/公告标记等) */
   settings?: Record<string, unknown>
   /**
-   * v7: 列表人物顺序（最近活跃在前）
-   *
-   * 元素是主卡的**稳定标识**（`s:干员名` / `g:成员1|成员2|管理员`），
-   * 而不是下标 —— 换设备、增删卡片都不会串号。
-   *
-   * 导入语义：
-   *   · 覆盖导入 → 应用该顺序
-   *   · 合并导入 → **忽略**该字段，保留本地已有顺序
-   * 旧包没有此字段时，退回"按 cards 数组顺序"作为顺序（见 DataManagerDialog）。
+   * v7：列表人物顺序（最近活跃在前），元素是主卡的稳定标识（`s:干员名` /
+   * `g:成员|成员`）而非下标，换设备或增删卡片都不会串号。
+   * 覆盖导入应用该顺序；合并导入忽略它、保留本地顺序。
    */
   order?: string[]
 }
 
-// ---- 类型守卫(手写校验) -----------------------------------------------------
+// 类型守卫（手写校验）
 
 function isChatMessage(v: unknown): v is ChatMessage {
   if (!v || typeof v !== 'object') return false
@@ -114,7 +85,7 @@ export function isCards(v: unknown): v is Card[] {
   return Array.isArray(v) && v.every(isCard)
 }
 
-// ---- 白名单净化(重建纯对象,剔除未知字段) -----------------------------------
+// 白名单净化（重建纯对象，剔除未知字段）
 
 function sanitizeChatMessage(m: ChatMessage): ChatMessage {
   const out: ChatMessage = { id: m.id, side: m.side, text: m.text }
@@ -161,25 +132,8 @@ function sanitizeConversation(c: Conversation): Conversation {
 }
 
 /**
- * 卡片白名单净化(重建纯对象,剔除未知字段)
- *
- * ⚠️ 这里同时被**持久化恢复**(useChatPersistence.loadProject)与**ZIP 导入导出**
- * 复用。早期版本只重建了 conversations,把卡片级字段全部丢掉 ——
- * 后果是每次重启后群聊卡都退化成单聊卡(members 丢失),群聊列表变空,
- * 演示数据播种逻辑又判定"没有群聊"从而反复塞回预设群。
- *
- * 因此卡片级字段必须逐个显式带过来。字段清单与"旧数据推断"统一收敛在
- * utils/groupMeta:显式字段优先,缺失时从对话内容反推(老包也能认出来)。
- *
- * 刻意**不持久化** groupSessionId:后端会话有 300s 空闲回收,
- * 跨重启的 id 必然失效;前端会在下一次请求时自动重建。
- */
-/**
- * 恢复用：**逐卡**校验清洗（2026-10-04 数据安全）
- *
- * 为什么不用 isCards：它是"全有或全无"——只要有一条消息不合法，
- * 整个库都不恢复 → 界面空 → 随后被自动保存覆盖 = "坏一条丢全部"。
- * 这里逐卡尝试，坏的跳过并计数，好的照常恢复。
+ * 恢复用：逐卡校验清洗。isCards 是全有或全无，坏一条就整个库不恢复，
+ * 随后被自动保存覆盖 = 坏一条丢全部；这里坏的跳过计数，好的照常恢复。
  */
 export function restoreCardsLoose(raw: unknown[]): { cards: Card[]; dropped: number } {
   const cards: Card[] = []
@@ -197,26 +151,31 @@ export function restoreCardsLoose(raw: unknown[]): { cards: Card[]; dropped: num
   return { cards, dropped }
 }
 
+/**
+ * 卡片白名单净化（重建纯对象，剔除未知字段），持久化恢复与 ZIP 导入导出共用。
+ * ⚠️ 卡片级字段必须逐个显式带过来，漏一个就会让群聊卡退化成单聊卡；
+ * 字段来源统一收敛在 utils/groupMeta。刻意不持久化 groupSessionId（后端 300s 回收）。
+ */
 export function sanitizeCards(cards: Card[]): Card[] {
   return cards.map((c) => {
     const out: Card = {
       conversations: c.conversations.map(sanitizeConversation),
     }
-    // ---- 群聊卡片级字段(显式优先,缺失时按对话内容推断) ----
+    // 显式字段优先，缺失时按对话内容推断
     const meta = resolveCardGroupMeta(c, out.conversations)
     if (meta) Object.assign(out, toCardGroupFields(meta))
     return out
   })
 }
 
-// ---- 文件名工具 -------------------------------------------------------------
+// 文件名工具
 
 /** 将角色名/对话名净化为安全的文件名片段 */
 function sanitizeFileName(name: string): string {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim() || 'unnamed'
 }
 
-// ---- dataURL ↔ 二进制转换 ---------------------------------------------------
+// dataURL ↔ 二进制转换
 
 /** dataURL 的 mime → 文件扩展名映射 */
 const MIME_TO_EXT: Record<string, string> = {
@@ -276,28 +235,11 @@ function binaryToDataURL(data: Uint8Array, ext: string): string {
   return `data:${mime};base64,${base64}`
 }
 
-/** base64 → Uint8Array(分块解码,避免逐字节 charCodeAt) */
-function base64ToUint8Array(base64: string): Uint8Array {
-  const binary = atob(base64)
-  const data = new Uint8Array(binary.length)
-  const CHUNK = 0x8000
-  for (let i = 0; i < binary.length; i += CHUNK) {
-    const slice = binary.slice(i, Math.min(i + CHUNK, binary.length))
-    for (let j = 0; j < slice.length; j++) {
-      data[i + j] = slice.charCodeAt(j)
-    }
-  }
-  return data
-}
-
-// ---- 时间戳 -----------------------------------------------------------------
+// 时间戳
 
 /**
- * 导出文件名用的本地时间戳(YYYYMMDD-HHmmss)
- *
- * ZIP 与 JSON 必须共用这一个：以前原生 ZIP 用 `toISOString()`(UTC)、JSON 用
- * 本地时间，同一时刻导出两个包会差 8 小时，用户按时间根本对不上（B11）。
- * 用本地时间是因为文件名是给人看的，不是给机器排序的。
+ * 导出文件名用的本地时间戳（YYYYMMDD-HHmmss）。
+ * ZIP 与 JSON 必须共用这一个：文件名是给人看的，用 UTC 会与另一个包差 8 小时。
  */
 export function timestamp(): string {
   const d = new Date()
@@ -305,7 +247,7 @@ export function timestamp(): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
-// ---- 统计 -------------------------------------------------------------------
+// 统计
 
 function countStats(cards: Card[]) {
   let convCount = 0
@@ -319,28 +261,21 @@ function countStats(cards: Card[]) {
   return { cardCount: cards.length, convCount, msgCount }
 }
 
-// ---- ZIP 导出 ---------------------------------------------------------------
+// ZIP 导出
 
-// ---- 导出预算(Android 大历史数据防 OOM) ------------------------------------
+// 导出预算（Android 大历史数据防 OOM）
 /**
- * 软预算(字节)：超过后先处理大图（重编码；实在放不下才退占位）
- *
- * 它不是硬门槛 —— 纯文本略超 40MB 仍允许导出；真正的红线是下面的硬上限。
+ * 软预算：超预算先重编码大图、实在放不下才退占位。不是硬门槛，纯文本略超仍允许导出。
  */
 export const EXPORT_BUDGET_BYTES = 40 * 1024 * 1024
 /**
- * 硬上限(字节)：超过就直接拒绝，并给出可执行的提示
- *
- * 为什么不"压一压继续导"：原生通道要把整包转成 base64 再过桥（×1.33），
- * 60MB 的包在手机上已是 80MB 字符串 + 两次全量拷贝；再往上只会在导出中途
- * OOM 闪退，连一句可读的报错都留不下。宁可明确拒绝。
+ * 硬上限：超过直接拒绝。原生通道要把整包转 base64 再过桥（×1.33），再往上只会
+ * 在导出中途 OOM 闪退，连可读的报错都留不下，宁可明确拒绝。
  */
 export const EXPORT_HARD_LIMIT_BYTES = 60 * 1024 * 1024
 /**
- * 单张图片"值得处理"的阈值(字节)
- *
- * 超过它的图片**不再静默剔除**：导出前先尝试 canvas 重编码；
- * 只有重编码失败、且总量仍放不下时，才退回 [图片] 占位。
+ * 单张图片「值得处理」的阈值：超过它不再静默剔除，而是先尝试重编码，
+ * 只有重编码失败且总量仍放不下时，才退回 [图片] 占位。
  */
 export const EXPORT_MAX_IMAGE_BYTES = 1.5 * 1024 * 1024
 /** 导出重编码的长边上限(px)：聊天里不会按原图看，1600 足够清晰 */
@@ -373,10 +308,8 @@ export function estimateExportBytes(cards: Card[]): number {
 }
 
 /**
- * 硬上限守卫：超限就抛出**可执行**的提示，绝不"硬压"后继续
- *
- * 提示必须告诉用户下一步做什么，否则等于换了个地方报"导出失败"：
- * 清理历史 / 删大图，或分批导出。
+ * 超限就抛可执行提示，绝不「硬压」后继续：提示要说清下一步做什么（清理 / 分批），
+ * 否则只是换了个地方报「导出失败」。
  */
 export function assertExportSizeWithinLimit(bytes: number, kind = '导出内容'): void {
   if (bytes <= EXPORT_HARD_LIMIT_BYTES) return
@@ -396,15 +329,9 @@ interface ImageBudgetRef {
 }
 
 /**
- * 超预算时按"先大后小"剔除图片，**每剔一张都重新估算**
- *
- * 与旧实现（一刀切删掉所有 >1.5MB 的图）的区别：
- *   · 只删到"刚好放得下"为止 —— 能保住更多用户的图；
- *   · 原始数据永远不被修改：只有被改的那一层（消息/对话/卡片）才惰性复制，
- *     不再对整棵树做 `JSON.parse(JSON.stringify())`（30MB 数据会再多一份副本）。
- *
- * 进入这里之前，调用方应先试过 `reencodeOversizedImages`；走到这一步的
- * 通常是"重编码也救不回来"的图，才退回 [图片] 占位。
+ * 按「先大后小」剔除图片，每剔一张重新估算：只删到刚好放得下为止，能保住更多图。
+ * 原始数据不被修改，只惰性复制被改动的那一层（不对整棵树做深拷贝）。
+ * 调用方应先试过 reencodeOversizedImages，走到这里的是重编码也救不回来的图。
  */
 export function applyImageBudget(
   cards: Card[],
@@ -483,7 +410,7 @@ export function applyImageBudget(
   return { cards: out ?? cards, dropped: dropKeys.size }
 }
 
-// ---- 导出前图片重编码(B7：大图先压，而不是静默删) ---------------------------
+// 导出前图片重编码：大图先压，而不是静默删
 
 /** 能被 canvas 重编码的格式（动图/矢量/未知格式重编码会丢信息，一律不碰） */
 const REENCODABLE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp'])
@@ -506,10 +433,8 @@ function loadImageElement(dataUrl: string): Promise<HTMLImageElement> {
 }
 
 /**
- * 把一张大图重编码为 webp（不支持 webp 编码时退回 jpeg）
- *
- * 返回新的 dataURL；无法处理 / 结果没有变小 → 返回 null（保留原图）。
- * q0.8 + 最长边 1600 通常能把 2~5MB 的手机照片压到 100~300KB。
+ * 把一张大图重编码为 webp（不支持时退回 jpeg）。
+ * 无法处理或结果没变小就返回 null（保留原图）；q0.8 + 长边 1600 通常能把 2~5MB 压到 100~300KB。
  */
 async function reencodeImageDataUrl(dataUrl: string): Promise<string | null> {
   const mime = dataUrl.match(/^data:([^;]+);base64,/)?.[1] ?? ''
@@ -566,27 +491,15 @@ async function reencodeImageDataUrl(dataUrl: string): Promise<string | null> {
 }
 
 /**
- * 导出前把超大图片重编码（B7）
- *
- * 旧行为：超预算时直接 `delete msg.image`，用户看到"导出成功"但图全没了。
- * 现在：会触发预算处理的导出里，估算超过 EXPORT_MAX_IMAGE_BYTES 的图片
- * 先尝试重编码（最长边 1600 / q0.8）。失败或无法处理的原样保留 —— 是否
- * 退回占位交给 `applyImageBudget`：导出空间够时绝不丢用户的图。
- *
- * ⚠ 调用方**只在 `estimateExportBytes(cards) > EXPORT_BUDGET_BYTES` 时才调**：
- * 常规导出保留原图（导出是备份，用户预期包里就是原图）。这个函数只负责
- * "超大导出时把大图压小"，是否调用是调用方的预算决策。
- *
- * 只读取、不修改入参；返回新树与重编码张数。
- * Worker 环境没有 document，这里原样返回（预算阶段仍会剔除兜底）。
+ * 把超阈值的图片重编码压小（长边 1600 / q0.8）；失败或无法处理的原样保留，
+ * 是否退回占位交给 applyImageBudget。只在估算超预算时调用；Worker 环境原样返回。
  */
 export async function reencodeOversizedImages(
   cards: Card[],
 ): Promise<{ cards: Card[]; reencodedImages: number }> {
   if (!canUseCanvas()) return { cards, reencodedImages: 0 }
 
-  // 同一张图可能在 messages 与 contextHistory 各存一份（审计 C1/F18），
-  // 用 dataURL 字符串本身做键避免重复解码；Map 只持有已有字符串的引用。
+  // 同一张图可能在 messages 与 contextHistory 各存一份，用 dataURL 本身做键避免重复解码
   const cache = new Map<string, string | null>()
   const reencodeOnce = async (url: string): Promise<string | null> => {
     if (!cache.has(url)) cache.set(url, await reencodeImageDataUrl(url))
@@ -645,17 +558,9 @@ export async function reencodeOversizedImages(
 }
 
 /**
- * 序列化卡片树 + 全局设置 + 自定义提示词为 ZIP Blob。
- *
- * 图片从 dataURL 提取为独立二进制文件,JSON 中只存 ZIP 内路径引用;
- * 未知格式(avif/heic 等)保留 dataURL 内联,不做降级提取。
- * 仅导出自定义提示词覆盖和自定义世界观设定,内置默认不导出。
- * 仅导出有消息或有 AI 记忆的对话;两者皆空时抛错,不生成空包。
- *
- * 防 OOM:导出前按 EXPORT_BUDGET_BYTES 检查,超预算时**先大后小**剔除图片
- * (只删到放得下为止,保留 "[图片]" 占位),剔除后**重新估算**;仍超过
- * EXPORT_HARD_LIMIT_BYTES 就抛错并提示清理历史/分批导出,绝不硬压。
- * filteredImages 统计被剔除的张数(重编码张数由 exportToZip 另算)。
+ * 序列化卡片树 + 全局设置 + 提示词覆盖为 ZIP Blob；图片提取为独立文件，JSON 里只存
+ * ZIP 内路径（未知格式如 avif/heic 保留内联）。只导出自定义提示词，内置默认不导出。
+ * 防 OOM：超预算先重编码再按「先大后小」剔除（留 [图片] 占位），仍超硬上限就抛错。
  */
 export function buildProjectZip(
   cards: Card[],
@@ -699,19 +604,14 @@ export function buildProjectZip(
   const filteredImages = budgeted.dropped
   const exportableCardsCopy: Card[] = budgeted.cards
 
-  // 过滤后**重新估算**，再看硬上限：纯文本超限时已经没有图可删，
-  // 与其硬压到 OOM，不如明确拒绝并告诉用户先清理 / 分批导出（B6）。
+  // 纯文本超限时已无图可删，与其硬压到 OOM，不如明确拒绝并提示清理 / 分批
   assertExportSizeWithinLimit(estimateExportBytes(exportableCardsCopy))
 
   const stats = countStats(exportableCardsCopy)
 
   /**
-   * 群聊卡片级元数据(按卡片下标对齐)
-   *
-   * ⚠️ 群聊的 members / myRole / speakMode 是**卡片级**字段,子会话 JSON 里
-   * 装不下它们。早期导出只写了 conversations,于是"群聊导出去再导回来"
-   * 就变成一张单聊壳(成员丢失、群聊列表空)。这里为每张卡写一项,
-   * 单聊卡写 null —— 下标必须与 cards/NN 严格对齐。
+   * 群聊卡片级元数据，按卡片下标与 cards/NN 对齐；单聊卡写 null。
+   * ⚠️ members / myRole / speakMode 装不进子会话 JSON，漏写就会变成单聊壳。
    */
   const cardMetas = exportableCardsCopy.map((card) => extractCardGroupMeta(card))
 
@@ -744,13 +644,8 @@ export function buildProjectZip(
       // 深拷贝对话数据(不修改原始对象)
       const convData: Conversation = JSON.parse(JSON.stringify(conv))
 
-      // 提取图片消息的 dataURL → 独立文件
-      // 仅提取 mime 在 MIME_TO_EXT 表内的格式;未知格式(avif/heic 等)
-      // 保留原始 dataURL 内联,避免 re-import 时被降级为损坏的 octet-stream
-      //
-      // 注:历史图片仍会随 contextHistory 每轮重发给后端(审计 F18/C1),
-      // 那是 backend.ts / stores/chat.ts 的责任;导出侧只负责把大图处理好。
-      let hasImages = false
+      // 只提取 MIME_TO_EXT 表内的格式；未知格式（avif/heic）保留 dataURL 内联，
+      // 否则重新导入时会变成损坏的 octet-stream。
       for (const msg of convData.messages) {
         if (msg.image && msg.image.startsWith('data:')) {
           const mime = msg.image.match(/^data:([^;]+);base64,/)?.[1]
@@ -761,7 +656,6 @@ export function buildProjectZip(
             zip.file(`${imagesDir}/${imgFileName}`, data)
             // JSON 中存 ZIP 内完整路径
             msg.image = `${imagesDir}/${imgFileName}`
-            hasImages = true
           } catch {
             // dataURL 解析失败,保留原始 dataURL(不提取)
           }
@@ -788,19 +682,14 @@ export function buildProjectZip(
 
   // 4. 生成 ZIP Blob
   //
-  // totalBytes 只是**压缩前**的估算（预算判断用）；真实体积由 exportToZip 在
-  // generateAsync 之后用 blob.size 返回（B12），调用方应以那个为准。
+  // totalBytes 只是压缩前的估算；真实体积由 exportToZip 用 blob.size 返回。
   return { zip, filteredImages, totalBytes }
 }
 
 /**
- * 生成 ZIP Blob（内存版：会同时持有整个压缩包）
- *
- * ⚠️ 大工程（30MB+）在 Android 上内存峰值很高；调用方应尽量走
- * downloadBlob → saveExportFileSmart 的分块落盘通道，不要自己再整包转 base64。
- *
- * 返回的 totalBytes 是 **ZIP 的真实体积**（blob.size），不是估算值 ——
- * 成功提示直接用它，用户看到的 MB 数才和落盘文件对得上（B12）。
+ * 生成 ZIP Blob（内存版，会同时持有整个压缩包）。大工程应走
+ * downloadBlob → saveExportFileSmart 的分块落盘通道，别再整包转 base64。
+ * totalBytes 是 blob.size 而非估算值，成功提示的 MB 数才与落盘文件对得上。
  */
 export async function exportToZip(
   cards: Card[],
@@ -810,10 +699,8 @@ export async function exportToZip(
   settingsSnapshot?: Record<string, unknown> | null,
   cardOrder?: string[] | null,
 ): Promise<{ blob: Blob; filteredImages: number; reencodedImages: number; totalBytes: number }> {
-  // 平时导出是**备份**：原图原样进包，一张都不动。
-  // 只有估算会触发预算处理的超大导出，才先把 >1.5MB 的大图压小（B7）——
-  // 用画质换"不剔除、不超限"，而不是把用户的照片悄悄换成缩略图。
-  // （Worker / 无 canvas 环境重编码会原样返回，后续预算阶段仍按剔除兜底。）
+  // 平时导出是备份：原图原样进包。只有会触发预算处理的超大导出才先压大图，
+  // 用画质换「不剔除、不超限」，而不是把用户的照片悄悄换成缩略图。
   const prepared = estimateExportBytes(cards) > EXPORT_BUDGET_BYTES
     ? await reencodeOversizedImages(cards)
     : { cards, reencodedImages: 0 }
@@ -832,35 +719,22 @@ export async function exportToZip(
   }
 }
 
-/**
- * ZIP 导出文件名（BAKER-本地时间.zip）
- *
- * 与 JSON 的 `jsonExportFileName()` 共用同一个 `timestamp()`：同一时刻导出的
- * 两个包文件名时间一致，用户按时间能对上（B11）。
- */
+/** 与 JSON 文件名共用 timestamp()，同一时刻导出的两个包时间一致 */
 export function projectExportFileName(): string {
   return `BAKER-${timestamp()}${EXPORT_FILE_EXT}`
 }
 
 /**
- * 打包环境(EXE/APK)的"另存为"能力探测。
- *
- * 返回可用的保存函数(用户选择位置后写入 base64),无则 null(浏览器环境):
- *   - Electron(EXE):window.nativeStorage.saveFileDialog(系统另存为对话框)
- *   - Capacitor(APK):SaveFile 原生插件(SAF ACTION_CREATE_DOCUMENT)
+ * 打包环境的「另存为」能力探测：Electron 用 saveFileDialog，APK 用 SaveFile 插件（SAF）。
+ * 不可用返回 null，浏览器走 <a download>。
  */
 export type SaveFileFn = (options: { fileName: string; base64: string })
   => Promise<{ canceled?: boolean; path?: string }>
 
 /**
- * 是否处于**真正的**原生平台（android / ios）
- *
- * ⚠️ 这里必须用 `getPlatform()` 而不是 `isNativePlatform()` 的布尔结果去猜：
- * Capacitor 的 `registerPlugin()` 返回的是**万能代理** —— 对任何属性都返回一个函数，
- * 只有真正调用时才抛 `"X" plugin is not implemented on web`。
- * 于是 `typeof plugin.saveFile === 'function'` 在浏览器里**也成立**，
- * 会让我们误判"原生保存可用"，最终把 Capacitor 的
- * “SaveFile plugin is not implemented on web” 报给用户（实测就是这个 bug）。
+ * ⚠️ 必须用 getPlatform() 而不是试探插件方法：Capacitor 的 registerPlugin 返回万能代理，
+ * 对任何属性都返回函数，只在调用时抛 "plugin is not implemented on web"，
+ * 试探法会在浏览器里误判「原生保存可用」。
  */
 export async function getNativeSaveFile(): Promise<SaveFileFn | null> {
   const w = window as unknown as {
@@ -872,17 +746,9 @@ export async function getNativeSaveFile(): Promise<SaveFileFn | null> {
     return w.nativeStorage.saveFileDialog
   }
 
-  // Capacitor(APK)
-  //
-  // ⚠ 官方版这里读的是 `Capacitor.Plugins?.SaveFile?.saveFile`，但在本工程使用的
-  // @capacitor/core 8.x 下那个命名空间是空的 → 恒为 null。这里改用静态
-  // registerPlugin('SaveFile') 拿到的**同一个句柄**（与 nativeExport 内的分块调用同源），
-  // 这是本工程唯一能真正接上原生桥的取法。
-  //
-  // 行为保持与官方一致：拿不到就返回 null（由调用方走兜底/报错），**不抛错**。
-  //
-  // 平台守卫：浏览器（platform=web）直接返回 null → 走 <a download> 兜底，
-  // 绝不把"Web 上未实现的插件"当成可用保存通道（这就是网页版导出报插件错的原因）。
+  // ⚠️ 官方版读 Capacitor.Plugins.SaveFile，但在 @capacitor/core 8.x 下该命名空间是空的，
+  // 恒为 null；这里改用 registerPlugin('SaveFile') 的同一个句柄（与 nativeExport 同源）。
+  // 拿不到就返回 null，不抛错；platform=web 时直接返回 null 走 <a download>。
   if (!isNativePlatformReal()) return null
 
   try {
@@ -900,12 +766,7 @@ export async function getNativeSaveFile(): Promise<SaveFileFn | null> {
   return null
 }
 
-/**
- * Blob → base64(打包环境 IPC/插件只传字符串,不传 Blob)
- *
- * 分片读取:逐 8MB 分片转 base64 后拼接,避免一次性读入整包导致
- * Android WebView 内存峰值(FileReader.readAsDataURL 一次性读整包)。
- */
+/** 分片转 base64：逐 8MB 转换后拼接，避免一次性读入整包撑爆 WebView 内存 */
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -954,15 +815,11 @@ function base64ByteLength(b64: string): number {
 }
 
 /**
- * 按平台下载任意 Blob 文件(ZIP / JSON / 截图共用):
- *   - Electron(EXE)/ Capacitor(APK):系统保存框，大文件走分块写入
- *   - 浏览器:<a download> 直接下载
- *
- * @returns 实际交给平台的字节数（原生分块写入时是回读校验过的落盘字节）
+ * ZIP / JSON / 截图共用的下载入口：原生端走系统保存框（大文件分块写入），
+ * 浏览器走 <a download>。返回实际交给平台的字节数。
  */
 export async function downloadBlob(blob: Blob, fileName: string): Promise<number> {
-  // 空内容守卫看**真实字节**，不看 base64 字符串长度（B10）：
-  // base64 少几个字符仍然"非空"，但文件已经废了。
+  // 空内容守卫必须看真实字节：base64 少几个字符仍然「非空」，但文件已经废了
   if (!blob || blob.size === 0) {
     throw new Error('导出内容为空（0 字节），已中止以免生成空文件。请确认当前确实有可导出的数据。')
   }
@@ -992,10 +849,8 @@ export async function downloadBlob(blob: Blob, fileName: string): Promise<number
       '请确认安装的是最新安装包，或改用「导出 JSON」。')
   }
 
-  // 浏览器:沿用 <a download> 直接下载。
-  // revoke 不能是 0ms：部分浏览器（移动端 WebView / Firefox）会在下载真正
-  // 开始前就丢掉 Blob URL，表现成"点了没反应"。延迟 60s 回收，并用
-  // pagehide 兜底 —— 页面关掉时 Blob URL 已经没有意义（B8）。
+  // revoke 不能是 0ms：部分浏览器（移动端 WebView / Firefox）会在下载真正开始前
+  // 就丢掉 Blob URL，表现成「点了没反应」。延迟 60s 回收，并用 pagehide 兜底。
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -1028,25 +883,20 @@ export async function downloadProject(
     cards, myGender, stripVariantIndex, promptOverrides, settingsSnapshot, cardOrder,
   )
   const fileName = projectExportFileName()
-  // 原生端 downloadBlob 返回真实落盘字节（分块写入时是回读校验过的），
-  // 浏览器端返回 blob.size；两者都比估算值更贴近用户拿到的文件（B12）。
+  // 原生端返回真实落盘字节，浏览器端返回 blob.size；都比估算值更贴近用户拿到的文件
   const written = await downloadBlob(blob, fileName)
   return { filteredImages, reencodedImages, totalBytes: written || totalBytes }
 }
 
-// ---- ZIP 导入 ---------------------------------------------------------------
+// ZIP 导入
 
 /** 导入包体积上限(超过则拒绝,避免一次性解压超大文件导致 OOM) */
 export const IMPORT_MAX_BYTES = 200 * 1024 * 1024
 
 /**
- * 从 ZIP Blob 解压并校验工程文件。
- *
- * 校验失败抛出 Error(调用方负责提示,不触碰现有数据)。
- * 图片路径引用还原为 dataURL,contextHistory 完整恢复。
- * 群聊卡片级字段(project.json 的 cards[])按下标还原;
- * 旧包没有该字段(本次修复之前导出)时,从对话内容反推群聊身份,
- * 认不出来的卡片也原样保留 —— 绝不因为识别失败丢用户数据。
+ * 解压并校验工程文件；失败抛错，调用方负责提示，不触碰现有数据。
+ * 图片路径还原为 dataURL；群聊卡片级字段按下标还原，旧包缺该字段时从对话内容反推，
+ * 认不出来也原样保留卡片 —— 绝不因识别失败丢用户数据。
  */
 export async function importFromZip(blob: Blob): Promise<ProjectPayload> {
   // 体积预检:超大文件拒绝,避免一次性解析完整大文件导致 Android WebView OOM
@@ -1080,12 +930,7 @@ export async function importFromZip(blob: Blob): Promise<ProjectPayload> {
     ? ((projectMeta.stripVariantIndex % 3) + 3) % 3
     : 0
 
-  /**
-   * 群聊卡片级元数据(新版导出会写;旧包没有这个字段 → undefined)
-   *
-   * 旧包(本次修复之前导出的 ZIP)里群聊字段整体缺失,那时只能靠
-   * resolveCardGroupMeta 从对话内容反推群聊身份,尽量把群聊认回来。
-   */
+  /** 群聊卡片级元数据；旧包没有该字段，只能靠 resolveCardGroupMeta 从对话内容反推 */
   const cardMetas: unknown[] = Array.isArray(projectMeta.cards) ? projectMeta.cards : []
 
   // 2. 读取卡片数据

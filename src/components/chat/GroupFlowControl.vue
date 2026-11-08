@@ -1,24 +1,6 @@
 <script setup lang="ts">
-// =============================================================================
-// 群聊流程控制条(GroupFlowControl) —— 第三版群聊
-// -----------------------------------------------------------------------------
-// 位置:群聊会话里「最后一条消息的下方」,随消息一起滚动(由 ChatArea 放进
-//       .chat-scroll 内绝对定位,top 取自布局管线的 flowTop)。
-//
-// 形态:与「AI 推荐回复」的选项按钮同一套小方框样式(白底胶囊、深色字)。
-//
-// 只负责「指定模式」的左右分段胶囊:
-//        ┌──────────┬────────┐
-//        │ 指定发言  │ 卡缪 ▾ │
-//        └──────────┴────────┘
-//      点左半「指定发言」→ 直接让当前选中的角色发言一次
-//      点右半「角色名」  → 展开下拉菜单换人
-//
-// 【已移除】旁观/轮转模式的「开启 / 暂停 / 恢复对话」胶囊:那颗按钮改为
-// 底部输入面板里的圆形按钮(ChatInput,与单聊"停止"同款),不再随本组件渲染。
-//
-// 纯前端状态:选择结果写 Card.assignTarget,由 useChatPersistence 落盘。
-// =============================================================================
+// GroupFlowControl —— 群聊「指定发言」分段胶囊，随消息滚动、位于最后一条消息下方
+// 左半点击让当前角色发言一次，右半展开下拉换人；选择结果写 Card.assignTarget。
 import { computed, inject, ref, toValue, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
@@ -73,9 +55,6 @@ const chatStore = useChatStore()
 /** 群聊走独立服务(与本项目已修好的回合/暂停逻辑对接) */
 const groupChat = useGroupChat()
 const {
-  activeIsGroup,
-  activeIsObserver,
-  activeSpeakMode,
   activeCard,
   groupPickerOpen,
 } = storeToRefs(chatStore)
@@ -100,7 +79,7 @@ const visible = computed(() => showAssign.value)
 
 defineExpose({ visible })
 
-// ---- 指定发言:发言一次 ----------------------------------------------------
+// 指定发言：发言一次
 
 /** 是否正在请求该角色发言(防连点) */
 const speaking = ref(false)
@@ -121,7 +100,7 @@ async function onAssignSpeak(): Promise<void> {
   }
 }
 
-// ---- 指定发言:换人 --------------------------------------------------------
+// 指定发言：换人
 
 /** 选择角色并收起下拉 */
 function pickMember(name: string): void {

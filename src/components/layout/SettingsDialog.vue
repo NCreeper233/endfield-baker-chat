@@ -1,10 +1,6 @@
 <script setup lang="ts">
-// =============================================================================
-// 设置弹窗(SettingsDialog)
-// -----------------------------------------------------------------------------
-// AI API 配置 + 提示词编辑,全部持久化到 localStorage(settings store)
-// 打开/关闭状态由父组件 App 持有
-// =============================================================================
+// SettingsDialog —— 设置面板：API 配置、提示词编辑、显示与实验性开关、数据管理
+// 改动都由 settings store 持久化到 localStorage；开关状态由 App 持有。
 import { ref, computed, watch } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
 import { testApiConnection } from '../../utils/llm'
@@ -37,6 +33,7 @@ import SetSection from './ui/SetSection.vue'
 import SetRow from './ui/SetRow.vue'
 import SegControl from './ui/SegControl.vue'
 import { MATERIALS } from '../../constants/materials'
+import { fileToBackgroundDataUrl } from '../../utils/backgroundImage'
 
 const props = defineProps<{
   /** 是否展开 */
@@ -60,6 +57,52 @@ const activeLabel = computed(
 
 /** 提示行语气(与 SetRow 的 tone 一一对应:成功 / 警示 / 中性) */
 type HintTone = 'ok' | 'warn' | 'keep'
+
+// ---- 自定义背景 ------------------------------------------------------------
+// 只存本机（localStorage），不进设置快照 → 导出/导入都不带它；刷新页面仍在。
+const bgInput = ref<HTMLInputElement | null>(null)
+const bgHint = ref('')
+const bgTone = ref<HintTone | ''>('')
+const bgBusy = ref(false)
+
+function pickBackground(): void {
+  bgInput.value?.click()
+}
+
+async function onBackgroundPicked(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  // 清掉 value：同一张图连选两次也要能触发 change
+  input.value = ''
+  if (!file) return
+
+  bgBusy.value = true
+  bgHint.value = '正在处理图片…'
+  bgTone.value = ''
+  try {
+    const dataUrl = await fileToBackgroundDataUrl(file)
+    const ok = settingsStore.setCustomBg(dataUrl)
+    if (ok) {
+      const kb = Math.max(1, Math.round(dataUrl.length / 1024))
+      bgHint.value = `已更换背景（${kb} KB，只存在这台设备上，备份里不含它）`
+      bgTone.value = 'ok'
+    } else {
+      bgHint.value = '浏览器存不下这张图（本地存储已满），换一张小一点的'
+      bgTone.value = 'warn'
+    }
+  } catch (err) {
+    bgHint.value = err instanceof Error ? err.message : '这张图处理失败，换一张试试'
+    bgTone.value = 'warn'
+  } finally {
+    bgBusy.value = false
+  }
+}
+
+function resetBackground(): void {
+  settingsStore.resetCustomBg()
+  bgHint.value = '已恢复默认背景'
+  bgTone.value = 'ok'
+}
 
 /**
  * 布尔开关的分段控件选项
@@ -103,7 +146,7 @@ function onSelectTab(key: SettingsTabKey) {
   if (bodyEl.value) bodyEl.value.scrollTop = 0
 }
 
-// ---- API 配置本地缓存(打开时同步,保存时写入 store) -------------------------
+// API 配置本地缓存（打开时同步，保存时写入 store）
 const apiDraft = ref({
   apiMode: 'custom' as 'custom' | 'backend' | 'legacy',
   baseUrl: '',
@@ -122,20 +165,9 @@ const apiDraft = ref({
 const isCustomMode = computed(() => apiDraft.value.apiMode === 'custom')
 
 /**
- * 各实验性开关"在当前配置下不生效"的判据
- * (2026-10-04 按各链路实际能力重新划分)
- *
- * 背景:这些开关以前只有「默认 API 模式」与「群聊(走后端群聊服务)」会读,
- * 所以共用一条判据置灰。自定义 API 模式补上群聊链路、并补齐直连的
- * 思考模式 / 沉浸式之后,四项的能力边界各不相同,必须分开判断 ——
- * 否则会把"其实已经生效"的开关误灰(用户根本拨不动)。
- *
- *   - 沉浸式         :三种模式 + 单聊/群聊都已落实(后端过滤或前端本地过滤)→ 永不置灰
- *   - 思考模式       :默认 API 全场景、自定义 API(单聊 think 透传 / 群聊生成)、
- *                     群聊后端链路都生效;仅「旧版直连 + 单聊」不支持
- *   - 使用新版提示词 :只有后端会按 characters_v2/ 加载 → 仅默认 API 模式生效
- *   - 智能总结开关   :只被 applySmartSummary 读取(默认 API / 旧版单聊),
- *                     自定义模式单聊由 token 预算压缩接管 → 沿用旧判据
+ * 各实验性开关「当前配置下不生效」的判据。四项能力边界不同，必须分开判断，
+ * 否则会把其实已生效的开关误灰：沉浸式永不置灰；思考模式只在「旧版直连 + 单聊」
+ * 不支持；新版提示词仅默认 API；智能总结开关沿用旧判据。
  */
 const thinkBlocked = computed(
   () => apiDraft.value.apiMode === 'legacy' && chatStore.chatMode === 'single',
@@ -232,15 +264,8 @@ const useNewPromptHint = computed(() =>
 )
 
 /**
- * 「沉浸式对话模式」开启时,两个括号样式开关一起锁住
- *
- * 该模式要求后端**不写**括号动作/神态(只留台词),回复里压根不会出现括号描写,
- * 于是「括号描写居中」「彩色括号描写」都无从生效 —— 置灰并说明原因,
- * 免得玩家拨了开关却看不到任何变化。
- *
- * 与上面几个 blocked 判据的区别:那些是"当前 API 模式不生效"(换模式就恢复),
- * 这个是"上游不会产出可居中的内容"(得先把沉浸式关掉)。
- * 两者互相独立,可能同时成立。
+ * 沉浸式开启时后端不写括号描写，两个括号样式开关无从生效，故一并置灰并说明原因。
+ * 与上面的 blocked 判据独立：那些是「模式不生效」，这个是「上游没有可居中的内容」。
  */
 const bracketStyleLocked = computed(() => settingsStore.immersiveMode)
 
@@ -306,14 +331,14 @@ const bracketColorHint = computed(() => {
 /**
  * 「居中我方括号内容」提示行
  *
- * 只影响我方消息的开头那对括号;颜色按"我在当前会话里的身份"取属性
- * (单人 = 管理员 physical;群聊里扮演某角色 = 该角色)。
+ * 我方消息里任意位置的括号都算(开头 / 中间 / 末尾);颜色按"我在当前会话里的身份"
+ * 取属性(单人 = 管理员 physical;群聊里扮演某角色 = 该角色)。
  */
 const centerMyBracketHint = computed(() =>
   settingsStore.centerMyBracket
     ? {
         level: 'ok' as const,
-        text: '已开启：我方消息开头的括号单独居中，颜色随我的身份',
+        text: '已开启：我方消息里的括号单独居中（开头、中间、末尾都算），颜色随我的身份',
       }
     : {
         level: 'warn' as const,
@@ -321,7 +346,7 @@ const centerMyBracketHint = computed(() =>
       },
 )
 
-// ---- 模型列表(主 API / 总结 API 各一份,逻辑在 useModelPicker 里) -------------
+// 模型列表（主 API / 总结 API 各一份，逻辑在 useModelPicker）
 // summaryDraft 必须先于这里的 useModelPicker 声明:composable 内部的 watch
 // 在 setup 期间就会读一次 source(),那时若 summaryDraft 还在 TDZ 会直接抛错。
 /** 智能总结配置草稿(打开时从 store 同步,保存时写回) */
@@ -350,7 +375,7 @@ const apiContextById = computed(() => {
   return map
 })
 
-// ---- 上下文窗口自动获取(models.dev 在线模型库) --------------------------------
+// 上下文窗口自动获取（models.dev 在线模型库）
 /** 在线库的查询结果(尚未查到 / 查不到时为 null) */
 const libraryHit = ref<LibraryHit | null>(null)
 /** 是否正在查询 */
@@ -383,20 +408,9 @@ function contextWindowUnset(value: number): boolean {
 }
 
 /**
- * 把获取到的上下文窗口写入草稿(没获取到时保持原值不动,绝不瞎覆盖)
- *
- * @param mode 'change'  用户刚刚换了模型 → 无条件覆盖
- *             'passive' 打开设置 / 模型列表刷新 / 在线库返回 → 只在用户没设置过时才写
- *
- * 为什么必须分这两种:'passive' 若无条件覆盖,用户刻意设的保守值
- * (省 token,或端点实际上限比模型标称更低)每次打开设置都会被改回去,
- * 而且改完用户还不知道是谁改的。'change' 则相反 —— 用户刚换了模型,
- * 旧窗口已经不属于这个模型了,跟着换才对。
- *
- * 【写草稿的同时立刻落库】这个值是"自动获取"来的,界面已经明确告诉用户
- * "自动获取上下文长度成功" —— 若还要再点一次「保存」才生效,忘了点就白获取了。
- * 本字段是该标签页里唯一写穿的:其余字段(baseUrl / key / 温度 …)仍走草稿 + 保存,
- * 因为那些是用户自己敲的,保留"改完再确认"的语义更安全。
+ * 写入草稿：'change' 是用户刚换模型，无条件覆盖；'passive' 只在用户没设置过时才写
+ * —— 否则用户刻意设的保守值每次打开设置都会被改回去。
+ * 该值同时立刻落库：它由自动获取而来，还要再点保存就等于白获取了。
  */
 function applyContextGuess(mode: 'change' | 'passive' = 'passive'): void {
   const g = contextGuess.value
@@ -528,7 +542,7 @@ function maybeAutoFetchModels() {
   void loadMainModels(false)
 }
 
-// ---- 模型列表(总结 API):与主 API 同一套,只是不带上下文窗口推断 -------------
+// 模型列表（总结 API）：与主 API 同一套，只是不带上下文窗口推断
 /** 手动点击"获取模型列表" */
 function onFetchSummaryModels() {
   void loadSummaryModels(true)
@@ -542,7 +556,7 @@ function maybeAutoFetchSummaryModels() {
 }
 
 /** 是否为后端模式(地址内置,无需填写) */
-// ---- 后端路线(测试版:默认 / 备用两个域名,指向同一套后端) --------------------
+// 后端路线（默认 / 备用两个域名，指向同一套后端）
 //
 // 渲染位置:「连接设置」页 → 默认 API 模式分支(与它影响的对象在同一处)。
 // 自定义/旧版模式不经过这条网关链路,所以不显示。
@@ -568,17 +582,6 @@ const isBackendMode = computed(() => apiDraft.value.apiMode === 'backend')
 /** 是否为旧版模式(直连 Agnes API,无需填写) */
 const isLegacyMode = computed(() => apiDraft.value.apiMode === 'legacy')
 
-/**
- * 启用 / 停用自定义 API
- *
- * 「连接设置」页只保留 默认 API 与 旧版模式,自定义模式的开关随之挪到
- * 「自定义 API」页 —— "当前用哪套端点"于是只有一个入口,不会两页各说一套。
- * 停用时退回「默认 API」:旧版模式是不推荐的兼容路径,不该作为关闭后的落点。
- */
-function toggleCustomApi() {
-  switchApiMode(isCustomMode.value ? 'backend' : 'custom')
-}
-
 /** 当前对话的角色名(后端模式连接测试用它解析该角色的固定地址) */
 const currentCharName = computed(() =>
   chatStore.activeSub !== null
@@ -586,7 +589,7 @@ const currentCharName = computed(() =>
     : '',
 )
 
-// ---- 提示词编辑 ---------------------------------------------------------
+// 提示词编辑
 /** 所有可编辑提示词的角色名列表(内置角色) */
 const characterNames = computed(() => Object.keys(CHARACTER_PROMPTS))
 
@@ -694,18 +697,9 @@ watch(
 )
 
 /**
- * API 配置草稿 → store 的即时写穿
- *
- * 自定义 API 模式下的这些配置(Base URL / 密钥 / 模型名 / 温度 / 最大 Token /
- * 上下文窗口 / 触发占比 / 自动压缩 / 流式用量 …)一律**改一处即落库**,
- * 不再需要点底部的「保存」—— 那个按钮已随之移除,免得留一个点了没意义的按钮。
- *
- * 为什么保留草稿层而不是把输入框直接双向绑定到 store:
- *   打开弹窗时要先把 store 快照一次性灌进草稿(见上面的 watch(props.open)),
- *   写穿则负责"编辑 → store"这一个方向。两者分开,各自只做一件事。
- *
- * 成本:每次按键写一次 localStorage,载荷只有几百字节(与 worldView 的现有写法
- * 一致);IndexedDB 那一侧还有 300ms 防抖兜底,不会每次击键都落盘。
+ * 自定义 API 的配置改一处即落库（底部「保存」已因此移除）。
+ * 保留草稿层是为了打开弹窗时把 store 快照一次灌入，写穿只负责「编辑 → store」；
+ * 每次击键只写几百字节，IndexedDB 侧还有 300ms 防抖兜底。
  */
 watch(
   apiDraft,
@@ -1176,6 +1170,52 @@ function resetAll() {
 
           <!-- ============ 3. 显示和内容输出 ============ -->
           <template v-if="activeTab === 'display'">
+            <SetSection title="外观">
+              <SetRow
+                label="自定义背景"
+                :desc="settingsStore.customBg
+                  ? '已启用自定义背景（只在本机生效，导出备份不带这张图）'
+                  : '默认背景（游戏主视觉）'"
+                :hint="bgHint"
+                :tone="bgTone"
+                stack
+              >
+                <div class="st__btnrow">
+                  <button
+                    class="pn-pill"
+                    type="button"
+                    :disabled="bgBusy"
+                    @click="pickBackground"
+                  >
+                    {{ bgBusy ? '处理中…' : '选择图片' }}
+                  </button>
+                  <button
+                    class="pn-pill"
+                    type="button"
+                    :disabled="bgBusy || !settingsStore.customBg"
+                    @click="resetBackground"
+                  >
+                    恢复默认
+                  </button>
+                  <input
+                    ref="bgInput"
+                    class="st__bgfile"
+                    type="file"
+                    accept="image/*"
+                    tabindex="-1"
+                    aria-hidden="true"
+                    @change="onBackgroundPicked"
+                  />
+                </div>
+                <img
+                  v-if="settingsStore.customBg"
+                  class="st__bgprev"
+                  :src="settingsStore.customBg"
+                  alt="当前自定义背景"
+                />
+              </SetRow>
+            </SetSection>
+
             <SetSection title="消息分条">
               <SetRow
                 label="智能消息分条"
@@ -1276,7 +1316,7 @@ function resetAll() {
               <SetRow
                 label="SSE 流式回复"
                 :hint="settingsStore.sseStreaming
-                  ? '已开启：单聊里回复逐字出现（仅默认 API 生效，不支持时会自动改回整段显示）'
+                  ? '已开启：一边输出一边回复（仅默认 API 生效，不支持时会自动改回整段显示）'
                   : '已关闭：等整段回复生成完再显示'"
                 :tone="settingsStore.sseStreaming ? 'ok' : 'warn'"
               >
@@ -1588,14 +1628,8 @@ function resetAll() {
 <style scoped lang="scss">
 @use '../../styles/variables' as *;
 
-// =============================================================================
-// 设置面板(全屏分类面板)
-// -----------------------------------------------------------------------------
-// 结构:遮罩 + 全屏窗口(顶部页签栏 / 内容滚动区)。
-// 通用的面板外观(遮罩、页签、分组标题、设置行、分段控件、胶囊按钮与输入框)
-// 全部来自全局设计系统 `styles/panel.scss`(`.pn-` 前缀),这里只写本页特有
-// 的栅格与少量补充样式(只读值、按钮行、滑块、危险按钮、文档与关于页)。
-// =============================================================================
+// 设置面板样式：遮罩 + 全屏窗口（顶部页签栏 / 内容滚动区）。
+// 通用外观来自全局 panel.scss（.pn- 前缀），这里只写本页特有的栅格与补充样式。
 
 .st {
   position: fixed;
@@ -1654,7 +1688,7 @@ function resetAll() {
   padding-top: 6px;
 }
 
-// ---- 只读值(当前干员 / 内置端点等) ----------------------------------------
+// 只读值（当前干员 / 内置端点等）
 .st__ro {
   color: #e6e6e6;
   font-size: 13.5px;
@@ -1666,7 +1700,7 @@ function resetAll() {
   width: 132px;
 }
 
-// ---- 控件列里的纵向堆叠 ----------------------------------------------------
+// 控件列里的纵向堆叠
 .st__stack {
   display: flex;
   flex-direction: column;
@@ -1675,7 +1709,7 @@ function resetAll() {
   min-width: 0;
 }
 
-// ---- 按钮行 ----------------------------------------------------------------
+// 按钮行
 .st__btnrow {
   display: flex;
   flex-wrap: wrap;
@@ -1683,7 +1717,24 @@ function resetAll() {
   gap: 8px;
 }
 
-// ---- 温度滑块:轨道压成细线,拇指用标识黄 ---------------------------------
+// 自定义背景：隐藏的文件选择框 + 当前背景的缩略预览
+.st__bgfile {
+  display: none;
+}
+
+.st__bgprev {
+  display: block;
+  width: 100%;
+  max-width: 300px;
+  height: auto;
+  margin-top: 10px;
+  border: 1px solid $color-dialog-border;
+  // 只做缩略预览：不裁切、不模糊，让用户看清自己选的是什么
+  object-fit: cover;
+  max-height: 170px;
+}
+
+// 温度滑块：轨道压成细线，拇指用标识黄
 .st__range {
   width: 100%;
   height: 20px;
@@ -1726,7 +1777,7 @@ function resetAll() {
   }
 }
 
-// ---- 危险操作(重置全部) --------------------------------------------------
+// 危险操作（重置全部）
 .st__danger {
   background: rgba(214, 74, 74, 0.22);
   color: #ffb3b3;
@@ -1738,7 +1789,7 @@ function resetAll() {
   }
 }
 
-// ---- 数据管理页(内嵌组件,铺满内容宽度) ----------------------------------
+// 数据管理页（内嵌组件，铺满内容宽度）
 .st__data {
   padding: 0 44px;
 
@@ -1880,7 +1931,7 @@ function resetAll() {
   // 这里不要再覆盖(曾经写过 #fff,导致白底白字)
 }
 
-// ---- 免责声明 / 关于:长文档排版 ------------------------------------------
+// 免责声明 / 关于：长文档排版
 .st__doc {
   padding: 2px 44px 44px;
   color: rgba(255, 255, 255, 0.82);
@@ -1956,9 +2007,7 @@ function resetAll() {
   color: rgba(255, 255, 255, 0.92);
 }
 
-// ---------------------------------------------------------------------------
 // 移动端
-// ---------------------------------------------------------------------------
 @media (max-width: 768px) {
   // 手机端不显示左上角的「//设置」与小图,把顶部整条让给页签
   .st__brand {

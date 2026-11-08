@@ -1,15 +1,6 @@
 <script setup lang="ts">
-// =============================================================================
-// AI 聊天输入框(ChatInput)
-// -----------------------------------------------------------------------------
-// 复用底部面板的视觉风格(PanelShell + 胶囊输入框 + 圆形按钮),
-// 连接 AI 聊天流程(useAiChat):
-//   - contenteditable 输入框(回车发送,Ctrl/Shift+Enter 换行)
-//   - 图片按钮:上传图片并直接发送(等比缩放到 CHAT_IMAGE 上限)
-//   - 表情按钮:弹出表情网格,点击在光标处插入表情
-//   - 发送按钮(AI 响应中变为停止按钮)
-//   - API 未配置时上抛 open-settings 事件
-// =============================================================================
+// ChatInput —— 底部输入面板（PanelShell + contenteditable + 圆形按钮）
+// 回车发送、Ctrl/Shift+Enter 换行；图片直接发送、表情插入光标处；AI 响应中发送键变停止。
 import { ref, computed, inject, watch, onMounted, onBeforeUnmount, toValue } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
@@ -19,6 +10,7 @@ import { useSettingsStore } from '../../stores/settings'
 import { useUsageStore } from '../../stores/usage'
 import { useGroupRunControl } from '../../composables/useGroupRunControl'
 import { setExtraInputH } from '../../composables/useInputHeight'
+import { useEmojiGrid } from '../../composables/chat/useEmojiGrid'
 import { MATERIALS } from '../../constants/materials'
 import {
   chatGeometryKey,
@@ -73,32 +65,19 @@ const mobileInputEl = ref<HTMLTextAreaElement | null>(null)
 /** 移动端输入文本(v-model) */
 const mobileText = ref('')
 
-// ---- 输入框最多几行 ----------------------------------------------------------
+// 输入框最多几行
 /**
- * 新版输入面板 = 输入框"最多两行 + 可展开成 2/3 屏大输入框"
- *
- *   1 行      :普通单行,面板高 50
- *   超过 1 行 :输入框与面板一起向上长一行(聊天区同步变矮,免得挡住消息)
- *   达到 3 行 :输入框不再长高(框内滚动),按钮组上方浮出半透明「扩大」按钮
- *   点扩大    :升成 2/3 屏的大输入框(浮层,压在聊天之上,聊天区**不动**),
- *              三个小按钮移到最下方一行,扩大按钮移到右上角变成「缩小」
- *   点缩小 / 点上方遮罩:复原
- *
- * 关掉时:**输入框仍是两行封顶**(见 MOBILE_MAX_LINES),只是没有扩大按钮。
- * (2026-09-25 之前这个开关对应的是"两行布局"——输入框+发送一行、按钮另起一行,
- *  那种排法已废弃。)
+ * 新版面板：输入框最多两行，达到 3 行时框内滚动并浮出「扩大」按钮，点开升成 2/3 屏浮层
+ * （聊天区不动）。关掉时仍是两行封顶，只是没有扩大按钮。
  */
 const newPanelUi = computed(() => settingsStore.newInputPanel)
 
 /** 新版输入面板是否在当前形态下生效(桌面端恒为旧行为) */
 const newPanelActive = computed(() => newPanelUi.value && isMobileInput.value)
 
-// ---- 输入框随内容长高 --------------------------------------------------------
+// 输入框随内容长高
 /**
- * 输入框未增高时的高度(px,设计口径)
- *
- * 必须与样式里 &__field(桌面 45)/ &--mobile .chat-input__field(移动 36)一致 ——
- * 那两处只作首帧初值,之后由这里量出的高度以内联样式接管。
+ * 必须与样式里的桌面 45 / 移动 36 一致：那两处只作首帧初值，之后由这里量出的高度接管。
  */
 const INPUT_BASE_H = computed(() => (isMobileInput.value ? 36 : 45))
 
@@ -106,12 +85,8 @@ const INPUT_BASE_H = computed(() => (isMobileInput.value ? 36 : 45))
 const INPUT_MAX_LINES = 10
 
 /**
- * 移动端:输入框**一律两行封顶**(新旧面板一致)
- *
- * 两行以上不再往上长 —— 框内滚动。这与「新版输入面板」开关无关:
- *   · 开关关闭:两行封顶,没有扩大按钮(老版那个"随行数往上长"的行为已废弃)
- *   · 开关打开:同样两行封顶,第三行起另给一个「扩大」按钮,可展开成 2/3 屏
- * 桌面不参与这条规则(面板宽、上行空间足,仍是十行)。
+ * 移动端一律两行封顶、超出后框内滚动，与「新版输入面板」开关无关；
+ * 桌面不参与（面板宽、上行空间足，仍是十行）。
  */
 const MOBILE_MAX_LINES = 2
 
@@ -127,7 +102,7 @@ const INPUT_MAX_H = computed(() => {
   return INPUT_BASE_H.value + (maxLines.value - 1) * font * 1.4
 })
 
-// ---- 展开态(新版输入面板:2/3 屏大输入框) ----------------------------------
+// 展开态（新版输入面板：2/3 屏大输入框）
 /**
  * 是否展开成大输入框
  *
@@ -141,15 +116,8 @@ const expanded = ref(false)
 const contentOverflow = ref(false)
 
 /**
- * 展开态的三个尺寸(px)
- *
- * 定位基准是**底部面板自身**(约 50px 高、贴屏幕底;软键盘弹出时贴键盘上沿),
- * 大面板从它底边往上长 2/3 可视高。所以"大面板顶边往下 48px"这类位置
- * 不能写成 top: 48px(那是相对面板顶边,会落到屏幕外),必须换算成
- * "面板底边往上 sheet − 48";这里算好直接以 px 下发,样式里不做二次推导。
- *
- * 视口高度取几何层的 viewportH:移动端它是"键盘以上的可视高度",
- * 所以 2/3 永远不被键盘遮住。
+ * 定位基准是底部面板自身：大面板从它底边往上长 2/3 可视高，故位置要换算成
+ * 「面板底边往上 sheet − 48」而不是 top: 48px。视口高取 viewportH（移动端已扣键盘）。
  */
 const sheetH = computed(() => Math.round(geom.value.viewportH * (2 / 3)))
 /** 遮罩高度 = 可视高度 − 大面板高度(盖住上方剩余的那 1/3) */
@@ -261,16 +229,10 @@ const fieldStyle = computed(() =>
 const fieldGrown = computed(() => fieldH.value > INPUT_BASE_H.value)
 
 /**
- * 量一次输入框内容高度,并上报"增高量"
- *
- * 量法:先把高度置为 auto 让元素按内容自然撑开,读 scrollHeight,**随即把量到的
- * 高度写回**。写回这一步不能省,也不能只清成空串 —— 清了内联高度就会退回样式里
- * 的固定高度(桌面 45 / 移动 36),而 Vue 只在自己那次 patch 时才重写内联样式,
- * 于是会出现"缩回单行 → 又长回来"的反复跳动;同一帧内量完即写,浏览器不会画出
- * 中间态,视觉上完全无感。
- *
- * scrollHeight 是元素自身坐标系的 CSS px(不经画布 zoom 缩放),与几何层同一口径,
- * 可直接相减。增高量交给几何层后,底部面板会跟着变高、聊天区可视高度同步变矮。
+ * 先置 auto 让元素按内容撑开、读 scrollHeight，**随即写回量到的高度** ——
+ * 只清空内联高度会让它退回样式里的固定值，Vue 又只在自己 patch 时重写，
+ * 结果就是「缩回单行又长回来」的跳动；同帧量完即写，浏览器不会画出中间态。
+ * scrollHeight 是未经画布 zoom 的 CSS px，与几何层同口径。
  */
 function syncInputHeight(): void {
   const el = isMobileInput.value ? mobileInputEl.value : inputEl.value
@@ -321,16 +283,14 @@ const isResponding = computed(() => isAiResponding.value)
 const isGroupChat = computed(() => chatStore.activeIsGroup)
 
 /**
- * 群聊「暂停 / 恢复对话」按钮是否显示
- *
- * 位置只有这一处(与单聊"停止"同款的圆形按钮),聊天区末尾的旧胶囊已删除。
- * 判据取自 store 的 activeShowRun(非指定模式的群聊一律显示,与玩家身份无关)。
+ * 只有这一处渲染：群聊「暂停 / 恢复」与单聊「停止」同款的圆形按钮。
+ * 判据取 store 的 activeShowRun（非指定模式的群聊一律显示，与玩家身份无关）。
  */
 const showGroupRun = computed(
   () => chatStore.activeIsGroup && chatStore.activeShowRun,
 )
 
-/** 暂停 / 恢复的唯一实现(与旧版胶囊共用同一份文案与点击语义) */
+/** 暂停 / 恢复的唯一实现（与圆形按钮共用同一份文案与点击语义） */
 const {
   running: groupRunning,
   runLabel,
@@ -349,16 +309,9 @@ const observerRunning = computed(
 )
 
 /**
- * 输入 / 发送按钮是否锁定
- *
- * - 单聊:AI 回复期间照旧锁定(保持原有行为)
- * - 群聊:AI 回复期间**不锁**。智能模式会持续产出,一旦锁住输入玩家就没法
- *   插话;而"发消息"本身就是打断当前回合的手段,必须始终可用。
- * - 旁观模式且对话进行中:锁定,并提示先暂停 —— 避免玩家在角色们正说着的时候
- *   又塞新话题进去。
- *
- * 锁定时输入框走 `readonly` 而不是 `disabled`：disabled 会让已聚焦的控件失焦，
- * 移动端键盘随之收起（用户体感"点输入框键盘就没了"）。readonly 只挡编辑。
+ * 单聊回复期间锁定；群聊不锁 —— 智能模式持续产出，锁住就没法插话，而发消息本身就是打断。
+ * 旁观模式进行中则锁定。⚠️ 锁定时用 readonly 而非 disabled：disabled 会让已聚焦的控件
+ * 失焦、移动端键盘随之收起。
  */
 const inputLocked = computed(() => {
   if (observerRunning.value) return true
@@ -369,32 +322,18 @@ const inputLocked = computed(() => {
 /** 表情弹窗是否展开 */
 const showEmojiPop = ref(false)
 
-// ---- AI 推荐选项面板(纯 UI) -------------------------------------------------
-/** 待选推荐项 */
+// AI 推荐选项面板（纯 UI）
 const pendingChoices = computed(() => chatStore.pendingChoices)
-/** 面板是否展开 */
 const choicesOpen = computed(() => chatStore.choicesOpen)
 
-/**
- * 群聊是否处于「指定模式」
- *
- * 指定模式的语义是"我点名谁、谁回复",与"我的身份"无关 ——
- * 所以它比旁观模式优先。
- */
+/** 指定模式的语义是「我点名谁、谁回复」，与我的身份无关，故比旁观优先 */
 const isAssignGroup = computed(
   () => chatStore.activeIsGroup && chatStore.activeSpeakMode === 'assign',
 )
 
 /**
- * 是否走"旁观 → 给出话题"的流程
- *
- * 此时"我"不参与对话,只能投喂话题:底部只保留话题输入框 + 一颗发送按钮
- * (与普通对话同一颗圆形图标按钮,不另做文字按钮),
- * 图片 / 表情 / 推荐回复按钮全部隐藏。
- *
- * 注意这里要**排除指定模式**:指定模式下发言模式已经明确指定了回复人,
- * 发消息就该让对方回一条,不应再被旁观分支拦掉(否则会出现"点了指定发言
- * 按钮才回复、直接发消息不回复")。
+ * 旁观流程下「我」不参演，只投喂话题：底部只留话题输入框 + 发送键，
+ * 图片 / 表情 / 推荐按钮全部隐藏。⚠️ 必须排除指定模式，否则点名发言后直接发消息不回复。
  */
 const isObserverGroup = computed(
   () =>
@@ -405,72 +344,11 @@ const isObserverGroup = computed(
 /** 面板最大高度:以消息区高度为上限,避免选项多时盖满整个聊天区 */
 const choicePanelMaxH = computed(() => geom.value.scrollH)
 
-// ---- 表情弹窗网格(桌面 16 列 60px 格;放不下时退小格子,列数按可用宽度自适应) ----
-/** 弹窗四周内边距(px) */
-const POP_PAD = 24
-/** 单格边长档位(px):宽版(桌面设计稿)/ 窄版(手机) */
-const POP_CELL_WIDE = 60
-const POP_CELL_NARROW = 36
-/** 格间距档位(px) */
-const POP_GAP_WIDE = 16
-const POP_GAP_NARROW = 10
+// 表情弹窗网格（几何算法见 composables/chat/useEmojiGrid.ts）
+// 只留"长什么样"的计算;展开态与插入动作仍在本组件(要操作 contenteditable)。
+// 模板只消费两个样式对象;列数/格宽等中间量留在 composable 内部。
+const { emojiPopStyle, emojiGridStyle } = useEmojiGrid(geom)
 
-/**
- * 宽版网格(16 列 × 60px 格 + 16px 间距)连同左右内边距所需的最小面板宽(px)
- *
- * 1248 = 16×60 + 15×16 + 2×24。
- * 面板比这更窄时若仍按 16 列排版,固定宽 1200px 的网格会撑出弹窗,被
- * overflow-x:hidden 裁掉左右两端的表情(平板 / 横屏手机必现,桌面
- * 因 panelWidth 固定 1319 而看不出问题)。
- * 所以判据必须是"面板放不放得下",不能是"是不是手机"。
- */
-const POP_WIDE_MIN_W = 16 * POP_CELL_WIDE + 15 * POP_GAP_WIDE + POP_PAD * 2
-
-/** 是否窄屏弹窗(放不下宽版网格时退回小格子) */
-const isNarrowPop = computed(() => geom.value.panelWidth < POP_WIDE_MIN_W)
-
-/** 单格边长(px) */
-const POP_CELL = computed(() => (isNarrowPop.value ? POP_CELL_NARROW : POP_CELL_WIDE))
-/** 格间距(px) */
-const POP_GAP = computed(() => (isNarrowPop.value ? POP_GAP_NARROW : POP_GAP_WIDE))
-
-/**
- * 每行表情数
- *
- * n 列占宽 = n×格宽 + (n-1)×间距 = n×(格宽+间距) - 间距,
- * 取满足"占宽 ≤ 可用宽度"的最大列数,并封顶 16 列。
- * 桌面 1319px → 16 列(与设计稿一致);手机竖屏 → 自然落在 7 列。
- */
-const POP_COLS = computed(() => {
-  const usable = Math.max(0, geom.value.panelWidth - POP_PAD * 2)
-  const unit = POP_CELL.value + POP_GAP.value
-  const fit = Math.floor((usable + POP_GAP.value) / unit)
-  return Math.max(1, Math.min(16, fit))
-})
-/** 行数 */
-const POP_ROWS = computed(() => Math.ceil(EMOJIS.length / POP_COLS.value))
-
-/**
- * 表情弹窗高度(px):上下边距 + 行×格高 + 行距(不出现滚动条)
- */
-const POP_H_EMOTICON = computed(
-  () => POP_PAD * 2 + POP_ROWS.value * POP_CELL.value + (POP_ROWS.value - 1) * POP_GAP.value,
-)
-
-/** 表情弹窗样式:紧贴面板顶边向上延伸,与面板同宽 */
-const emojiPopStyle = computed(() => ({
-  left: '0px',
-  top: `-${POP_H_EMOTICON.value}px`,
-  width: `${geom.value.panelWidth}px`,
-  height: `${POP_H_EMOTICON.value}px`,
-}))
-
-/** 表情网格样式(列数/格宽/间距随宽度变化,inline 覆盖 scoped CSS 默认值) */
-const emojiGridStyle = computed(() => ({
-  gridTemplateColumns: `repeat(${POP_COLS.value}, ${POP_CELL.value}px)`,
-  columnGap: `${POP_GAP.value}px`,
-  rowGap: `${POP_GAP.value}px`,
-}))
 
 /** 序列化输入框内容为纯文本(表情 <img> → [sns_emoji_xxx] token;桌面 contenteditable) */
 function serializeInput(): string {
@@ -478,13 +356,10 @@ function serializeInput(): string {
   return htmlToEmojiText(inputEl.value.innerHTML)
 }
 
-// ---- 草稿实时上报(用量面板据此预估"下一次请求"的上下文体积) ----------------
+// 草稿实时上报（用量面板据此预估下一次请求的上下文体积）
 /**
- * 把当前输入框内容上报给 usage store
- *
- * 面板据此把"还没发出去的这段字"也算进上下文占用,不必等发送就能看到
- * 下一次请求的体积 —— 这是面板"实时"的主要来源之一。
- * 直接改 innerHTML 不会触发 input 事件,故清空时由 clearInput 手动清零。
+ * 面板据此把「还没发出去的这段字」也算进上下文占用，是面板「实时」的主要来源之一。
+ * 直接改 innerHTML 不触发 input 事件，故清空时由 clearInput 手动清零。
  */
 function reportDraft() {
   usageStore.setDraft(isMobileInput.value ? mobileText.value : serializeInput())
@@ -567,17 +442,9 @@ const STORE_IMAGE_QUALITY = 0.82
 const STORE_IMAGE_SKIP_BYTES = 512 * 1024
 
 /**
- * 选图入库前降采样(F16/D1)
- *
- * 为什么在入库前做:图片 dataURL 会同时写进 messages 与 contextHistory,
- * 原图 2~5MB 的话每轮请求都可能背着几 MB 的 base64(与后端"历史图片每轮重发"
- * 叠加就是"图像识别卡死"的一半原因)。压到最长边 1280 / q0.82 后通常只剩
- * 100~300KB,发送、落库、导出都轻得多。
- *
- * ⚠ 只影响**新选的图**:已经保存在本地的历史图片不会被改动,也不会在启动时
- * 被重新编码(历史图只在导出时做重编码,见 utils/zipExport)。
- *
- * 任何一步失败都回退原图:宁可图大一点,也不能因为压缩失败让用户发不出图。
+ * 入库前降采样：dataURL 会同时写进 messages 与 contextHistory，原图会每轮背着几 MB
+ * 的 base64。压到最长边 1280 / q0.82 后通常只剩 100~300KB。
+ * ⚠️ 只影响新选的图，历史图不动；任何一步失败都回退原图，宁可图大也不能发不出去。
  */
 async function downsampleImage(
   dataUrl: string,
@@ -665,7 +532,7 @@ function onFileChange(event: Event) {
     if (typeof dataUrl !== 'string') return
     const img = new Image()
     img.onload = async () => {
-      // 1) 入库前降采样(F16/D1):只处理新选的图,历史图保持原样
+      // 1) 入库前降采样：只处理新选的图，历史图保持原样
       const stored = await downsampleImage(dataUrl, img, file.size)
       // 2) 显示尺寸仍按 CHAT_IMAGE 上限等比计算(气泡最大 320×240),小图不放大
       const scale = Math.min(
@@ -676,8 +543,7 @@ function onFileChange(event: Event) {
       const dw = Math.max(1, Math.round(stored.width * scale))
       const dh = Math.max(1, Math.round(stored.height * scale))
       chatStore.sendImage(stored.dataUrl, dw, dh)
-      // 注:历史图片目前仍随 contextHistory 每轮重发给后端(审计 F18/C1),
-      // 那需要改 backend.ts / stores/chat.ts,不在本次改动范围。
+      // 注:历史图片仍随 contextHistory 每轮重发给后端,该问题属 backend / store 一侧
       input.value = ''
 
       // 群聊:图片同样是"玩家说的一句话",发完按发言模式让成员接话。
@@ -715,15 +581,8 @@ function openFilePicker() {
 }
 
 /**
- * 点击表情:聚焦输入框并在光标处插入表情(紧跟在文字后面)
- *
- * 表情输出内联 em 尺寸(高度 1em、宽度按原图宽高比),随输入框字号
- * 自动缩放且保持真实比例。
- *
- * 桌面(contenteditable):用 Range API 插入表情
- *   - 有选区且在输入框内:删除选区内容 → 插入表情片段 → 光标移到表情后
- *   - 无选区或选区不在输入框内:追加到输入框末尾
- * 移动端(textarea):在光标处插入表情 token(表情在发送时显示为图片)
+ * 桌面用 Range API 在光标处插入、无选区则追加到末尾；移动端在光标处插入 token。
+ * 表情内联 em 尺寸，随字号缩放并保持真实比例。
  */
 function insertEmoji(emoji: Emoji) {
   if (isMobileInput.value) {

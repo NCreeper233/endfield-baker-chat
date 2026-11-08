@@ -5,18 +5,14 @@ export default defineConfig({
   plugins: [vue()],
   base: './',
   build: {
-    // 语法目标取三端 WebView/Electron 的最低公共集:esnext 产物在旧安卓
-    // WebView 上会直接语法报错(白屏),es2019 由构建期降级、运行时零成本。
+    // 取三端 WebView / Electron 的最低公共集：esnext 在旧安卓 WebView 上直接语法报错白屏
     target: 'es2019',
-    // 体积告警阈值:主包本就接近 1MB,默认 500KB 的告警形同虚设;
-    // 收到 350KB 后任何新增大依赖都会在构建日志里立刻显形。
+    // 主包本就接近 1MB，默认 500KB 告警形同虚设；收到 350KB 让新增大依赖立刻显形
     chunkSizeWarningLimit: 350,
-    // 生产包不带 sourcemap:三端都以包体积/安装包大小为先,调试走 dev 构建。
+    // 三端都以包体积为先，调试走 dev 构建
     sourcemap: false,
   },
-  // Worker 用 ESM 输出：ZIP 打包 Worker 会间接引用导出层（含 Capacitor 插件），
-  // 而 iife（Vite 旧默认）不支持代码分割构建 —— 2026-09-29 构建报
-  // "Invalid value iife for option worker.format" 就是这么来的。
+  // Worker 用 ESM：ZIP Worker 间接引用导出层（含 Capacitor 插件），iife 不支持代码分割
   worker: {
     format: 'es',
   },

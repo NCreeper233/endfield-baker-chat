@@ -1,28 +1,8 @@
 <script setup lang="ts">
-// =============================================================================
-// 聊天气泡(SVG 渲染,带尺寸过渡动画)
-// -----------------------------------------------------------------------------
-// 结构:
-//   <svg>
-//     <rect>          主体圆角矩形(width/height 走 CSS transition)
-//     <path>          左侧尾巴(mine 侧通过 transform 镜像到右侧)
-//     <foreignObject>  内嵌 HTML 文字(过渡完成后淡入)
-//
-// 尺寸过渡设计:
-//   - rect 的 width/height 用 CSS transition 平滑过渡(非 transform: scale)
-//   - 圆角 rx/ry 固定 13.65 不变,避免 scale 导致圆角变形
-//   - 文字气泡从 prevRect(加载气泡尺寸 100×单行高)过渡到真实尺寸
-//   - 过渡过半后文字 opacity 0→1 淡入
-//
-// 关键:svg 容器宽度跟随 rect 过渡(useBubbleSvgGeometry.svgW)
-//   - svg overflow:hidden 会把超出容器的部分直线裁掉;若容器固定为最终宽度,
-//     过渡起点(加载气泡 100 宽)会超界,被裁出"直角边",宽度缩回时才消失
-//   - 容器随 curW 过渡后,rect 任何时刻都在 svg 内,裁切线贴着 rect 边缘,
-//     全程完整圆角
-//   - mine 侧右缘固定:left 锚定最终右缘 = props.left + finalSvgW,
-//     再用 transform: translateX(-当前宽) 把左缘推到正确位置;
-//     当前宽 < 最终宽 时左缘位于最终位右侧,过渡中向左滑回(位置动画走合成器)
-// =============================================================================
+// ChatBubble —— SVG 气泡（rect 主体 + 尾巴 path + foreignObject 文字）
+// 尺寸过渡走 rect 的 width/height transition（不用 scale，圆角才不会变形）。
+// ⚠️ svg 容器宽度必须随 rect 一起过渡：overflow:hidden 下容器若固定为最终宽度，
+// 过渡起点（100 宽的加载气泡）会超界被裁成直角边。
 import { computed, inject, onMounted, onUnmounted, ref, toValue, watch } from 'vue'
 import { type BubbleBox, bubbleSvgWidth, BUBBLE_FONT } from '../../utils/measure'
 import {
@@ -114,15 +94,8 @@ let raf2 = 0
 let textTimer: number | null = null
 
 /**
- * 触发尺寸过渡
- *
- * CSS transition 只在属性值"变化"时触发,不在元素首次渲染时触发。
- * 新挂载元素初始 width=prev,浏览器必须先 paint 这个初始值,
- * 再改变 width=real,transition 才会生效。
- *
- * 用双层 requestAnimationFrame:
- *   rAF1:浏览器准备 paint 初始尺寸
- *   rAF2:浏览器已 paint 初始尺寸,此时改 width=real,transition 触发
+ * CSS transition 只在值变化时触发，所以要先用双层 rAF：第一帧让浏览器画出初始
+ * width=prev，第二帧再改成 real，过渡才会生效。
  */
 function triggerTransition(prev: { w: number; h: number }) {
   curW.value = prev.w
@@ -210,15 +183,8 @@ const { svgW, svgH, rectX, rectTransform, tailTransform, fillColor } =
 const finalSvgW = computed(() => bubbleSvgWidth(props.box.rectW, props.side))
 
 /**
- * svg 容器样式
- *
- * - 宽度跟随 rectW 过渡:rect 任何时刻都在 svg 内,不被 overflow:hidden
- *   直线裁切(不会出现"直角边")
- * - mine 侧右缘固定:left 锚定最终右缘 = props.left + finalSvgW,
- *   再用 transform: translateX(-当前宽) 把左缘推到正确位置;
- *   右缘 = left + translateX + width = props.left + finalSvgW,
- *   任何时刻都锚定 mineBubbleRight,只让左缘随宽度过渡滑动
- * - other 侧左缘固定,宽度向右伸缩
+ * 宽度随 rectW 过渡，rect 任何时刻都在 svg 内，overflow:hidden 不会裁出直角边。
+ * mine 侧右缘固定：left 锚定最终右缘，再用 translateX(-当前宽) 把左缘推到位。
  */
 const svgStyle = computed(() => {
   const mine = props.side === 'mine'
@@ -256,16 +222,9 @@ const rectStyle = computed(() => ({
 }))
 
 /**
- * 尾巴样式(CSS transform,带过渡)
- *
- * 尾巴必须跟随 rect 右缘平滑移动,不能用 SVG 属性 transform:
- * 属性值瞬间跳变会让尾巴在过渡早期被更宽的 rect 盖住(同色不可见),
- * 直到过渡末段 rect 缩到位才重新露出("先矩形、再长出尾巴"缺陷)。
- * CSS 形式 + transition,尾巴从第一帧起就贴住 rect 右缘露出尖角,
- * 与 rect 右缘同步平滑移动。
- *
- * transform-box: view-box + transform-origin: 0 0 保证 CSS transform
- * 与 SVG 属性 transform 等价(以视口原点镜像),平移量为用户单位。
+ * 尾巴必须用 CSS transform：SVG 属性 transform 会瞬间跳变，过渡早期尾巴被更宽的
+ * rect 盖住，直到末段才露出（「先矩形、再长出尾巴」）。transform-box: view-box +
+ * transform-origin: 0 0 让 CSS 与 SVG 属性等价（以视口原点镜像）。
  */
 const tailStyle = computed(() => ({
   transform: tailTransform.value,
@@ -275,26 +234,12 @@ const tailStyle = computed(() => ({
 }))
 
 /**
- * 内文样式:固定真实内宽/真实高度 + 文字淡入
- *
- * 过渡期间文字 opacity=0 不可见,foreignObject 尺寸用真实值无影响;
- * 过渡完成后 curW=realW,foreignObject 与 rect 对齐,文字淡入显示。
- *
- * 布局关键样式(display/font/white-space/word-break 等)全部写入 inline style:
- * html-to-image 对 SVG 根元素是深克隆(cloneNode(true)),不递归 cloneChildren,
- * scoped CSS 样式不会进入克隆的 SVG 子树。把布局样式放 inline style 后,
- * 深克隆天然复制,导出图与屏幕观感一致,无需事后内联计算样式。
+ * 内文：固定真实内宽/高 + 文字淡入。布局关键样式必须 inline ——
+ * html-to-image 对 SVG 根是深克隆，scoped CSS 不会进入克隆子树，inline 才会被复制。
  */
 /**
- * 外框样式(负责垂直居中 + 文字淡入)
- *
- * 这里必须是 flex 且**只能有一个子元素**:气泡比文字高时(尺寸过渡期间尤其明显)
- * 靠 align-items 把整块文字垂直居中。
- *
- * 文字本身不能直接挂在这个 flex 上 —— 消息里夹着表情时,`文本 + <img> + 文本`
- * 会被 flex 拆成多个匿名 flex item,按 row 方向并排,一段文字变一列
- * (长回复会变成"多列并排 + 底部被裁")。故文字一律放进下面的 __inner,
- * flex 容器只有一个孩子,内部按普通内联流排版。
+ * 外框：flex 垂直居中 + 文字淡入。⚠️ flex 里只能有一个子元素 ——
+ * 文字直接挂在这里会让「文本 + <img> + 文本」变成多个 flex item，一段文字排成一列。
  */
 const textStyle = computed(() => ({
   display: 'flex',
@@ -323,7 +268,7 @@ const textInnerStyle = computed(() => ({
   whiteSpace: 'pre-line',
   wordBreak: 'break-word' as const,
   userSelect: 'text' as const,
-  // 2026-09-30 按用户要求：玩家消息与对方一样**左对齐**（此前误改为右对齐，已撤销）。
+  // 玩家消息与对方一样**左对齐**。
   // 注意：这是 inline style —— 本组件用 <svg><foreignObject> 渲染，scoped CSS
   // 不会进入克隆子树，对齐必须内联，否则导出图与屏幕不一致。
   textAlign: 'left' as const,

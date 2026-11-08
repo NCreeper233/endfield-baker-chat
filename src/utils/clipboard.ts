@@ -1,17 +1,8 @@
-// =============================================================================
-// 复制文本到剪贴板
-// -----------------------------------------------------------------------------
-// 优先用 Clipboard API —— 它只在**安全上下文**(https / localhost)可用,
-// 而本应用既可能跑在 http 页面、也可能在 Electron / 安卓 WebView 里,
-// 所以保留 textarea + execCommand 的兜底。复制失败不影响其它行为,故整体静默。
-// =============================================================================
+// clipboard —— 复制文本到剪贴板
+// Clipboard API 只在安全上下文可用，故保留 textarea + execCommand 兜底；失败静默。
 
 /**
- * 把文本写进剪贴板
- *
- * 调用方通常把它挂在「点击群号」这类动作上:复制成功与否都不打断跳转。
- *
- * @param text 要复制的文本
+ * 调用方多是「点击群号」这类动作：复制成功与否都不打断跳转。
  */
 export async function copyText(text: string): Promise<void> {
   try {
@@ -34,6 +25,6 @@ export async function copyText(text: string): Promise<void> {
     document.execCommand('copy')
     document.body.removeChild(el)
   } catch {
-    // 两条路径都失败:静默放弃(用户仍可手动长按选择群号)
+    // 两条路径都失败：静默放弃，用户仍可手动选择
   }
 }
