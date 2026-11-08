@@ -26,11 +26,16 @@ body,
 //   · 桌面浏览器、以及没有刘海/手势条的设备：env() 本来就算出 0，布局零变化
 //   · 手机浏览器（Android Chrome 边到边 / iOS Safari）+ APK：自动得到正确内边距
 // 需要 `viewport-fit=cover`（见 index.html）env() 才会反映真实安全区。
+// 2026-11-08 真机（安卓 15/16 边到边）：
+//   Capacitor 8 的 SystemBars 插件会在页面里写入 --safe-area-inset-*（真实系统栏内边距，
+//   dp 值），而 `env(safe-area-inset-*)` 只有 iOS / 新内核（WebView 140+ 且
+//   viewport-fit=cover）才有。两条通路取其一，都拿不到就是 0 ——
+//   桌面版、网页版布局零变化。
 :root {
-  --safe-top: env(safe-area-inset-top, 0px);
-  --safe-right: env(safe-area-inset-right, 0px);
-  --safe-bottom: env(safe-area-inset-bottom, 0px);
-  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --safe-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --safe-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --safe-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
 }
 
 html,

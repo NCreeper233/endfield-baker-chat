@@ -95,12 +95,16 @@ const emit = defineEmits<{
   // ---- 移动端:贴视口顶部的固定条 ----------------------------------------
   &--mobile {
     position: fixed;
+    left: 0;
     right: 0;
     width: auto;
     height: calc(50px + var(--safe-top, 0px));
     padding-top: var(--safe-top, 0px);
     box-sizing: border-box;
     z-index: 120;
+    // 页签靠右：窄屏（320~360）居中会压住左边的标题（2026-11-07 修）
+    justify-content: flex-end;
+    padding-right: 12px;
 
     .app-bar__brand {
       left: 12px;
@@ -114,6 +118,10 @@ const emit = defineEmits<{
 
     .app-bar__title {
       font-size: 13px;
+      // 窄屏时标题最多占一半屏宽，超出用省略号，绝不钻到页签下面
+      max-width: calc(50vw - 60px);
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     // 手机屏窄:页签不能再按桌面比例放大,否则会压到左边的标题。

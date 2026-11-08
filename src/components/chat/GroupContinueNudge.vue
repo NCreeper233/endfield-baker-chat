@@ -34,7 +34,7 @@ const count = computed(() => chatStore.groupMessagesSinceAck)
 .nudge {
   position: fixed;
   left: 50%;
-  bottom: 22px;
+  bottom: calc(22px + var(--safe-bottom, 0px));
   transform: translateX(-50%);
   z-index: 180;
   display: flex;

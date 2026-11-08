@@ -4,7 +4,7 @@
 
 import { computed, type ComputedRef, type InjectionKey } from 'vue'
 import {
-  chatViewportHeight,
+  chatLayoutHeight,
   isMobileView,
   viewportWidth,
 } from '../composables/useMobile'
@@ -308,5 +308,7 @@ export const globalChatGeometry = computed<ChatGeometry>(() => {
   const grow = extraInputH.value
   if (!isMobileView.value) return desktopGeometry(grow)
   // 用可视视口高度而非布局视口：iOS 软键盘弹出时 innerHeight 不变
-  return mobileGeometry(viewportWidth.value, chatViewportHeight.value, grow)
+  // 再用「聊天页可用高度」（扣掉状态栏 / 导航栏安全区）——
+  // 边到边机型上输入面板因此落在系统导航栏上方，2026-11-08 真机修
+  return mobileGeometry(viewportWidth.value, chatLayoutHeight.value, grow)
 })

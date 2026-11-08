@@ -21,6 +21,26 @@ const visualOffsetTop = ref(0)
 /** 软键盘顶起的高度(px);0 表示键盘未弹出 */
 const keyboardInset = ref(0)
 
+// 系统栏安全区（状态栏 / 导航栏）
+// 来源见 styles/_base.scss：安卓边到边时 Capacitor 8 的 SystemBars 插件把真实内边距
+// 写进 --safe-area-inset-*，iOS 走 env()。这里读成像素值给 JS 几何用
+// （CSS 里能直接 var() 的地方不用这层）。键盘弹出时插件会把 bottom 归 0，
+// 所以下面算布局高度时不用再额外判断键盘。
+const safeTopPx = ref(0)
+const safeBottomPx = ref(0)
+
+/** 读某个 CSS 变量当前算出的像素值（未定义 → 0） */
+function readSafePx(name: string): number {
+  if (typeof document === 'undefined') return 0
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name)
+  return parseFloat(raw) || 0
+}
+
+function updateSafeInsets() {
+  safeTopPx.value = readSafePx('--safe-top')
+  safeBottomPx.value = readSafePx('--safe-bottom')
+}
+
 /**
  * 当前焦点是否在可编辑元素上(文本框 / 多行文本 / contenteditable)
  *
@@ -41,6 +61,7 @@ function updateVisual() {
     visualHeight.value = height.value
     visualOffsetTop.value = 0
     keyboardInset.value = 0
+    updateSafeInsets()
     return
   }
   const layoutH = height.value
@@ -52,6 +73,8 @@ function updateVisual() {
   keyboardInset.value = hasEditableFocus() && inset > 80 ? inset : 0
   // 只有键盘弹出时才补偿浏览器的可视视口平移;平时保持 0,不干扰双指缩放浏览
   visualOffsetTop.value = keyboardInset.value > 0 ? v.offsetTop : 0
+  // 键盘 / 旋转都会被原生重新注入 safe-area 变量，这里顺带同步一次
+  updateSafeInsets()
 }
 
 /**
@@ -63,6 +86,19 @@ const chatViewportHeight = computed(() =>
   keyboardInset.value > 0 ? visualHeight.value : height.value,
 )
 
+/**
+ * 聊天页真正可用的高度：再扣掉状态栏与底部导航栏安全区
+ *
+ * 安卓边到边（Android 15/16 + WebView 140+，Capacitor 8 透传 insets）时，
+ * 布局视口是整块屏幕，顶栏会画到状态栏底下、底部输入条会压到三键导航栏下面。
+ * 聊天页整页让位：顶部下移 safeTop、高度再减 safeTop + safeBottom，
+ * 输入条因此落在导航栏上方，返回键也仍在头部条里垂直居中。
+ * 非边到边机型这两个值都是 0，布局与改动前逐像素一致。
+ */
+const chatLayoutHeight = computed(() =>
+  Math.max(300, chatViewportHeight.value - safeTopPx.value - safeBottomPx.value),
+)
+
 // 模块级导出:供 chatGeometry 等模块级 computed 直接读取(useMobile() 需在 setup 内调用)
 export {
   width as viewportWidth,
@@ -71,7 +107,10 @@ export {
   visualHeight as visualViewportHeight,
   visualOffsetTop as keyboardOffsetTop,
   chatViewportHeight,
+  chatLayoutHeight,
   keyboardInset,
+  safeTopPx,
+  safeBottomPx,
 }
 
 let raf = 0
@@ -106,6 +145,8 @@ function update() {
   }
   // 布局视口一变,可视视口与键盘判定也要跟着重算
   updateVisual()
+  // 旋转 / 分屏也会改安全区（横屏时状态栏可能换边），一并重读
+  updateSafeInsets()
 }
 
 /**
@@ -242,5 +283,11 @@ export function useMobile() {
     keyboardInset,
     /** 聊天区可用视口高度(键盘弹出时即可视视口高度) */
     chatViewportHeight,
+    /** 聊天页可用高度：再扣掉状态栏 / 导航栏安全区（边到边机型用） */
+    chatLayoutHeight,
+    /** 状态栏安全区(px)；非边到边机型为 0 */
+    safeTopPx,
+    /** 底部导航栏 / 手势条安全区(px)；非边到边机型为 0 */
+    safeBottomPx,
   }
 }

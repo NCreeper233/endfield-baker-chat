@@ -347,16 +347,32 @@ const onPopState = () => {
 // ≤768px 视口进入移动端模式:
 //   list 视图 = 对话列表全屏;选中对话后切 chat 视图 = 全屏聊天窗口。
 // 移动端聊天窗口是独立自适应组件(MobileChat),不复用 1920 设计稿画布。
-const { isMobile, width, height, keyboardOffsetTop, keyboardInset, chatViewportHeight } =
-  useMobile()
+const {
+  isMobile,
+  width,
+  height,
+  keyboardOffsetTop,
+  keyboardInset,
+  chatLayoutHeight,
+  safeTopPx,
+  safeBottomPx,
+} = useMobile()
 
 /**
  * 钉在可视视口上：iOS 弹键盘时会把可视视口下移，而 fixed 是相对布局视口定位，
  * 不这样整个界面会被顶到屏幕外。键盘未弹出时 offsetTop 为 0、高度等于视口高度。
+ *
+ * 顶部再让出 --safe-top（状态栏安全区）：整个聊天页（头部条 + 消息区 + 输入条）一起下移，
+ * 高度同步减去，保证输入条仍贴底。
+ * 2026-11-07 修：之前只给返回键加了 safe-top，结果在「原生壳已经避开状态栏」的机型上
+ * 返回键一个人往下掉、脱离头部条垂直居中（真机截图可见），现在改为整页一起让位。
+ * 2026-11-08 修：安卓边到边（Android 15/16 + Capacitor 8 透传 insets）时，底部三键
+ * 导航栏会压住输入条 —— 高度再扣掉底部安全区，输入条因此落在导航栏上方。
+ * 非边到边机型 safeTop/safeBottom 都是 0，布局与改动前逐像素一致。
  */
 const mChatStyle = computed(() => ({
-  top: keyboardOffsetTop.value + 'px',
-  height: chatViewportHeight.value + 'px',
+  top: `${keyboardOffsetTop.value + safeTopPx.value}px`,
+  height: `${chatLayoutHeight.value}px`,
 }))
 
 /** 移动端视图:list=对话列表 / chat=聊天窗口 */
@@ -374,7 +390,7 @@ const MOBILE_LIST_W = 526
  */
 const MOBILE_LIST_H = 1019.84
 /** 移动端列表页顶部预留(px,视口坐标):让出 AppHeader 那条固定顶栏(52px) */
-const MOBILE_LIST_TOP_PAD = 14
+const MOBILE_LIST_TOP_PAD = 54 // 顶栏 50px + 4px 呼吸缝（2026-11-07 修：之前是 14，列表钻到顶栏底下）
 /**
  * 卡片居中修正(设计值,zoom 自动缩放):
  * 卡片在设计稿 526 坐标系内从 x=47.42 起(左侧空 47.42,右侧空 20.3),
@@ -383,13 +399,13 @@ const MOBILE_LIST_TOP_PAD = 14
  */
 const MOBILE_LIST_MARGIN_X = -(47.42 - (526 - 458.28) / 2)
 
-/** 移动端列表缩放系数:列表设计尺寸等比铺满视口(顶部预留工具栏空间) */
+/** 移动端列表缩放系数:列表设计尺寸等比铺满视口(顶部预留工具栏空间 + 状态栏安全区) */
 const mobileListZoom = computed(() =>
   Math.max(
     0.01,
     Math.min(
       width.value / MOBILE_LIST_W,
-      (height.value - MOBILE_LIST_TOP_PAD) / MOBILE_LIST_H,
+      (height.value - MOBILE_LIST_TOP_PAD - safeTopPx.value - safeBottomPx.value) / MOBILE_LIST_H,
     ),
   ),
 )
@@ -777,7 +793,7 @@ function onChatNew() {
         class="m-chat__back"
         type="button"
         aria-label="返回"
-        :style="{ top: mBackTop + 'px' }"
+        :style="{ top: `${mBackTop}px` }"
         @click="onMobileBack"
       >
         <svg viewBox="0 0 50 50" aria-hidden="true">
@@ -960,10 +976,12 @@ function onChatNew() {
     display: flex;
     align-items: flex-start;
     justify-content: center;
-    // 顶部预留 AppHeader 的高度;刘海/挖孔屏再补上安全区,
+    // 顶部预留 AppHeader 的高度(50px) + 4px 呼吸缝;刘海/挖孔屏再补上安全区,
     // 避免列表被状态栏或摄像头区域遮住。
     // --safe-top 默认 0px（见 styles/_base.scss），普通设备布局零变化。
-    padding-top: calc(14px + var(--safe-top, 0px));
+    padding-top: calc(54px + var(--safe-top, 0px));
+    // 底部三键导航栏 / 手势条安全区：列表尾部不再被系统栏压住（2026-11-08 真机修）
+    padding-bottom: var(--safe-bottom, 0px);
   }
 
   &__zoom {

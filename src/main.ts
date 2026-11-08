@@ -18,6 +18,81 @@ function registerBrandFont(): void {
 
 registerBrandFont()
 
+/**
+ * 原生端「安全区」兜底（2026-11-08 第三版：Capacitor 8 透传 + 真机校正）
+ *
+ * 安卓 15/16 对 targetSdk 35+ 强制边到边：WebView 铺满整块屏幕，状态栏压住顶栏、
+ * 三键导航栏压住聊天输入条。正解是读系统给的真实内边距 ——
+ * Capacitor 8 的 SystemBars 插件在 WebView 140+ 且 viewport-fit=cover 时，
+ * 会把值写进 --safe-area-inset-*（styles/_base.scss 已把它们接到
+ * --safe-top / --safe-bottom，CSS 直接 var() 就能用，且随键盘/旋转实时更新）。
+ *
+ * 因此：只要 --safe-area-inset-* 存在（哪怕值是 0px），布局就完全听原生的，
+ * 这里不再自己猜。只有「原生壳不注入」的旧壳才退回下面的估算：
+ *  A. 原生壳已经把 WebView 放在状态栏下方：screen.height 比 innerHeight 大一个状态栏 → 不用补
+ *  B. 真·边到边：两者几乎相等 → 补兜底值
+ * 键盘弹出会让 innerHeight 变小，所以记录历史最大视口高度再比较。
+ * 浏览器端（网页版）完全不执行，桌面/网页布局零变化。
+ */
+const SAFE_TOP_FALLBACK = 40
+function ensureNativeSafeTop(): void {
+  if (!isNative()) return
+  const root = document.documentElement
+  /** 读 CSS 变量算出的值（自定义属性会先做 var() 替换，所以这里拿到的是最终 px） */
+  const readCss = (name: string) => (getComputedStyle(root).getPropertyValue(name) || '').trim()
+  /** Capacitor 8 是否已经注入真实内边距 */
+  const hasNativeInsets = () => readCss('--safe-area-inset-top') !== ''
+  let maxInnerHeight = window.innerHeight
+
+  const evaluate = () => {
+    if (hasNativeInsets()) {
+      // 原生给了真实值：撤掉自己上一轮可能写过的兜底，布局完全跟随 --safe-area-inset-*
+      root.style.removeProperty('--safe-top')
+    } else {
+      maxInnerHeight = Math.max(maxInnerHeight, window.innerHeight)
+      const missing = (window.screen?.height || 0) - maxInnerHeight
+      if (missing >= 24) {
+        // 系统已经让出了状态栏：不需要兜底
+        root.style.removeProperty('--safe-top')
+      } else {
+        // 边到边：内容被状态栏压住
+        root.style.setProperty('--safe-top', SAFE_TOP_FALLBACK + 'px')
+      }
+    }
+    // 真机排查用：CDP 里读 window.__bakerSafeArea 就知道这一台的判定结果
+    ;(window as unknown as Record<string, unknown>).__bakerSafeArea = {
+      native: hasNativeInsets(),
+      rawTop: readCss('--safe-area-inset-top'),
+      rawBottom: readCss('--safe-area-inset-bottom'),
+      safeTop: parseFloat(readCss('--safe-top')) || 0,
+      safeBottom: parseFloat(readCss('--safe-bottom')) || 0,
+      innerHeight: window.innerHeight,
+      screenHeight: window.screen?.height || 0,
+    }
+  }
+
+  evaluate()
+  // 原生注入可能晚于首帧（SystemBars 在 DOM ready 之后才 requestApplyInsets），
+  // 前 3 秒每 250ms 复查一次，之后交给 resize / orientationchange
+  let ticks = 0
+  const timer = window.setInterval(() => {
+    evaluate()
+    if (++ticks >= 12) window.clearInterval(timer)
+  }, 250)
+  window.addEventListener('resize', evaluate, { passive: true })
+  window.visualViewport?.addEventListener('resize', evaluate, { passive: true })
+  window.addEventListener(
+    'orientationchange',
+    () => {
+      // 旋转后视口高度会变，重置基准再算
+      maxInnerHeight = window.innerHeight
+      window.setTimeout(evaluate, 300)
+    },
+    { passive: true },
+  )
+}
+ensureNativeSafeTop()
+
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
