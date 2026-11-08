@@ -40,6 +40,7 @@ function onSave(): void {
     title="确定要退出吗？"
     kind="alert"
     :closable="!saving"
+    :layer="900"
     @close="emit('cancel')"
   >
     <p class="xd__text">退出后会保存当前进度，下次打开可以继续。</p>

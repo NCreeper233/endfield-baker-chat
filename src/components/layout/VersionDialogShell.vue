@@ -13,7 +13,7 @@ const props = withDefaults(
     title: string
     /** 图标种类 */
     kind?: VersionDialogKind
-    /** 版本号(有值才画左上角的小徽标,如 v2.4) */
+    /** 版本号(有值才画左上角的小徽标,如 v3.2) */
     version?: string
     /** 日期文字(有值才画在徽标右边,如 2026-10-18) */
     date?: string
@@ -27,8 +27,13 @@ const props = withDefaults(
      *                浮动容器(如可拖动的 TOKEN 用量小窗)
      */
     variant?: 'modal' | 'float'
+    /**
+     * 层级。默认 400；需要压过设置(500)/公告(520)这类面板时给更大的值
+     * （退出确认是最高优先级，不能被别的窗口盖住）
+     */
+    layer?: number
   }>(),
-  { kind: 'notice', version: '', date: '', closable: true, variant: 'modal' },
+  { kind: 'notice', version: '', date: '', closable: true, variant: 'modal', layer: 400 },
 )
 
 const emit = defineEmits<{
@@ -83,6 +88,7 @@ function onClose(): void {
       v-if="open"
       class="fx"
       :class="{ 'fx--float': variant === 'float' }"
+      :style="variant === 'float' ? null : { zIndex: layer }"
       @click.self="onClose"
     >
       <div v-if="variant !== 'float'" class="fx__scrim" aria-hidden="true"></div>
