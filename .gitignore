@@ -33,3 +33,9 @@ endfield-ui/
 # ---- 本地文档目录：只留在本地，不进仓库 ----
 docs/
 baker-*-文档/
+
+# ---- APK 打包工作区：SDK / Gradle / JDK / 中间产物，几个 GB，绝不进仓库 ----
+apk/
+setup/
+# 误落进 tests 的构建物（正经用例在 tests/*/ 下）
+tests/setup/

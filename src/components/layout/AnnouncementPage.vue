@@ -294,7 +294,7 @@ const blocks = computed<ContentBlock[]>(() => {
                   <p class="an__about-hero-kicker">明日方舟：终末地 · 同人 AI 聊天</p>
                   <h3 class="an__about-hero-title">
                     Baker AI
-                    <span class="an__about-hero-ver">v2.4</span>
+                    <span class="an__about-hero-ver">v3.2</span>
                   </h3>
                   <p class="an__about-hero-desc">
                     与干员自由对话，体验真实的角色性格与世界观。

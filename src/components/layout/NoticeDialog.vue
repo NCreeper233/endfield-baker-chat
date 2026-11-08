@@ -17,7 +17,7 @@ const props = defineProps<{
   content?: string
   /** 弹窗标题(网络公告源 JSON 的 title;空则回退内置标题) */
   title?: string
-  /** 版本号(公告页里用于左上角徽标,如 v2.4) */
+  /** 版本号(公告页里用于左上角徽标,如 v3.2) */
   version?: string
   /** 日期文字 */
   date?: string

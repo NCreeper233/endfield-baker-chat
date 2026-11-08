@@ -8,7 +8,7 @@
 export const POPUP_DATA_URL = 'https://notice.peilika.beer/popup.json'
 
 /** 服务端 version 大于本值才提示更新；发版时同步修改 */
-export const APP_VERSION = '3.1'
+export const APP_VERSION = '3.2'
 
 export interface AlertItem {
   /** 用于记录「已确认」，同一条不再重复弹出 */
