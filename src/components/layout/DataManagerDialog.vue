@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 // DataManagerDialog —— 数据管理：统计、导出（.zip / 单文件 JSON）、导入、四种清空、云同步取件码
 // 破坏性操作均为两段式确认（弹窗内切换确认态）。.json 走旧格式兼容层，图片内联；
 // .zip 走压缩包，图片为独立文件。
@@ -18,7 +18,7 @@ import {
   exportToJson,
   IMPORT_FILE_ACCEPT,
 } from '../../utils/jsonCompat'
-import { isNativeAndroid, saveExportFileSmart } from '../../utils/nativeExport'
+import { isNativeAndroid, revealSavedFile, saveExportFileSmart } from '../../utils/nativeExport'
 import { isElectron, isNative } from '../../utils/platform'
 import {
   uploadCloudData,
@@ -58,6 +58,7 @@ const { cards } = storeToRefs(chatStore)
 
 // 组件卸载时终止导入导出 Worker,释放内存(大文件场景尤为关键)
 onUnmounted(() => {
+  stopExportTimer()
   terminateZipWorker()
 })
 
@@ -92,6 +93,57 @@ const exportInfo = ref('')
 
 /** 是否安卓端（决定是否显示"应急导出"按钮） */
 const androidNative = isNativeAndroid()
+
+// ---- 导出落点（安卓写进「下载/Baker AI」，界面要把它显示出来）----
+/** 刚导出成功的文件位置（给人看） */
+const savedPath = ref('')
+/** 刚导出成功的文件 uri（再打开用） */
+const savedUri = ref('')
+/** 刚导出成功的文件 MIME */
+const savedMime = ref('application/octet-stream')
+/** 导出已耗时（秒）—— 打包几十 MB 时要让用户看到"还在动"，而不是一个死按钮 */
+const exportSeconds = ref(0)
+let exportTicker: ReturnType<typeof setInterval> | null = null
+
+/** 三个导出按钮共用一个计时器：谁在跑就数谁 */
+function startExportTimer() {
+  stopExportTimer()
+  exportSeconds.value = 0
+  exportTicker = setInterval(() => {
+    exportSeconds.value += 1
+  }, 1000)
+}
+
+function stopExportTimer() {
+  if (exportTicker) {
+    clearInterval(exportTicker)
+    exportTicker = null
+  }
+}
+
+/** 按钮文案：导出中… 3s（超过 2 秒才显示秒数，避免闪一下又没了） */
+function exportingLabel(text: string): string {
+  if (exportSeconds.value > 2) return `${text} ${exportSeconds.value}s`
+  return text
+}
+
+/** 记下落点（浏览器端 path 为空，不显示这一行） */
+function rememberSaved(info: { path?: string; uri?: string }, mime: string) {
+  savedPath.value = info.path ?? ''
+  savedUri.value = info.uri ?? ''
+  savedMime.value = mime
+}
+
+/** 再打开一次文件管理器（自动跳转失败，或用户离开后又想看时用） */
+async function openSavedFolder() {
+  await revealSavedFile({ path: savedPath.value, uri: savedUri.value, mime: savedMime.value })
+}
+
+/** 清空上一次的落点（每次重新导出前） */
+function clearSaved() {
+  savedPath.value = ''
+  savedUri.value = ''
+}
 
 /** 是否打包环境（Electron/APK）——正式版同款判定 */
 function isNativePlatform(): boolean {
@@ -171,6 +223,8 @@ async function onExport() {
   isExporting.value = true
   exportInfo.value = ''
   importError.value = ''
+  clearSaved()
+  startExportTimer()
   try {
     // 空数据守卫：空库不能"成功"导出一个 0 字节空包，
     // 直接说清楚更有用
@@ -191,24 +245,27 @@ async function onExport() {
       )
       // 以前这里走整包 base64 的 saveFile，且**不校验落盘字节**：
       // 数据一大桥层就静默截断 → 得到 0 字节空包还提示"导出完成"。
-      // 现在统一走 saveExportFileSmart：小文件走系统保存框（带空内容守卫），
+      // 现在统一走 saveExportFileSmart：小文件走原生保存通道（带空内容守卫），
       // 大文件走分块写入（逐块 SHA-256 + 收尾回读校验），失败会明确报错。
       const saved = await saveExportFileSmart({ fileName, base64, mime: 'application/zip' })
+      rememberSaved(saved, 'application/zip')
       // 优先用落盘字节（分块通道回读校验过），拿不到再退回 blob 真实体积
       applyExportInfo(filteredImages, reencodedImages, saved.bytes || totalBytes, '导出数据')
     } else {
-      const { filteredImages, reencodedImages, totalBytes } = await downloadProject(
+      const res = await downloadProject(
         cards.value,
         chatStore.myGender,
         chatStore.stripVariantIndex,
         settingsStore.promptOverrides,
         settingsStore.getSettingsSnapshot(),
       )
-      applyExportInfo(filteredImages, reencodedImages, totalBytes, '导出数据')
+      rememberSaved(res, 'application/zip')
+      applyExportInfo(res.filteredImages, res.reencodedImages, res.totalBytes, '导出数据')
     }
   } catch (err) {
     importError.value = err instanceof Error ? err.message : '导出失败'
   } finally {
+    stopExportTimer()
     isExporting.value = false
   }
 }
@@ -219,8 +276,10 @@ async function onExportJson() {
   isExportingJson.value = true
   exportInfo.value = ''
   importError.value = ''
+  clearSaved()
+  startExportTimer()
   try {
-    const { filteredImages, reencodedImages, totalBytes } = await downloadProjectJson(
+    const res = await downloadProjectJson(
       cards.value,
       chatStore.myGender,
       chatStore.stripVariantIndex,
@@ -229,10 +288,12 @@ async function onExportJson() {
       // v7：把当前列表人物顺序一起写进包（覆盖导入时应用）
       chatStore.exportCardOrder(),
     )
-    applyExportInfo(filteredImages, reencodedImages, totalBytes, '导出 JSON')
+    rememberSaved(res, 'application/json')
+    applyExportInfo(res.filteredImages, res.reencodedImages, res.totalBytes, '导出 JSON')
   } catch (err) {
     importError.value = err instanceof Error ? err.message : '导出失败'
   } finally {
+    stopExportTimer()
     isExportingJson.value = false
   }
 }
@@ -243,8 +304,10 @@ async function onEmergencyExport() {
   isExportingEmergency.value = true
   exportInfo.value = ''
   importError.value = ''
+  clearSaved()
+  startExportTimer()
   try {
-    const { filteredImages, reencodedImages, totalBytes } = await downloadProjectJson(
+    const res = await downloadProjectJson(
       cards.value,
       chatStore.myGender,
       chatStore.stripVariantIndex,
@@ -253,10 +316,12 @@ async function onEmergencyExport() {
       // v7：把当前列表人物顺序一起写进包（覆盖导入时应用）
       chatStore.exportCardOrder(),
     )
-    applyExportInfo(filteredImages, reencodedImages, totalBytes, '应急导出')
+    rememberSaved(res, 'application/json')
+    applyExportInfo(res.filteredImages, res.reencodedImages, res.totalBytes, '应急导出')
   } catch (err) {
     importError.value = err instanceof Error ? err.message : '应急导出失败'
   } finally {
+    stopExportTimer()
     isExportingEmergency.value = false
   }
 }
@@ -642,11 +707,11 @@ function onCancelConfirm() {
           <h3 v-if="embedded" class="dm__group">数据</h3>
           <div class="dm__actions">
             <button class="dm__btn dm__btn--primary" type="button" :disabled="isExporting" @click="onExport">
-              {{ isExporting ? '导出中…' : '导出数据' }}
+              {{ isExporting ? exportingLabel('导出中…') : '导出数据' }}
             </button>
             <!-- 旧版兼容:导出为单文件 JSON -->
             <button class="dm__btn" type="button" :disabled="isExportingJson" @click="onExportJson">
-              {{ isExportingJson ? '导出中…' : '导出 JSON' }}
+              {{ isExportingJson ? exportingLabel('导出中…') : '导出 JSON' }}
             </button>
             <!-- 应急导出：只在安卓出现。免 root / 免数据线，直接写进手机下载目录 -->
             <button
@@ -656,10 +721,21 @@ function onCancelConfirm() {
               :disabled="isExportingEmergency"
               @click="onEmergencyExport"
             >
-              {{ isExportingEmergency ? '应急导出中…' : '应急导出到手机' }}
+              {{ isExportingEmergency ? exportingLabel('应急导出中…') : '应急导出到手机' }}
             </button>
             <button class="dm__btn" type="button" @click="onPickFile">导入数据</button>
           </div>
+
+          <!--
+            导出落点 + 结果紧贴按钮：以前这些字在面板最底部，手机上要滚下去才看得到，
+            用户整段只看到按钮变回原样，以为「点了没反应」。现在落点就在按钮下面。
+          -->
+          <p v-if="savedPath" class="dm__saved">
+            已保存到：<code class="dm__saved-path">{{ savedPath }}</code>
+            <button class="dm__btn dm__btn--tiny" type="button" @click="openSavedFolder">打开文件夹</button>
+          </p>
+          <p v-if="importError" class="dm__error dm__error--inline">{{ importError }}</p>
+          <p v-else-if="exportInfo" class="dm__info dm__info--inline">{{ exportInfo }}</p>
 
           <div class="dm__divider" v-if="!embedded"></div>
 
@@ -748,9 +824,8 @@ function onCancelConfirm() {
         <!-- 导出成功后的"分享文件"：落在公共下载目录时不需要，但留着也无害 -->
 
 
-        <p v-if="importError || cloudError" class="dm__error">{{ cloudError || importError }}</p>
-        <p v-else-if="exportInfo" class="dm__info">{{ exportInfo }}</p>
-        <p v-if="cloudInfo && !cloudError && !importError" class="dm__info">{{ cloudInfo }}</p>
+        <p v-if="cloudError" class="dm__error">{{ cloudError }}</p>
+        <p v-else-if="cloudInfo" class="dm__info">{{ cloudInfo }}</p>
 
         <input ref="fileInput" type="file" :accept="IMPORT_FILE_ACCEPT" hidden @change="onFileChange" />
       </div>
@@ -825,6 +900,42 @@ $progress-text-color: #ffef00;
   color: $hint-text-color;
   // 深色底上 0.75 的白字偏灰、观感发闷；提到 0.9 与主字体一致清晰
   opacity: 0.9;
+}
+// 导出落点 / 结果提示：紧贴导出按钮，必须足够显眼
+//   落点用黄框（"文件在这儿"），失败用红字，成功说明用白字
+.dm__saved {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 239, 0, 0.08);
+  border: 1px solid rgba(255, 239, 0, 0.35);
+  color: $hint-text-color;
+  font-size: 13px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  word-break: break-all;
+}
+.dm__saved-path {
+  font-size: 13px;
+  color: $progress-text-color;
+  word-break: break-all;
+}
+.dm__error {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #ff6b6b;
+  word-break: break-word;
+}
+.dm__info {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: $hint-text-color;
+  opacity: 0.9;
+  word-break: break-word;
 }
 .dm__code {
   margin: 8px 0 4px;

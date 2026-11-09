@@ -28,11 +28,8 @@ import editBtnPotential from '../assets/materials/potential_picture.svg'
 import editBtnEmoticon from '../assets/materials/icon_sns_chat_emoticon.svg'
 import iconEventsOverview from '../assets/materials/icon_events_overview.svg'
 import editBtnChat from '../assets/materials/icon_sns_chat_04.svg'
-import editBtnDeleteIndeed from '../assets/materials/icon_tips_delete_indeed.svg'
 
-import loginBtnSetting from '../assets/materials/login_btn_setting.svg'
 import iconUsageStats from '../assets/materials/icon_usage_stats.svg'
-
 import prefBracketColorOn from '../assets/materials/pref_bracket_color_on.webp'
 import prefBracketColorOff from '../assets/materials/pref_bracket_color_off.webp'
 import prefBracketCenterOff from '../assets/materials/pref_bracket_center_off.webp'
@@ -43,12 +40,10 @@ import panelTabTexture from '../assets/materials/panel_tab_texture.webp'
 import panelBtnTexture from '../assets/materials/panel_btn_texture.webp'
 import panelBtnDeco from '../assets/materials/panel_btn_deco.webp'
 
-import announceItemOn from '../assets/materials/announce_item_on.webp'
-import announceTabOn from '../assets/materials/announce_tab_on.webp'
-import announceTabOff from '../assets/materials/announce_tab_off.webp'
-import announceUnread from '../assets/materials/announce_unread.webp'
-
 import prefChibi from '../assets/materials/pref_chibi.webp'
+
+// 关于页：头图（佩丽卡插画，圆角矩形背景用）
+import aboutHero from '../assets/materials/about_hero.webp'
 
 /** 命名约定 `<区域><用途>` 驼峰；通过 MATERIALS.xxx 访问，避免硬编码路径 */
 export const MATERIALS = {
@@ -83,23 +78,18 @@ export const MATERIALS = {
   editBtnEmoticon,
   iconEventsOverview,
   editBtnChat,
-  editBtnDeleteIndeed,
-  loginBtnSetting,
   iconUsageStats,
   // 首次使用偏好弹窗：三张示意图与三个选项一一对应
   prefBracketColorOn,
   prefBracketColorOff,
   prefBracketCenterOff,
   prefChibi,
-  // 面板设计系统（设置 / 公告 / 版本弹窗共用）
+  // 面板设计系统（设置 / 版本弹窗共用）
   decoPanelContour,
   decoPanelLogoBg,
   panelTabTexture,
   panelBtnTexture,
   panelBtnDeco,
-  // 公告页
-  announceItemOn,
-  announceTabOn,
-  announceTabOff,
-  announceUnread,
+  // 关于页：头图（圆角矩形背景）
+  aboutHero,
 } as const

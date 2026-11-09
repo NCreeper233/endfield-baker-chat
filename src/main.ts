@@ -1,4 +1,17 @@
 import { isElectron, isNative } from './utils/platform'
+import { installLegacyGapFix } from './utils/legacyGap'
+
+/**
+ * 先探测 flex gap 支持情况并补位，再渲染任何内容。
+ *
+ * Chromium 83（vivo 冻结内核）会忽略 flex 容器的 gap，界面元素会紧贴；
+ * 兜底靠运行时读计算样式补 margin，必须赶在首帧前跑完，
+ * 否则用户会看到一次「先挤在一起再弹开」的跳变。
+ * 启动层(index.html 的 #boot-layer)盖在应用上，这一拍用户看不到。
+ *
+ * 支持的引擎在这里直接返回，零开销、零样式变化。
+ */
+installLegacyGapFix()
 
 /**
  * 只有打包端注册品牌字体：字体在包内、本地 IO 几乎零成本。

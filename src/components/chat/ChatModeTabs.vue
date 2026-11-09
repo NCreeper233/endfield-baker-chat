@@ -84,6 +84,13 @@ function select(mode: ChatMode): void {
           </svg>
         </span>
       </button>
+
+      <!-- 尾格:放页签组右侧的操作键(目前是设置)。
+           让它成为这条"控制带"的第三格,而不是旁边另起一块:
+           共用同一块斜纹背板,不会有接缝或纹理密度不一致。
+           它不是模式,所以没有选中黄块、也不参与 select()。
+           分隔线由 AppHeader 统一关掉(顶栏不需要分格线)。 -->
+      <slot name="trailing" />
     </div>
   </div>
 </template>

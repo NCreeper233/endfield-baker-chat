@@ -122,10 +122,32 @@ export async function getNativeFileBridge(): Promise<NativeFileBridge | null> {
 /**
  * 所有键存同一个 JSON 文件；写入经 writeChain 串行化，避免并发 put 互相覆盖
  * （大历史导入导出与聊天自动保存同时发生时尤为关键）。
+ *
+ * 2026-11-09（真机排查）：以前每个 key 的 put 都**各写一遍整文件**，一次保存要写
+ * 8 个 key = 8 次 `JSON.stringify(整库)` + 8 次整文件落盘；而且内容没变也照写
+ * （实测空闲时每秒还在重写同样的字节）。现在：
+ *   · 合并窗口：同一轮里的多个 put 合起来只写一次
+ *   · 内容指纹：序列化结果与上次成功写入完全一样 → 直接跳过，不落盘
+ * 落盘内容、时机语义（写后回读校验 / 备份 / 损坏拒写）都不变。
  */
 export function createNativeStore(bridge: NativeFileBridge) {
   let cache: Record<string, unknown> | null = null
   let writeChain: Promise<void> = Promise.resolve()
+
+  /** 合并窗口：一次保存会连着 put 多个 key，窗口内的写入合并成一次 */
+  const COALESCE_MS = 50
+
+  interface PendingPut {
+    key: string
+    value: unknown
+    resolve: () => void
+    reject: (err: unknown) => void
+  }
+
+  /** 等落盘的写入（按提交顺序） */
+  let pendingPuts: PendingPut[] = []
+  /** 合并窗口的定时器（null = 没有排队的写入） */
+  let coalesceTimer: number | null = null
 
   // 数据保护：主文件解析失败先从 .bak 恢复；两个都坏则标记 corrupt 并拒绝写入，
   // 给用户留出抢救机会；每次写前留一代备份。
@@ -134,6 +156,24 @@ export function createNativeStore(bridge: NativeFileBridge) {
   let loadedStatus: 'ok' | 'empty' | 'recovered' | 'corrupt' | 'unreadable' = 'empty'
   let lastGoodText: string | null = null
   let lastBakAt = 0
+
+  /**
+   * 最后写进每个文件的字节（按路径）。
+   *
+   * 兜底去重：不管从哪条路进来，只要内容和上次写进这个文件的完全一样就直接跳过。
+   * 真机实测会有一条"内容不变还在写"的路径（合并窗口之外），这里从最底层堵住它，
+   * 代价只是每个文件多留一份字符串引用（写的是刚序列化出来的同一份，不额外拷贝）。
+   */
+  const lastWrittenByPath = new Map<string, string>()
+
+  /** 带去重的写文件：内容没变就不落盘，返回 true 表示"已经是这个内容了" */
+  const dedupWriteFile = async (path: string, content: string): Promise<boolean | void> => {
+    if (lastWrittenByPath.get(path) === content) return true
+    const wrote = await (bridge.writeFile as unknown as
+      (p: string, c: string) => Promise<boolean | void>)(path, content)
+    if (wrote !== false) lastWrittenByPath.set(path, content)
+    return wrote
+  }
 
   function parseOrNull(text: string | null): Record<string, unknown> | null {
     if (!text || !text.trim()) return null
@@ -164,6 +204,8 @@ export function createNativeStore(bridge: NativeFileBridge) {
       cache = main
       loadedStatus = 'ok'
       lastGoodText = text
+      // 记下磁盘上的内容：接下去写"一模一样的字节"时直接跳过
+      if (text) lastWrittenByPath.set(NATIVE_DATA_FILE, text)
       return cache
     }
 
@@ -175,7 +217,7 @@ export function createNativeStore(bridge: NativeFileBridge) {
       loadedStatus = 'recovered'
       lastGoodText = bak
       // 立刻用备份把主文件修复回去(失败不影响本次使用)
-      void bridge.writeFile(NATIVE_DATA_FILE, bak as string).catch(() => {})
+      void dedupWriteFile(NATIVE_DATA_FILE, bak as string).catch(() => {})
       return cache
     }
 
@@ -201,6 +243,83 @@ export function createNativeStore(bridge: NativeFileBridge) {
     return cache
   }
 
+  /**
+   * 把等落盘的写入合并成一次：应用所有脏 key → 序列化一次 → 写盘一次。
+   * 与 writeChain 串行，多个批次按顺序执行，互不覆盖。
+   */
+  function flushPendingPuts(): Promise<void> {
+    if (coalesceTimer !== null) {
+      window.clearTimeout(coalesceTimer)
+      coalesceTimer = null
+    }
+    if (pendingPuts.length === 0) return Promise.resolve()
+    const batch = pendingPuts
+    pendingPuts = []
+
+    const task = writeChain.then(async () => {
+      try {
+        const obj = await loadCache()
+        if (loadedStatus === 'corrupt' || loadedStatus === 'unreadable') {
+          throw new Error(
+            loadedStatus === 'corrupt'
+              ? `本地数据文件已损坏(${NATIVE_DATA_FILE}),已拒绝写入以免覆盖:请先备份/导出该文件再重试`
+              : `本地数据文件读取失败(${NATIVE_DATA_FILE}),已暂停保存以免覆盖现有数据:请重启应用或导出备份`,
+          )
+        }
+        for (const p of batch) obj[p.key] = p.value
+        const text = JSON.stringify(obj)
+
+        // 内容指纹：和上次成功写入的完全一样 → 不写盘。
+        // 真机实测：watcher 空转时每秒都会走到这里，以前每次都重写同样的字节。
+        if (text === lastGoodText) {
+          for (const p of batch) p.resolve()
+          return
+        }
+
+        // 写前留一代备份(限频,避免每次保存都双倍写入)
+        if (lastGoodText && Date.now() - lastBakAt > BAK_MIN_INTERVAL_MS) {
+          try {
+            await dedupWriteFile(BAK_FILE, lastGoodText)
+            lastBakAt = Date.now()
+          } catch {
+            /* 备份失败不影响主写入 */
+          }
+        }
+        // 大工程用分块写：一次性整串过桥是历史闪退点
+        if (text.length > 512 * 1024 && bridge.writeFileChunked) {
+          await bridge.writeFileChunked(NATIVE_DATA_FILE, text)
+          lastWrittenByPath.set(NATIVE_DATA_FILE, text)
+        } else {
+          // Electron 的 write-file 会带**回读校验**并返回布尔；返回 false 代表没落盘
+          // （磁盘满/被占用/回读不一致）。以前这里丢弃返回值 → 界面正常、重启回旧数据。
+          const wrote = await dedupWriteFile(NATIVE_DATA_FILE, text)
+          if (wrote === false) {
+            throw new Error('本地数据写入未通过回读校验（磁盘空间/权限异常），本次修改没有保存')
+          }
+        }
+        lastGoodText = text
+        loadedStatus = 'ok'
+        for (const p of batch) p.resolve()
+      } catch (err) {
+        // 一个批次失败 → 本批次的所有写入都失败（调用方据此提示"没保存成功"）
+        for (const p of batch) p.reject(err)
+        throw err
+      }
+    })
+    // 链上追加(失败也不阻塞后续任务)，调用方各自拿到自己的结果
+    writeChain = task.catch(() => {})
+    return task.catch(() => {})
+  }
+
+  /** 排一次合并窗口（已经排了就不重复排） */
+  function scheduleCoalesce(): void {
+    if (coalesceTimer !== null) return
+    coalesceTimer = window.setTimeout(() => {
+      coalesceTimer = null
+      void flushPendingPuts()
+    }, COALESCE_MS)
+  }
+
   return {
     async get(key: string): Promise<unknown> {
       const obj = await loadCache()
@@ -214,46 +333,23 @@ export function createNativeStore(bridge: NativeFileBridge) {
     loadStatus(): string {
       return loadedStatus
     },
+    /**
+     * 写一个键。
+     *
+     * 不再"每个键写一次整文件"：先进待写队列，50ms 合并窗口内一起序列化、一次落盘。
+     * 返回的 Promise 在**真正写盘（或确认内容没变）之后**才 settle，调用方语义不变。
+     */
     put(key: string, value: unknown): Promise<void> {
-      // 串行化:每个 put 排队执行,避免并发写覆盖
-      const task = writeChain.then(async () => {
-        const obj = await loadCache()
-        if (loadedStatus === 'corrupt' || loadedStatus === 'unreadable') {
-          throw new Error(
-            loadedStatus === 'corrupt'
-              ? `本地数据文件已损坏(${NATIVE_DATA_FILE}),已拒绝写入以免覆盖:请先备份/导出该文件再重试`
-              : `本地数据文件读取失败(${NATIVE_DATA_FILE}),已暂停保存以免覆盖现有数据:请重启应用或导出备份`,
-          )
-        }
-        obj[key] = value
-        const text = JSON.stringify(obj)
-        // 写前留一代备份(限频,避免每次保存都双倍写入)
-        if (lastGoodText && Date.now() - lastBakAt > BAK_MIN_INTERVAL_MS) {
-          try {
-            await bridge.writeFile(BAK_FILE, lastGoodText)
-            lastBakAt = Date.now()
-          } catch {
-            /* 备份失败不影响主写入 */
-          }
-        }
-        // 大工程用分块写：一次性整串过桥是历史闪退点
-        if (text.length > 512 * 1024 && bridge.writeFileChunked) {
-          await bridge.writeFileChunked(NATIVE_DATA_FILE, text)
-        } else {
-          // Electron 的 write-file 会带**回读校验**并返回布尔；返回 false 代表没落盘
-          // （磁盘满/被占用/回读不一致）。以前这里丢弃返回值 → 界面正常、重启回旧数据。
-          const wrote = await (bridge.writeFile as unknown as
-            (p: string, c: string) => Promise<boolean | void>)(NATIVE_DATA_FILE, text)
-          if (wrote === false) {
-            throw new Error('本地数据写入未通过回读校验（磁盘空间/权限异常），本次修改没有保存')
-          }
-        }
-        lastGoodText = text
-        loadedStatus = 'ok'
+      return new Promise<void>((resolve, reject) => {
+        // 缓存已就绪时立刻反映到内存：写盘前再 get 同一个键也能读到新值
+        if (cache !== null) cache[key] = value
+        pendingPuts.push({ key, value, resolve, reject })
+        scheduleCoalesce()
       })
-      // 链上追加(失败也不阻塞后续任务)
-      writeChain = task.catch(() => {})
-      return task
+    },
+    /** 立刻把合并窗口里的写入落盘（切后台 / 关窗 / 导入导出后调用） */
+    flushNow(): Promise<void> {
+      return flushPendingPuts()
     },
   }
 }

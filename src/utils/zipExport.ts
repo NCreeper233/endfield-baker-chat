@@ -766,34 +766,30 @@ export async function getNativeSaveFile(): Promise<SaveFileFn | null> {
   return null
 }
 
-/** 分片转 base64：逐 8MB 转换后拼接，避免一次性读入整包撑爆 WebView 内存 */
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () => reject(reader.error ?? new Error('读取导出数据失败'))
-    reader.readAsArrayBuffer(blob)
-    reader.onload = () => {
-      try {
-        const buf = reader.result as ArrayBuffer
-        const bytes = new Uint8Array(buf)
-        let binary = ''
-        // 双层分片:外层 8MB,内层每次只拼 8K 个字符,
-        // 避免 String.fromCharCode.apply 一次传过多参数导致 RangeError(栈溢出)
-        const CHUNK = 8 * 1024 * 1024
-        const STEP = 8192
-        for (let i = 0; i < bytes.length; i += CHUNK) {
-          const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length))
-          for (let j = 0; j < slice.length; j += STEP) {
-            const part = slice.subarray(j, Math.min(j + STEP, slice.length))
-            binary += String.fromCharCode.apply(null, part as unknown as number[])
-          }
-        }
-        resolve(btoa(binary))
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error('base64 编码失败'))
-      }
+/**
+ * Blob → base64：逐 4MB 转换后拼接，避免一次性读入整包撑爆 WebView 内存。
+ *
+ * ⚠️ 每转完一块就让出一次主线程（await setTimeout 0）：这段是纯 CPU 的死循环，
+ * 不让出的话几十 MB 的数据会把界面完全冻住 —— 用户看到的就是「点了导出，按钮
+ * 一直停在导出中…」，连转圈都不动。让出后 Vue 才能把进度/耗时刷到屏幕上。
+ */
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buf = await blob.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  // 双层分片:外层 4MB,内层每次只拼 8K 个字符,
+  // 避免 String.fromCharCode.apply 一次传过多参数导致 RangeError(栈溢出)
+  const CHUNK = 4 * 1024 * 1024
+  const STEP = 8192
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length))
+    for (let j = 0; j < slice.length; j += STEP) {
+      const part = slice.subarray(j, Math.min(j + STEP, slice.length))
+      binary += String.fromCharCode.apply(null, part as unknown as number[])
     }
-  })
+    await new Promise<void>((r) => setTimeout(r, 0))
+  }
+  return btoa(binary)
 }
 
 /**
@@ -814,18 +810,28 @@ function base64ByteLength(b64: string): number {
   return Math.floor((b64.length * 3) / 4) - pad
 }
 
+/** 一次「下载」的结果：bytes 是真实交给平台的字节，其余字段供界面显示落点 */
+export interface DownloadResult {
+  bytes: number
+  /** 原生落点（「下载/Baker AI/xxx.zip」）；浏览器端为空串 */
+  path: string
+  uri: string
+  /** 保存后是否已自动跳到文件管理器 */
+  revealed: boolean
+}
+
 /**
- * ZIP / JSON / 截图共用的下载入口：原生端走系统保存框（大文件分块写入），
- * 浏览器走 <a download>。返回实际交给平台的字节数。
+ * ZIP / JSON / 截图共用的下载入口：原生端写入公共下载目录（大文件分块），
+ * 浏览器走 <a download>。返回真实字节与落点。
  */
-export async function downloadBlob(blob: Blob, fileName: string): Promise<number> {
+export async function downloadBlob(blob: Blob, fileName: string): Promise<DownloadResult> {
   // 空内容守卫必须看真实字节：base64 少几个字符仍然「非空」，但文件已经废了
   if (!blob || blob.size === 0) {
     throw new Error('导出内容为空（0 字节），已中止以免生成空文件。请确认当前确实有可导出的数据。')
   }
   const mime = blob.type || 'application/octet-stream'
 
-  // 打包环境:统一走 saveExportFileSmart —— 小文件走系统保存框,
+  // 打包环境:统一走 saveExportFileSmart —— 小文件走原生保存通道,
   // 大文件改为分块写入(桥层不会截断)+回读校验;内容为空直接报错,
   // 绝不落一个空文件让用户以为数据丢了。
   if (await getNativeSaveFile()) {
@@ -837,7 +843,12 @@ export async function downloadBlob(blob: Blob, fileName: string): Promise<number
         '已中止以免生成损坏文件。请重试；若反复出现，请先减少数据量再导出。')
     }
     const saved = await saveExportFileSmart({ fileName, base64, mime })
-    return saved.bytes || decodedBytes
+    return {
+      bytes: saved.bytes || decodedBytes,
+      path: saved.path,
+      uri: saved.uri,
+      revealed: saved.revealed,
+    }
   }
 
   // Capacitor 原生平台但未探测到 SaveFile 插件:明确报错,避免静默走
@@ -867,10 +878,10 @@ export async function downloadBlob(blob: Blob, fileName: string): Promise<number
   }
   window.addEventListener('pagehide', revoke)
   window.setTimeout(revoke, 60_000)
-  return blob.size
+  return { bytes: blob.size, path: '', uri: '', revealed: false }
 }
 
-/** 下载 ZIP 文件(按平台:安装版弹系统保存框 / 浏览器直接下载) */
+/** 下载 ZIP 文件(按平台:安装版写公共下载目录 / 浏览器直接下载) */
 export async function downloadProject(
   cards: Card[],
   myGender: 'male' | 'female',
@@ -878,14 +889,28 @@ export async function downloadProject(
   promptOverrides: Record<string, string>,
   settingsSnapshot?: Record<string, unknown> | null,
   cardOrder?: string[] | null,
-): Promise<{ filteredImages: number; reencodedImages: number; totalBytes: number }> {
+): Promise<{
+  filteredImages: number
+  reencodedImages: number
+  totalBytes: number
+  path: string
+  uri: string
+  revealed: boolean
+}> {
   const { blob, filteredImages, reencodedImages, totalBytes } = await exportToZip(
     cards, myGender, stripVariantIndex, promptOverrides, settingsSnapshot, cardOrder,
   )
   const fileName = projectExportFileName()
   // 原生端返回真实落盘字节，浏览器端返回 blob.size；都比估算值更贴近用户拿到的文件
-  const written = await downloadBlob(blob, fileName)
-  return { filteredImages, reencodedImages, totalBytes: written || totalBytes }
+  const saved = await downloadBlob(blob, fileName)
+  return {
+    filteredImages,
+    reencodedImages,
+    totalBytes: saved.bytes || totalBytes,
+    path: saved.path,
+    uri: saved.uri,
+    revealed: saved.revealed,
+  }
 }
 
 // ZIP 导入

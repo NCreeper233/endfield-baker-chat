@@ -4,6 +4,7 @@
 import { computed, ref, watch } from 'vue'
 import { useChatStore } from '../../stores/chat'
 import { downloadDataUrl } from '../../utils/captureImage'
+import { revealSavedFile } from '../../utils/nativeExport'
 import ChatExportStage from '../chat/ChatExportStage.vue'
 import VersionDialogShell from './VersionDialogShell.vue'
 import type { ChatMessage } from '../../types/chat'
@@ -50,6 +51,22 @@ const saveError = ref('')
 /** 用户主动取消保存(不是错误,用中性提示,不能报成红字"失败") */
 const saveHint = ref('')
 
+/** 保存后的真实落点(安卓写进「下载/Baker AI」;浏览器端为空) */
+const savedPath = ref('')
+/** 保存后的文件 uri(再打开文件夹用) */
+const savedUri = ref('')
+
+/** 保存已耗时(秒):长截图写盘要几秒,标签上带秒数才不像卡死 */
+const saveSeconds = ref(0)
+let saveTicker: ReturnType<typeof setInterval> | null = null
+
+function stopSaveTicker() {
+  if (saveTicker) {
+    clearInterval(saveTicker)
+    saveTicker = null
+  }
+}
+
 /** 下载文件名:{对话标题}-对话截图.png(只导出选中时注明"选中") */
 function filename() {
   const suffix = isSubset.value ? '-选中消息' : '-对话截图'
@@ -72,9 +89,20 @@ async function onDownload() {
   saving.value = true
   saveError.value = ''
   saveHint.value = ''
+  savedPath.value = ''
+  savedUri.value = ''
+  saveSeconds.value = 0
+  stopSaveTicker()
+  saveTicker = setInterval(() => {
+    saveSeconds.value += 1
+  }, 1000)
   try {
-    // 原生端会走系统保存框(安卓里 <a download> 点了没反应,见 utils/captureImage)
-    await downloadDataUrl(src, filename())
+    // 原生端写进公共下载目录(安卓里 <a download> 点了没反应,见 utils/captureImage),
+    // 保存成功后会由原生跳一次文件管理器,这里再把落点显示出来
+    const saved = await downloadDataUrl(src, filename())
+    savedPath.value = saved.path
+    savedUri.value = saved.uri
+    if (!saved.path) saveHint.value = '已保存'
   } catch (err) {
     const msg = err instanceof Error ? err.message : '保存失败'
     // 用户在系统保存框点"取消"不是失败：saveExportFileSmart 抛"已取消导出"，
@@ -86,8 +114,14 @@ async function onDownload() {
       saveError.value = msg
     }
   } finally {
+    stopSaveTicker()
     saving.value = false
   }
+}
+
+/** 再打开一次文件管理器(自动跳转失败时用户自己点) */
+async function openSavedFolder() {
+  await revealSavedFile({ path: savedPath.value, uri: savedUri.value, mime: 'image/png' })
 }
 
 function toggleZoom() {
@@ -129,6 +163,10 @@ watch(
 
       <p v-if="error" class="ce__error">{{ error }}</p>
       <p v-if="saveError" class="ce__error">{{ saveError }}</p>
+      <p v-if="savedPath" class="ce__saved">
+        已保存到：<code class="ce__saved-path">{{ savedPath }}</code>
+        <button class="ce__saved-open" type="button" @click="openSavedFolder">打开文件夹</button>
+      </p>
       <p v-if="saveHint" class="ce__hint">{{ saveHint }}</p>
     </template>
 
@@ -142,7 +180,9 @@ watch(
       >
         <span class="pn-btn__tex" aria-hidden="true"></span>
         <span class="pn-btn__deco" aria-hidden="true"></span>
-        <span class="pn-btn__label">{{ saving ? '保存中…' : '下载 PNG' }}</span>
+        <span class="pn-btn__label">
+          {{ saving ? (saveSeconds > 2 ? `保存中… ${saveSeconds}s` : '保存中…') : '下载 PNG' }}
+        </span>
       </button>
     </template>
   </VersionDialogShell>
@@ -226,6 +266,44 @@ watch(
     color: #c0392b;
     font-family: $font-harmony;
     font-size: 13px;
+  }
+
+  // 保存落点:必须显眼(白底弹窗里用浅黄底 + 深色字),否则用户以为没保存成功
+  &__saved {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border: 1px solid rgba(180, 140, 0, 0.35);
+    background: rgba(255, 214, 0, 0.12);
+    color: #111827;
+    font-family: $font-harmony;
+    font-size: 13px;
+    line-height: 1.5;
+    word-break: break-all;
+  }
+
+  &__saved-path {
+    color: #7a5c00;
+    font-size: 13px;
+    word-break: break-all;
+  }
+
+  &__saved-open {
+    padding: 4px 10px;
+    border: 1px solid rgba(17, 24, 39, 0.25);
+    border-radius: 4px;
+    background: rgba(17, 24, 39, 0.06);
+    color: #111827;
+    font-family: $font-harmony;
+    font-size: 12px;
+    cursor: pointer;
+
+    &:active {
+      background: rgba(17, 24, 39, 0.14);
+    }
   }
 
   // 中性提示(如"已取消保存"):与错误同位置,但不使用警示色

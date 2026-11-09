@@ -111,13 +111,16 @@ function dataUrlToBlob(dataUrl: string): Blob {
 
 /**
  * 原生端不能用 <a download>：Android WebView 没有下载器接管，点了没反应，
- * 故与 ZIP / JSON 共用 downloadBlob 通道（APK 走 SAF 保存框）；浏览器保持原方式。
- * 原生保存要等用户选位置，所以是异步的。
+ * 故与 ZIP / JSON 共用 downloadBlob 通道（APK 写进公共下载目录）；浏览器保持原方式。
+ * 原生保存是异步的，返回落点信息（浏览器端 path 为空串）。
  */
-export async function downloadDataUrl(dataUrl: string, filename: string): Promise<void> {
+export async function downloadDataUrl(
+  dataUrl: string,
+  filename: string,
+): Promise<{ path: string; uri: string; revealed: boolean }> {
   if (isNative()) {
-    await downloadBlob(dataUrlToBlob(dataUrl), filename)
-    return
+    const saved = await downloadBlob(dataUrlToBlob(dataUrl), filename)
+    return { path: saved.path, uri: saved.uri, revealed: saved.revealed }
   }
 
   const a = document.createElement('a')
@@ -126,4 +129,5 @@ export async function downloadDataUrl(dataUrl: string, filename: string): Promis
   document.body.appendChild(a)
   a.click()
   a.remove()
+  return { path: '', uri: '', revealed: false }
 }

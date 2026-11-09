@@ -9,6 +9,7 @@ import {
   NOTICE_DISMISS_TEXT,
 } from '../../constants/notice'
 import VersionDialogShell from './VersionDialogShell.vue'
+import DisclaimerDialog from './DisclaimerDialog.vue'
 
 const props = defineProps<{
   /** 是否显示 */
@@ -17,7 +18,7 @@ const props = defineProps<{
   content?: string
   /** 弹窗标题(网络公告源 JSON 的 title;空则回退内置标题) */
   title?: string
-  /** 版本号(公告页里用于左上角徽标,如 v3.2.1) */
+  /** 版本号(左上角徽标,如 v3.2.1) */
   version?: string
   /** 日期文字 */
   date?: string
@@ -26,7 +27,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'confirm'): void   // 确认(本次关闭)
   (e: 'dismiss'): void   // 不再提醒(永久)
-  (e: 'all'): void       // 查看全部公告(打开公告页)
 }>()
 
 /** 展示标题:网络 JSON 的 title 优先,为空回退内置常量 */
@@ -75,9 +75,6 @@ function closeDisclaimer() {
     </p>
 
     <template #actions>
-      <button class="pn-btn pn-btn--light" type="button" @click="emit('all')">
-        <span class="pn-btn__label">全部公告</span>
-      </button>
       <button class="pn-btn pn-btn--light" type="button" @click="onDismiss">
         <span class="pn-btn__label">{{ NOTICE_DISMISS_TEXT }}</span>
       </button>

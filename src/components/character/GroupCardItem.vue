@@ -12,6 +12,10 @@ import {
   isOriginalScaleAvatar,
 } from '../../constants/character'
 import { MATERIALS } from '../../constants/materials'
+import { ACTION_ERASE_PATHS, ACTION_TRASH_PATHS } from '../../constants/icons'
+import { useLongPressMenu } from '../../composables/useLongPressMenu'
+import ActionMenu from '../common/ActionMenu.vue'
+import ActionMenuRow from '../common/ActionMenuRow.vue'
 import type { Card } from '../../types/chat'
 
 const props = defineProps<{
@@ -69,8 +73,8 @@ const title = computed(
   () => props.card.conversations[0]?.name || groupTitle(members.value),
 )
 
-/** 是否选中(删除模式下不画常规选中白层,那时的"选中"由左缘黄条表达) */
-const isActive = computed(() => !chatStore.deleteMode && activeCardIndex.value === props.cardIndex)
+/** 是否选中 */
+const isActive = computed(() => activeCardIndex.value === props.cardIndex)
 
 /**
  * 该群聊是否已经有对话记录(任意一段子对话里有消息)
@@ -78,15 +82,6 @@ const isActive = computed(() => !chatStore.deleteMode && activeCardIndex.value =
  * 与单人主卡同一规则:聊过的群不再挂头像右上角的消息浮标。
  */
 const hasChatRecord = computed(() => props.card.conversations.some(c => c.messages.length > 0))
-
-/** 该群聊是否已在删除模式里被勾选 */
-const isDeleteSelected = computed(() => chatStore.deleteMode && isDeleteSelectedRaw.value)
-
-/** 该群聊对应的子对话(全局下标;一张群聊卡恒有一段对话) */
-const groupSub = computed(() => chatStore.cardSubRanges[props.cardIndex]?.start ?? -1)
-
-/** 原始勾选判据(未叠 deleteMode 判断,供 isDeleteSelected 复用) */
-const isDeleteSelectedRaw = computed(() => groupSub.value >= 0 && chatStore.isDeleteSelected(groupSub.value))
 
 /** 成员头像 URL(按角色名查内置干员表;未收录角色回退默认头像) */
 function avatarOf(name: string): string {
@@ -154,15 +149,31 @@ function onSelect(): void {
  * 原先的"单击选中、双击进入"已取消(与单聊子卡同一套改动):
  * 双击慢且容易点空,单击的意图已经足够明确。
  * 桌面端 enterMobileChat 是空操作,单击只选中。
- * 删除模式下点击改为勾选 / 取消勾选(不切群聊、也不进聊天视图)。
+ * 长按/右键打开菜单后补的那次 click 要被吞掉,否则会顺手切进群聊。
  */
 function onTap(): void {
-  if (chatStore.deleteMode) {
-    if (groupSub.value >= 0) chatStore.toggleDeleteSelect(groupSub.value)
+  if (menu.consumeClick()) return
+  // 菜单开着时点这张卡：只关菜单，不切群聊
+  if (menu.open.value) {
+    menu.close()
     return
   }
   onSelect()
   enterMobileChat?.()
+}
+
+// ---- 长按 / 右键菜单：清空上下文 / 删除此群聊 ----
+// 共用全局占用权：同一时刻只允许一个菜单
+const menu = useLongPressMenu(`group:${props.cardIndex}`)
+
+function onMenuClearContext(): void {
+  menu.close()
+  chatStore.clearContextOfCard(props.cardIndex)
+}
+
+function onMenuDelete(): void {
+  menu.close()
+  chatStore.deleteConversationsOfCard(props.cardIndex)
 }
 
 /**
@@ -177,7 +188,16 @@ function onMore(): void {
 </script>
 
 <template>
-  <div class="group-unit" :class="{ 'is-active': isActive }" :style="{ top: top + 'px' }">
+  <div
+    class="group-unit"
+    :class="{ 'is-active': isActive }"
+    :style="{ top: top + 'px' }"
+    @pointerdown="menu.onPointerDown"
+    @pointermove="menu.onPointerMove"
+    @pointerup="menu.onPointerEnd"
+    @pointercancel="menu.onPointerEnd"
+    @contextmenu="menu.onContextMenu"
+  >
     <!-- 主卡:机体/头像框/浮标与单人主卡同源(mixin) -->
     <div
       class="card"
@@ -185,8 +205,6 @@ function onMore(): void {
       @click="onTap"
     >
       <div class="card__rect" />
-      <!-- 删除模式:被勾选的群聊在左缘挂一条悬浮黄条(与单聊子卡同一套标记) -->
-      <span v-if="isDeleteSelected" class="card__del-bar" />
       <img class="card__texture" :src="MATERIALS.cardTexture" alt="" loading="lazy" decoding="async" />
       <img class="card__faint" :src="MATERIALS.cardFaint" alt="" loading="lazy" decoding="async" />
       <p class="card__name">{{ title }}</p>
@@ -229,6 +247,30 @@ function onMore(): void {
         </svg>
       </button>
     </div>
+
+    <!-- 长按 / 右键：清空上下文 / 删除此群聊 -->
+    <ActionMenu
+      :open="menu.open.value"
+      :x="menu.pos.value.x"
+      :y="menu.pos.value.y"
+      eyebrow="// GROUP"
+      :meta="title"
+      @close="menu.close"
+    >
+      <ActionMenuRow
+        idx="01"
+        :icon="ACTION_ERASE_PATHS"
+        label="清空上下文"
+        @select="onMenuClearContext"
+      />
+      <ActionMenuRow
+        idx="02"
+        :icon="ACTION_TRASH_PATHS"
+        label="删除此群聊"
+        tone="danger"
+        @select="onMenuDelete"
+      />
+    </ActionMenu>
   </div>
 </template>
 
@@ -256,31 +298,6 @@ function onMore(): void {
   @include main-card-chrome;
   @include card-avatar-frame;
   @include card-chat-indicator;
-
-  // 删除模式的勾选标记:左缘一条悬浮黄条(与单聊子卡同一套标记、同一段动画)
-  &__del-bar {
-    position: absolute;
-    left: -5px;
-    top: 0;
-    width: 5px;
-    height: 92.99px; // = 主卡机体高度(见 main-card-chrome 的 __rect)
-    border-radius: 2px;
-    background: $color-subcard-selected;
-    box-shadow: 0 0 12px rgba(255, 239, 0, 0.45);
-    pointer-events: none;
-    animation: group-del-bar-in 0.18s ease-out;
-  }
-
-  @keyframes group-del-bar-in {
-    from {
-      opacity: 0;
-      transform: scaleY(0.35);
-    }
-    to {
-      opacity: 1;
-      transform: scaleY(1);
-    }
-  }
 
   // ---- 九宫格 ------------------------------------------------------------
   &__avatar-grid {

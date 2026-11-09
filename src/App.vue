@@ -8,7 +8,6 @@ import AppHeader from './components/layout/AppHeader.vue'
 import DesignCanvas from './components/layout/DesignCanvas.vue'
 import CharacterCardList from './components/character/CharacterCardList.vue'
 import ChatArea from './components/chat/ChatArea.vue'
-import DeleteModeBar from './components/character/DeleteModeBar.vue'
 import MessageSelectBar from './components/chat/MessageSelectBar.vue'
 import GroupContinueNudge from './components/chat/GroupContinueNudge.vue'
 import ChatExportDialog from './components/layout/ChatExportDialog.vue'
@@ -22,7 +21,6 @@ import NoticeDialog from './components/layout/NoticeDialog.vue'
 import StylePreferenceDialog from './components/layout/StylePreferenceDialog.vue'
 import UpdateDialog from './components/layout/UpdateDialog.vue'
 import VersionDialogShell from './components/layout/VersionDialogShell.vue'
-import AnnouncementPage from './components/layout/AnnouncementPage.vue'
 import { useChatStore } from './stores/chat'
 import { useSettingsStore } from './stores/settings'
 import { useMobile, hasEditableFocus } from './composables/useMobile'
@@ -36,7 +34,6 @@ import { useDebugMode } from './composables/useDebugMode'
 import { usePopups } from './composables/usePopups'
 import { flushPendingWrites } from './composables/useChatPersistence'
 import { isLegacyDemoGroupShell } from './utils/groupMeta'
-import { deleteBarH } from './composables/useDeleteBar'
 import { devInfo, devWarn } from './utils/logger'
 import { getPlatform } from './utils/platform'
 const chatStore = useChatStore()
@@ -389,15 +386,35 @@ const MOBILE_LIST_W = 526
  * 页面下方内容被切掉一截。
  */
 const MOBILE_LIST_H = 1019.84
-/** 移动端列表页顶部预留(px,视口坐标):让出 AppHeader 那条固定顶栏(52px) */
-const MOBILE_LIST_TOP_PAD = 54 // 顶栏 50px + 4px 呼吸缝（2026-11-07 修：之前是 14，列表钻到顶栏底下）
+/** 移动端顶栏高度(px)：与 AppHeader--mobile 的 50px 一致 */
+const MOBILE_LIST_HEADER_H = 50
 /**
- * 卡片居中修正(设计值,zoom 自动缩放):
- * 卡片在设计稿 526 坐标系内从 x=47.42 起(左侧空 47.42,右侧空 20.3),
- * 移动端单独展示列表时内容整体右偏 47.42-(526-458.28)/2 = 13.56,
- * 给 zoom 容器负 margin 抵消,使卡片视觉居中。
+ * 顶栏下沿 → 搜索带的间距(px)
+ *
+ * 2026-11-09 修：画布里自带 76×zoom≈58px 的空白，顶栏和搜索框之间空出一大截；
+ * 一刀切到 4px 又贴得太死。这里取 16px：不空也不贴。
+ *
+ * ⚠️ 只「把画布里的内容往上提」，**画布本身的位置和高度一个像素都不动** ——
+ * 列表底部（画布底边）必须和改动前一模一样，所以底部的空隙不会变大。
  */
-const MOBILE_LIST_MARGIN_X = -(47.42 - (526 - 458.28) / 2)
+const MOBILE_LIST_HEADER_GAP = 16
+/** 画布顶部在视口里的位置：顶栏 50 + 4 呼吸缝（真正的 16px 缝由 mobileListBandLift 给） */
+const MOBILE_LIST_TOP_PAD = MOBILE_LIST_HEADER_H + 4
+/**
+ * 列表画布顶部到「搜索带」的设计高度
+ *
+ * CharacterCardList 里 .mode-switch-host 的 top 是 76（桌面顶栏 80px 时贴住下沿）。
+ * 手机顶栏只有 50px，这 76 段在设计稿里是空白，×zoom 之后就是顶栏下面那一大截空地。
+ * 移动端用 mobileListBandLift 把它提掉，只留 MOBILE_LIST_HEADER_GAP。
+ */
+const MOBILE_LIST_BAND_TOP = 76
+/**
+ * 卡片在 526 设计稿里的左右边（CharacterCardList 的 .mode-switch-host / 主卡同一条边）：
+ * 左 47.42、宽 458.28 → 右边 505.7，右侧空 20.3，左右不对称，
+ * 所以移动端单独铺列表时要整体挪一下才能视觉居中。
+ */
+const MOBILE_LIST_CARD_LEFT = 47.42
+const MOBILE_LIST_CARD_W = 458.28
 
 /** 移动端列表缩放系数:列表设计尺寸等比铺满视口(顶部预留工具栏空间 + 状态栏安全区) */
 const mobileListZoom = computed(() =>
@@ -409,6 +426,36 @@ const mobileListZoom = computed(() =>
     ),
   ),
 )
+
+/**
+ * 搜索带在画布坐标系里要上提多少设计 px
+ *
+ * 顶栏下沿到搜索带的屏幕距离 = (TOP_PAD - HEADER_H) + (BAND_TOP - lift) × zoom
+ * 令它等于 HEADER_GAP，解出：
+ *   lift = BAND_TOP - (HEADER_GAP - (TOP_PAD - HEADER_H)) / zoom
+ * 上限 76（提到画布最顶就够，再多会顶穿）。
+ */
+const mobileListBandLift = computed(() => {
+  const z = mobileListZoom.value
+  const extra = MOBILE_LIST_HEADER_GAP - (MOBILE_LIST_TOP_PAD - MOBILE_LIST_HEADER_H)
+  return Math.min(MOBILE_LIST_BAND_TOP, Math.max(0, MOBILE_LIST_BAND_TOP - extra / z))
+})
+
+/**
+ * 整块画布的位移（视口 px，作用在**未缩放**的定位层上，所以是精确像素）。
+ *
+ * x：把卡片摆到屏幕正中。卡片左边在设计稿是 47.42，×zoom 之后还要留出
+ *    （屏宽 − 卡片宽）的一半，两者之差就是需要挪的距离。
+ * y：画布顶边 —— 顶栏高度 + 状态栏安全区 + 4px 呼吸缝（与改动前一致）。
+ */
+const mobileListShift = computed(() => {
+  const z = mobileListZoom.value
+  return {
+    x: (width.value - MOBILE_LIST_CARD_W * z) / 2 - MOBILE_LIST_CARD_LEFT * z,
+    // 画布顶边固定在「顶栏 + 安全区 + 4px」——与改动前逐像素一致，底部因此也不会动
+    y: MOBILE_LIST_TOP_PAD + safeTopPx.value,
+  }
+})
 
 // 移动端视图联动:
 // - 移动端单击选中子对话只高亮(不自动进入聊天,进入由双击触发)
@@ -599,31 +646,6 @@ onBeforeUnmount(() => {
   if (healTimer !== null) clearTimeout(healTimer)
 })
 
-/**
- * 删除模式:由操作带上的删除按钮 toggle
- *
- * 状态与勾选都在 chat store 里(deleteMode / deleteSelection),因为列表项
- * (要不要画勾选黄条)与底部条(已选数量、删什么)都要读它。
- * 旧版那种"点删除弹菜单、再二次确认"的弹窗已删除。
- */
-function onToggleDeleteMode(): void {
-  chatStore.toggleDeleteMode()
-}
-
-/**
- * 删除模式下移动端列表的尾部留白(px,画布设计口径)
- *
- * 底部条是 fixed 浮层,会盖住列表最后一张卡。移动端列表是满屏滚动的,
- * 所以在删除模式下把尾部留白加到"条高 + 一点间隙"(按当前画布缩放换算回设计值),
- * 内容就能滚到条上方;桌面端列表在左侧、与居中的底部条不重叠,保持原留白。
- */
-const listBottomPad = computed(() => {
-  const BASE = 80 // 与 .card-pad 的默认高度一致
-  if (!chatStore.deleteMode || !isMobile.value) return BASE
-  const zoom = Math.max(mobileListZoom.value, 0.01)
-  return Math.max(BASE, Math.ceil((deleteBarH.value + 24) / zoom))
-})
-
 /** 导出聊天截图弹窗是否展开(选中消息模式底部条的两个出口) */
 const shareOpen = ref(false)
 
@@ -665,22 +687,6 @@ function onCloseExport(): void {
 /** 设置弹窗是否展开(API 配置 + 提示词编辑 + 数据管理 + 背景) */
 const settingsOpen = ref(false)
 
-// 公告页
-/**
- * 公告页是否展开
- *
- * 入口有两处:角色列表上方操作带的公告按钮,以及公告弹窗的「全部公告」。
- * 与三类进入弹窗(公告 / 提醒 / 更新)互斥:关掉队首那颗弹窗再开本页,
- * 避免两层全屏叠在一起。
- */
-const announceOpen = ref(false)
-
-/** 从公告弹窗跳进公告页:先把弹窗确认掉(推进队列),再打开页面 */
-function onNoticeAll(): void {
-  onNoticeConfirm()
-  announceOpen.value = true
-}
-
 /**
  * Token 用量 / 缓存命中面板是否展开(操作带上的用量按钮 toggle)
  *
@@ -705,26 +711,26 @@ function closeHint(): void {
 }
 
 /**
- * 聊天按钮：已选中主卡就在其下追加子会话；未选中则提示先选角色
+ * 操作带左侧的加号：两种模式都走这一个入口
+ *
+ *   群聊 → 新建群聊（打开建群弹窗）
+ *   单聊 → 在**当前选中的主卡**下新建一段子会话（与主卡长按菜单里的「新建对话」
+ *          同一条 store 路径，建完自动展开父卡并切进新会话）
+ *
+ * 没选中主卡时不静默失败，弹一句提示 —— 这个加号在单聊里第一次有按钮，
+ * 用户很可能在没选卡的情况下直接点它。
  */
-/** 群聊模式下是「创建群聊」，单聊模式下是「新建对话」，由 App 统一分发 */
 function onAdd() {
   if (chatStore.chatMode === 'group') {
     groupDialogOpen.value = true
     return
   }
-  onChatNew()
-}
-
-function onChatNew() {
   if (chatStore.activeCardIndex === null) {
-    showHint('请先选中角色卡片')
+    showHint('请先选中一张角色卡，再点加号新建对话')
     return
   }
-  // 群聊主卡不支持再建子会话:建出来只会是一个空占位。
-  // 这里直接给出提示,store 侧同样会拒绝,双保险。
   if (!chatStore.createChildConversation()) {
-    showHint(chatStore.activeIsGroup ? '群聊里不能再新建对话' : '请先选中角色卡片')
+    showHint('这张卡不能新建对话')
   }
 }
 </script>
@@ -741,13 +747,15 @@ function onChatNew() {
   <!-- 桌面端（>768px）：1920 设计稿等比画布 -->
   <template v-if="!isMobile">
     <DesignCanvas>
-      <AppHeader variant="desktop" :mode="chatStore.chatMode" @update:mode="chatStore.setChatMode" />
+      <AppHeader
+        variant="desktop"
+        :mode="chatStore.chatMode"
+        @update:mode="chatStore.setChatMode"
+        @open-settings="settingsOpen = true"
+      />
       <CharacterCardList
         @add="onAdd"
         @group-settings="onOpenGroupSettings"
-        @open-settings="settingsOpen = true"
-        @open-announce="announceOpen = true"
-        @open-delete="onToggleDeleteMode"
         @open-usage="usageOpen = !usageOpen"
       />
       <ChatArea @open-settings="settingsOpen = true" @hint="showHint" />
@@ -761,26 +769,37 @@ function onChatNew() {
          负 margin 抵消卡片设计坐标右偏,使内容视觉居中 -->
     <div v-if="mobileView === 'list'" class="m-list">
       <!-- 移动端顶栏:标题 + 单聊/群聊页签(贴视口顶端,不随列表缩放) -->
-      <AppHeader variant="mobile" :mode="chatStore.chatMode" @update:mode="chatStore.setChatMode" />
+      <AppHeader
+        variant="mobile"
+        :mode="chatStore.chatMode"
+        @update:mode="chatStore.setChatMode"
+        @open-settings="settingsOpen = true"
+      />
       <div class="m-list__stage">
+        <!-- 位移层：不参与缩放，left/top 就是屏幕 px（缩放层自己的 margin 会被 zoom 揉进去） -->
         <div
-          class="m-list__zoom"
+          class="m-list__shift"
           :style="{
-            width: MOBILE_LIST_W + 'px',
-            height: MOBILE_LIST_H + 'px',
-            zoom: String(mobileListZoom),
-            marginLeft: MOBILE_LIST_MARGIN_X + 'px',
+            left: mobileListShift.x + 'px',
+            top: mobileListShift.y + 'px',
           }"
         >
-          <CharacterCardList
-            :bottom-pad="listBottomPad"
-                @add="onAdd"
-            @group-settings="onOpenGroupSettings"
-            @open-settings="settingsOpen = true"
-            @open-announce="announceOpen = true"
-            @open-delete="onToggleDeleteMode"
-            @open-usage="usageOpen = !usageOpen"
-          />
+          <div
+            class="m-list__zoom"
+            :style="{
+              width: MOBILE_LIST_W + 'px',
+              height: MOBILE_LIST_H + 'px',
+              zoom: String(mobileListZoom),
+              // 画布内「搜索带及以下」整体上提多少设计 px（见 mobileListBandLift）
+              '--m-list-lift': mobileListBandLift + 'px',
+            }"
+          >
+            <CharacterCardList
+              @add="onAdd"
+              @group-settings="onOpenGroupSettings"
+              @open-usage="usageOpen = !usageOpen"
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -828,10 +847,6 @@ function onChatNew() {
     </div>
   </template>
 
-
-  <!-- 删除模式的底部条:多选后在这里选"删什么"(对话 / 历史 / 上下文)并执行。
-       仅删除模式下挂载(它挂载时会把自己的高度上报给列表,用于留出尾部空档)。 -->
-  <DeleteModeBar v-if="chatStore.deleteMode" />
 
   <!-- 选中消息模式的底部条:勾选若干条消息 → 导出为一张长图 -->
   <MessageSelectBar
@@ -890,9 +905,6 @@ function onChatNew() {
     @close="settingsOpen = false"
   />
 
-  <!-- 公告页:操作带的公告按钮 / 公告弹窗的「全部公告」进入 -->
-  <AnnouncementPage :open="announceOpen" @close="announceOpen = false" />
-
   <!-- Token 用量 / 缓存命中面板:非模态浮层,可拖动,位置持久化。
        入口在角色列表上方的操作带(仅自定义 API 模式渲染)。 -->
   <UsagePanel :open="usageOpen" @close="usageOpen = false" />
@@ -910,7 +922,6 @@ function onChatNew() {
     :content="noticeContent"
     @confirm="onNoticeConfirm"
     @dismiss="onNoticeDismiss"
-    @all="onNoticeAll"
   />
   <!-- 提醒弹窗(可能多条:同窗内左右滑动查看,点「确定」一次性确认全部)
        由 usePopups 的 enableAlert 控制当前是否进入队列(现为开启)。 -->
@@ -973,15 +984,8 @@ function onChatNew() {
   &__stage {
     position: absolute;
     inset: 0;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    // 顶部预留 AppHeader 的高度(50px) + 4px 呼吸缝;刘海/挖孔屏再补上安全区,
-    // 避免列表被状态栏或摄像头区域遮住。
-    // --safe-top 默认 0px（见 styles/_base.scss），普通设备布局零变化。
-    padding-top: calc(54px + var(--safe-top, 0px));
-    // 底部三键导航栏 / 手势条安全区：列表尾部不再被系统栏压住（2026-11-08 真机修）
-    padding-bottom: var(--safe-bottom, 0px);
+    // 实际位置由位移层(left/top)算，见 mobileListShift：
+    // 顶部让出顶栏 + 状态栏安全区，底部计入导航栏安全区（在 mobileListZoom 里扣掉）
   }
 
   &__zoom {
@@ -991,6 +995,30 @@ function onChatNew() {
     // 列表里点卡片就是要进对话,若还留着双击缩放,连点两下会被浏览器当成缩放。
     // (模式开关的 touch-action:none 比 manipulation 更严格,不受影响)
     touch-action: manipulation;
+
+    /**
+     * 手机顶栏比桌面矮 30px，画布里那段 76 的空白要提掉（见 mobileListBandLift）。
+     *
+     * ⚠️ 只提「内容」，画布高度不变：
+     *   · 搜索带上提 lift
+     *   · 列表容器同步上提 lift，同时加高 lift —— 容器底边仍停在 1019.84，
+     *     所以列表底部的位置/留白与改动前完全一致（真机反馈要求的"底下不变"）。
+     */
+    :deep(.mode-switch-host) {
+      top: calc(76px - var(--m-list-lift, 0px));
+    }
+
+    :deep(.character-card) {
+      top: calc(122.57px - var(--m-list-lift, 0px));
+      height: calc(897.27px + var(--m-list-lift, 0px));
+    }
+  }
+
+  // 位移层:不参与缩放,left/top 就是屏幕像素（见 mobileListShift）
+  &__shift {
+    position: absolute;
+    left: 0;
+    top: 0;
   }
 }
 

@@ -97,15 +97,16 @@ export async function importFromZipInWorker(blob: Blob): Promise<ProjectPayload>
   return importFromZip(blob)
 }
 
-/** 分片转换：外层 8MB，内层每次只拼 8K —— apply 传参过多会 RangeError */
+/** 分片转换：外层 4MB，内层每次只拼 8K —— apply 传参过多会 RangeError；
+ *  每块之间让出主线程，否则大包会把界面冻住（按钮停住不动）。 */
 async function blobToBase64Fallback(blob: Blob): Promise<string> {
   const buf = await blob.arrayBuffer()
   const bytes = new Uint8Array(buf)
   let binary = ''
-  // 外层按 8MB 分块;内层每次只拼 8K 个字符 ——
+  // 外层按 4MB 分块;内层每次只拼 8K 个字符 ——
   // String.fromCharCode.apply 一次传过多参数会 RangeError(栈溢出),
   // 8MB 直接 apply 会传 800 万参数导致导出失败
-  const CHUNK = 8 * 1024 * 1024
+  const CHUNK = 4 * 1024 * 1024
   const STEP = 8192
   for (let i = 0; i < bytes.length; i += CHUNK) {
     const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length))
@@ -113,6 +114,7 @@ async function blobToBase64Fallback(blob: Blob): Promise<string> {
       const part = slice.subarray(j, Math.min(j + STEP, slice.length))
       binary += String.fromCharCode.apply(null, part as unknown as number[])
     }
+    await new Promise<void>((r) => setTimeout(r, 0))
   }
   return btoa(binary)
 }

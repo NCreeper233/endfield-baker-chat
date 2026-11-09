@@ -64,6 +64,13 @@ const flushReady = new Set<() => void>()
 export async function flushPendingWrites(): Promise<void> {
   // 可等待：Electron 关窗前必须等真实落盘，否则窗口销毁时在途写入一起消失
   await Promise.all([...flushReady].map((f) => Promise.resolve(f())))
+  // 打包端还有 50ms 合并窗口：这里强制立刻落盘，别让退出/切后台把这段时间吃掉
+  try {
+    const native = await getNativeStore()
+    if (native) await native.flushNow()
+  } catch {
+    /* 写入失败已在写入路径里记过日志 */
+  }
 }
 
 /** 是否已安装页面隐退监听(单例) */

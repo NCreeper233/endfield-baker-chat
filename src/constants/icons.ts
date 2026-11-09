@@ -28,3 +28,32 @@ export const PERSON_GROUP_PATHS: string[] = [
   'M43.9999 42.0001V40.8001C43.9999 36.3197 43.9999 34.0795 43.128 32.3682' +
     'C42.361 30.8629 41.1371 29.6391 39.6318 28.8721',
 ]
+
+// ---- 行动菜单图标（主卡 / 子卡 / 群卡共用） ----
+
+/** 新建对话：加号 */
+export const ACTION_NEW_PATHS: string[] = ['M24 9V39', 'M9 24H39']
+
+/** 清空消息：三行列表 + 右下角叉（"把这些条目清掉"） */
+export const ACTION_CLEAR_MSG_PATHS: string[] = [
+  'M9 12H37',
+  'M9 23H29',
+  'M9 34H21',
+  'M33 30L41 38',
+  'M41 30L33 38',
+]
+
+/** 删除上下文：橡皮擦 + 基线（擦掉记忆，但不删记录） */
+export const ACTION_ERASE_PATHS: string[] = [
+  'M31 10L40 19L23 36H14V27L31 10Z',
+  'M9 42H39',
+]
+
+/** 删除：垃圾桶（与消息菜单同一套） */
+export const ACTION_TRASH_PATHS: string[] = [
+  'M9 10V44H39V10H9Z',
+  'M20 20V33',
+  'M28 20V33',
+  'M4 10H44',
+  'M16 10L19.289 4H28.7771L32 10H16Z',
+]

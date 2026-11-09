@@ -10,6 +10,15 @@ import { MATERIALS } from '../../constants/materials'
 import { isOriginalScaleAvatar } from '../../constants/character'
 import { subTopInCard } from '../../constants/characterCard'
 import { sortSubIndices } from '../../domain/chat/activity'
+import {
+  ACTION_CLEAR_MSG_PATHS,
+  ACTION_ERASE_PATHS,
+  ACTION_NEW_PATHS,
+  ACTION_TRASH_PATHS,
+} from '../../constants/icons'
+import { useLongPressMenu } from '../../composables/useLongPressMenu'
+import ActionMenu from '../common/ActionMenu.vue'
+import ActionMenuRow from '../common/ActionMenuRow.vue'
 import SubCard from './SubCard.vue'
 
 const props = defineProps<{
@@ -101,6 +110,44 @@ const hover = ref<null | 'card' | number>(null)
 /** 组件根元素 ref(用于 leave 时判断 relatedTarget 是否仍在卡内) */
 const rootEl = ref<HTMLElement | null>(null)
 
+// ---- 长按 / 右键菜单：新建对话 / 清空上下文 / 删除全部对话 ----
+// key 进全局占用权：同一时刻只允许一个菜单，打开这张卡的会顶掉别的
+const menu = useLongPressMenu(`card:${props.index}`)
+
+/** 该主卡下的对话段数：菜单文案里的数字必须是真实值 */
+const conversationCount = computed(() => chatStore.cards[props.index]?.conversations.length ?? 0)
+
+/**
+ * 是否有可清空 / 可删除的东西
+ *
+ * 只有一段且一条消息都没有的卡（刚建出来的空对话），清空与删除都没有意义 ——
+ * 菜单里只留「新建对话」，避免给用户两个点了也没变化的选项。
+ * 上下文条数也算内容：手动导入过上下文但没消息的卡仍然要能清。
+ */
+const hasClearableContent = computed(() => {
+  const card = chatStore.cards[props.index]
+  if (!card) return false
+  if (card.conversations.length > 1) return true
+  return card.conversations.some(
+    (conv) => conv.messages.length > 0 || (conv.contextHistory?.length ?? 0) > 0,
+  )
+})
+
+function onMenuNew(): void {
+  menu.close()
+  chatStore.createChildConversationAt(props.index)
+}
+
+function onMenuClearContext(): void {
+  menu.close()
+  chatStore.clearContextOfCard(props.index)
+}
+
+function onMenuDeleteAll(): void {
+  menu.close()
+  chatStore.deleteConversationsOfCard(props.index)
+}
+
 function enterCard() {
   hover.value = 'card'
 }
@@ -108,8 +155,16 @@ function enterCard() {
 /**
  * 点击主卡:切换折叠 + 选中该主卡(白色遮罩常显)。
  * 选中主卡后即使未进入子对话,也可在选中父卡下新建对话(createChildConversation)。
+ *
+ * 长按/右键打开菜单后松开手指会补一次 click，这里先吞掉，避免顺手把卡片折叠。
  */
 function onCardClick() {
+  if (menu.consumeClick()) return
+  // 菜单开着时点卡片：只关菜单，不顺手折叠（否则一次点击干了两件事）
+  if (menu.open.value) {
+    menu.close()
+    return
+  }
   chatStore.toggleCollapse(props.index)
   chatStore.selectCard(props.index)
 }
@@ -134,7 +189,16 @@ function leave(event: PointerEvent) {
 </script>
 
 <template>
-  <div ref="rootEl" class="card-unit" :style="{ top: top + 'px' }">
+  <div
+    ref="rootEl"
+    class="card-unit"
+    :style="{ top: top + 'px' }"
+    @pointerdown="menu.onPointerDown"
+    @pointermove="menu.onPointerMove"
+    @pointerup="menu.onPointerEnd"
+    @pointercancel="menu.onPointerEnd"
+    @contextmenu="menu.onContextMenu"
+  >
     <!-- 主卡(点击卡片任意位置:切换折叠 + 选中该主卡;按钮为纯视觉) -->
     <div
       class="card"
@@ -221,6 +285,34 @@ function leave(event: PointerEvent) {
         />
       </div>
     </transition>
+
+    <!-- 长按 / 右键：新建对话 / 清空全部上下文 / 删除全部对话 -->
+    <ActionMenu
+      :open="menu.open.value"
+      :x="menu.pos.value.x"
+      :y="menu.pos.value.y"
+      eyebrow="// CHARACTER"
+      :meta="character.name"
+      @close="menu.close"
+    >
+      <ActionMenuRow idx="01" :icon="ACTION_NEW_PATHS" label="新建对话" @select="onMenuNew" />
+      <!-- 只有一段空对话时，清空 / 删除都无事可做：整组隐藏 -->
+      <template v-if="hasClearableContent">
+        <ActionMenuRow
+          idx="02"
+          :icon="ACTION_ERASE_PATHS"
+          :label="`清空全部上下文（${conversationCount} 段）`"
+          @select="onMenuClearContext"
+        />
+        <ActionMenuRow
+          idx="03"
+          :icon="ACTION_TRASH_PATHS"
+          :label="`删除全部对话（${conversationCount} 段）`"
+          tone="danger"
+          @select="onMenuDeleteAll"
+        />
+      </template>
+    </ActionMenu>
   </div>
 </template>
 

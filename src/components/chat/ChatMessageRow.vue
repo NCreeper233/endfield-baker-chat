@@ -18,7 +18,7 @@ import type { ChatRow, MessageSpeaker } from '../../types/chat'
 import { useChatStore } from '../../stores/chat'
 import { useAiChat } from '../../composables/useAiChat'
 import { useGroupChat } from '../../composables/useGroupChat'
-import { closeMessageMenu, messageMenuKey, openMessageMenu } from '../../composables/useMessageMenu'
+import { activeMenuKey, closeMenu as closeOwnedMenu, openMenu as openOwnedMenu } from '../../composables/useMenuOwner'
 import ChatAvatar from './ChatAvatar.vue'
 import ChatBubble from './ChatBubble.vue'
 import MessageActionMenu from './MessageActionMenu.vue'
@@ -72,7 +72,7 @@ const LONG_PRESS_MS = 500
 const MOVE_THRESHOLD = 10
 
 /** 菜单是否显示 */
-const menuOpen = computed(() => messageMenuKey.value === menuKey.value)
+const menuOpen = computed(() => activeMenuKey.value === menuKey.value)
 /** 菜单锚点(屏幕坐标) */
 const menuPos = ref({ x: 0, y: 0 })
 
@@ -93,17 +93,17 @@ const menuKey = computed(() => `${chatStore.activeSub ?? -1}:${props.row.key}`)
  */
 let openedKey: string | null = null
 
-/** 打开菜单:抢占占用权 —— 已打开的别的消息菜单会随之关闭 */
+/** 打开菜单:抢占占用权 —— 已打开的别的菜单会随之关闭 */
 function openMenu(clientX: number, clientY: number) {
   menuPos.value = { x: clientX, y: clientY }
   openedKey = menuKey.value
-  openMessageMenu(openedKey)
+  openOwnedMenu(openedKey)
 }
 
 /** 关闭菜单(非持有者调用时不会动全局状态,别人的菜单不受影响) */
 function closeMenu() {
   if (!openedKey) return
-  closeMessageMenu(openedKey)
+  closeOwnedMenu(openedKey)
   openedKey = null
 }
 
@@ -453,6 +453,8 @@ const centeredTextStyle = computed<CSSProperties>(() => {
       :x="menuPos.x"
       :y="menuPos.y"
       :can-regenerate="row.msg.side === 'other'"
+      :message-id="row.msg.id"
+      :side="row.msg.side"
       @close="closeMenu"
       @regenerate="onRegenerate"
       @pick-messages="chatStore.startMsgSelect(row.msg.id)"

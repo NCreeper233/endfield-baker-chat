@@ -5,12 +5,12 @@
 @use 'base';
 @use 'transitions';
 @use 'variables' as *;
-// 面板设计系统(设置菜单 / 公告页 / 版本弹窗共用的全局类,`.pn-` 前缀)
+// 面板设计系统(设置菜单 / 版本弹窗共用的全局类,`.pn-` 前缀)
 @use 'panel';
 
-// 长按操作菜单打开时：禁止文本选择 / 图片拖动
-body.msg-menu-open,
-body.msg-menu-open * {
+// 行动菜单（消息 / 主卡 / 子卡 / 群卡）打开时：禁止文本选择 / 图片拖动
+body.action-menu-open,
+body.action-menu-open * {
   user-select: none !important;
   -webkit-user-select: none !important;
   -webkit-touch-callout: none !important;

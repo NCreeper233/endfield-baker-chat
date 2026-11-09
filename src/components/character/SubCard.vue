@@ -6,6 +6,14 @@ import { useChatStore } from '../../stores/chat'
 import { MATERIALS } from '../../constants/materials'
 import { emojiToHtml } from '../../constants/emoji'
 import { findCharacter } from '../../constants/character'
+import {
+  ACTION_CLEAR_MSG_PATHS,
+  ACTION_ERASE_PATHS,
+  ACTION_TRASH_PATHS,
+} from '../../constants/icons'
+import { useLongPressMenu } from '../../composables/useLongPressMenu'
+import ActionMenu from '../common/ActionMenu.vue'
+import ActionMenuRow from '../common/ActionMenuRow.vue'
 
 const props = defineProps<{
   /** 子卡全局索引(扁平 conversations 下标) */
@@ -25,11 +33,13 @@ const enterMobileChat = inject<(() => void) | null>('enterMobileChat', null)
 
 /**
  * 移动端单击即进入对话（双击在列表里既慢又容易点空）；桌面端 enterMobileChat 内判
- * isMobile，是空操作。删除模式下点击改为勾选，否则无法多选。
+ * isMobile，是空操作。
  */
 function onTap(): void {
-  if (chatStore.deleteMode) {
-    chatStore.toggleDeleteSelect(props.subIndex)
+  if (menu.consumeClick()) return
+  // 菜单开着时点这一行：只关菜单，不切对话
+  if (menu.open.value) {
+    menu.close()
     return
   }
   chatStore.selectSub(props.subIndex)
@@ -38,16 +48,53 @@ function onTap(): void {
 
 const chatStore = useChatStore()
 
+// ---- 长按 / 右键菜单：清空消息 / 删除上下文 / 删除此对话 ----
+// 与主卡、消息共用同一个全局占用权：同一时刻只允许一个菜单
+const menu = useLongPressMenu(`sub:${props.subIndex}`)
+
+/** 这段对话的可见消息条数（菜单里的真实数字） */
+const messageCount = computed(() => chatStore.conversations[props.subIndex]?.messages.length ?? 0)
+
+/** 子卡自己的手势要拦住，否则会连带触发主卡的菜单 */
+function onPointerDown(e: PointerEvent): void {
+  e.stopPropagation()
+  menu.onPointerDown(e)
+}
+
+function onPointerMove(e: PointerEvent): void {
+  e.stopPropagation()
+  menu.onPointerMove(e)
+}
+
+function onPointerEnd(e: PointerEvent): void {
+  e.stopPropagation()
+  menu.onPointerEnd()
+}
+
+function onContextMenu(e: MouseEvent): void {
+  e.stopPropagation()
+  menu.onContextMenu(e)
+}
+
+function onMenuClearMessages(): void {
+  menu.close()
+  chatStore.clearMessagesAt(props.subIndex)
+}
+
+function onMenuClearContext(): void {
+  menu.close()
+  chatStore.clearContextAt(props.subIndex)
+}
+
+function onMenuDelete(): void {
+  menu.close()
+  chatStore.deleteConversationsAt([props.subIndex])
+}
+
 /**
  * 该子卡是否选中(全局单选)
- *
- * 删除模式下不再画常规的"选中黄层":那时的"选中"由左缘的悬浮黄条表达
- * (见下方 isDeleteSelected),两套高亮同时出现会分不清"选了几段"。
  */
-const isSelected = computed(() => !chatStore.deleteMode && chatStore.activeSub === props.subIndex)
-
-/** 该子卡是否已在删除模式里被勾选(画悬浮黄条) */
-const isDeleteSelected = computed(() => chatStore.isDeleteSelected(props.subIndex))
+const isSelected = computed(() => chatStore.activeSub === props.subIndex)
 
 /**
  * 子卡预览文本
@@ -91,10 +138,13 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
     }"
     :style="rootStyle"
     @click="onTap"
+    @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
+    @pointerup="onPointerEnd"
+    @pointercancel="onPointerEnd"
+    @contextmenu="onContextMenu"
   >
     <div class="subcard__rect" />
-    <!-- 删除模式:被勾选的对话在左缘挂一条悬浮黄条 -->
-    <span v-if="isDeleteSelected" class="subcard__del-bar" />
     <img class="subcard__texture" :src="MATERIALS.cardTexture" alt="" loading="lazy" decoding="async" />
     <img class="subcard__faint" :src="MATERIALS.subFaint" alt="" loading="lazy" decoding="async" />
     <div class="subcard__icon-box" />
@@ -107,6 +157,36 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
     <span class="subcard__deco-badge" />
     <img class="subcard__deco-wing" :src="MATERIALS.decoWing" alt="" loading="lazy" decoding="async" />
     <div class="subcard__line" />
+
+    <!-- 长按 / 右键：只作用于这一段对话 -->
+    <ActionMenu
+      :open="menu.open.value"
+      :x="menu.pos.value.x"
+      :y="menu.pos.value.y"
+      eyebrow="// CONVERSATION"
+      :meta="previewText"
+      @close="menu.close"
+    >
+      <ActionMenuRow
+        idx="01"
+        :icon="ACTION_CLEAR_MSG_PATHS"
+        :label="`清空消息（${messageCount} 条）`"
+        @select="onMenuClearMessages"
+      />
+      <ActionMenuRow
+        idx="02"
+        :icon="ACTION_ERASE_PATHS"
+        label="删除上下文"
+        @select="onMenuClearContext"
+      />
+      <ActionMenuRow
+        idx="03"
+        :icon="ACTION_TRASH_PATHS"
+        label="删除此对话"
+        tone="danger"
+        @select="onMenuDelete"
+      />
+    </ActionMenu>
   </div>
 </template>
 
@@ -125,18 +205,6 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
   transition: top 0.3s ease;
   // hover 白层(与主卡共用 hover-overlay mixin)
   @include hover-overlay(435.53px, 68.95px, 4.12px);
-
-  // 勾选黄条入场:从中间长出来(纯视觉,不影响布局)
-  @keyframes subcard-del-bar-in {
-    from {
-      opacity: 0;
-      transform: scaleY(0.35);
-    }
-    to {
-      opacity: 1;
-      transform: scaleY(1);
-    }
-  }
 
   // top 由父组件通过 :style 传入(支持任意子卡数量);
   // --second 仅保留用于 arrow 过渡时长区分,不再覆盖 top
@@ -178,23 +246,6 @@ const badgeIcon = computed(() => MATERIALS.chatBadge)
     height: 68.4px;
     opacity: 0.5;
     transition: opacity 0.25s ease;
-  }
-
-  // 删除模式的勾选标记:左缘一条悬浮黄条(与 rect 同高,略探出卡片左缘)
-  //
-  // 用自绘而非沿用选中黄层:黄层会把整张卡刷成黄色,多选时一片黄
-  // 反而看不出"选了哪几段";细黄条 + 阵列感更清楚。
-  &__del-bar {
-    position: absolute;
-    left: -5px;
-    top: 0;
-    width: 5px;
-    height: 68.95px;
-    border-radius: 2px;
-    background: $color-subcard-selected;
-    box-shadow: 0 0 12px rgba(255, 239, 0, 0.45);
-    pointer-events: none;
-    animation: subcard-del-bar-in 0.18s ease-out;
   }
 
   &__faint {

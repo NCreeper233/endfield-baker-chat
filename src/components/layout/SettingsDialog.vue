@@ -28,6 +28,7 @@ import {
 import { SETTINGS_NAV } from '../../constants/settingsNav'
 import type { SettingsTabKey } from '../../constants/settingsNav'
 import DataManagerDialog from './DataManagerDialog.vue'
+import AboutPanel from './AboutPanel.vue'
 // 面板设计系统的三个小组件(分组标题 / 设置行 / 分段控件)
 import SetSection from './ui/SetSection.vue'
 import SetRow from './ui/SetRow.vue'
@@ -1623,35 +1624,9 @@ function resetAll() {
             <DataManagerDialog :open="open" embedded />
           </div>
 
-          <!-- ============ 5. 免责声明 ============ -->
-          <div v-if="activeTab === 'disclaimer'" class="st__doc">
-            <section class="st__doc-sec">
-              <h3 class="st__doc-h">一、用户责任与合规使用</h3>
-              <p>您明确知晓并同意，您是使用本工具生成内容的唯一责任人。您承诺：</p>
-              <ol class="st__doc-list">
-                <li>严格遵守您所使用 AI 模型服务商的所有使用政策与安全准则。</li>
-                <li>遵守您所在地及服务商所在地的现行法律法规，绝不利用本工具生成任何涉及政治敏感、淫秽色情、暴力恐怖、仇恨歧视、侵犯他人合法权益以及其他一切违法和不良信息。</li>
-                <li>理解并接受本工具仅用于合法的《明日方舟：终末地》同人角色扮演娱乐，任何超出此用途的使用风险自担。</li>
-              </ol>
-            </section>
-
-            <section class="st__doc-sec">
-              <h3 class="st__doc-h">二、知识产权与同人声明</h3>
-              <p>《明日方舟：终末地》是上海鹰角网络科技有限公司的游戏产品。本工具为第三方同人作品，无任何盈利性质，与上海鹰角网络科技有限公司及《明日方舟：终末地》官方开发商、运营商无任何关联。</p>
-              <p>本工具中使用的所有与《明日方舟：终末地》相关的角色形象、世界观设定、剧情元素、图片资源等知识产权，均归上海鹰角网络科技有限公司所有。本工具仅供爱好者学习与交流，严禁用于任何商业用途。</p>
-            </section>
-
-            <section class="st__doc-sec">
-              <h3 class="st__doc-h">三、免责条款</h3>
-              <p>在法律允许的最大范围内，本工具开发者不对以下情况承担任何明示或默示的担保或责任：</p>
-              <ol class="st__doc-list">
-                <li>用户因违反本声明或第三方服务商条款而产生的任何纠纷、处罚或损失；</li>
-                <li>用户因篡改代码等自主行为所引发的一切后果；</li>
-                <li>对第三方 AI 模型服务商提供的服务质量、内容准确性及合规性。</li>
-              </ol>
-              <p class="st__doc-note">请您在使用前务必仔细阅读并同意以上全部条款。继续使用即代表您已充分理解并自愿承担所有相关风险。</p>
-            </section>
-          </div>
+          <!-- ============ 5. 关于 ============ -->
+          <!-- 原「免责声明」页重做：头图 + 版本 → 社区二维码 → 相关链接 → 更新日志 → 版权 -->
+          <AboutPanel v-if="activeTab === 'about'" />
 
         </div>
       </div>
@@ -1670,7 +1645,7 @@ function resetAll() {
   inset: 0;
   z-index: 500;
 
-  // 设置面板的遮罩比公告页更不透明:把后面的聊天界面压暗,控件更清楚
+  // 设置面板的遮罩比其它弹层更不透明:把后面的聊天界面压暗,控件更清楚
   .pn-scrim {
     background: rgba(8, 9, 10, 0.88);
   }
@@ -1969,82 +1944,6 @@ function resetAll() {
   // 这里不要再覆盖(曾经写过 #fff,导致白底白字)
 }
 
-// 免责声明 / 关于：长文档排版
-.st__doc {
-  padding: 2px 44px 44px;
-  color: rgba(255, 255, 255, 0.82);
-  font-family: $font-harmony;
-  font-size: 13.5px;
-  line-height: 1.9;
-}
-
-.st__doc-sec {
-  margin: 0 0 6px;
-}
-
-// 与小节标题同一套语言:黄色竖条 + 通栏细线
-.st__doc-h {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 20px 0 10px;
-  padding: 0 0 10px;
-  color: #ffee34;
-  font-size: 16px;
-  font-weight: 700;
-
-  &::before {
-    content: '';
-    flex: 0 0 4px;
-    width: 4px;
-    height: 18px;
-    background: #ffee34;
-  }
-
-  &::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 1px;
-    background: rgba(255, 255, 255, 0.32);
-  }
-}
-
-.st__doc p {
-  max-width: 96ch;
-  margin: 0 0 10px;
-}
-
-// 条款列表:黄色序号 + 悬挂缩进
-.st__doc-list {
-  max-width: 96ch;
-  margin: 0 0 12px;
-  padding-left: 1.6em;
-
-  li {
-    margin-bottom: 5px;
-
-    &::marker {
-      color: #ffee34;
-      font-variant-numeric: tabular-nums;
-    }
-  }
-}
-
-// 结尾提示:左侧黄条 + 淡黄底,和正文区分开
-.st__doc-note {
-  max-width: 96ch;
-  margin: 14px 0 0;
-  padding: 10px 14px;
-  border-left: 3px solid #ffee34;
-  border-radius: 0 3px 3px 0;
-  background: rgba(255, 238, 52, 0.08);
-  color: rgba(255, 255, 255, 0.92);
-}
-
 // 移动端
 @media (max-width: 768px) {
   // 手机端不显示左上角的「//设置」与小图,把顶部整条让给页签
@@ -2056,8 +1955,7 @@ function resetAll() {
     min-height: 44px;
   }
 
-  .st__data,
-  .st__doc {
+  .st__data {
     padding-left: 12px;
     padding-right: 12px;
   }

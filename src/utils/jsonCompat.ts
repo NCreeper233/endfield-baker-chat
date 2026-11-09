@@ -484,7 +484,14 @@ export async function downloadProjectJson(
   promptOverrides: Record<string, string>,
   settingsSnapshot?: Record<string, unknown> | null,
   cardOrder?: string[] | null,
-): Promise<{ filteredImages: number; reencodedImages: number; totalBytes: number }> {
+): Promise<{
+  filteredImages: number
+  reencodedImages: number
+  totalBytes: number
+  path: string
+  uri: string
+  revealed: boolean
+}> {
   // 与 ZIP 同口径：平时不动图片，只有超大导出才先压图（避免剔除/超限）
   const prepared = estimateExportBytes(cards) > EXPORT_BUDGET_BYTES
     ? await reencodeOversizedImages(cards)
@@ -494,11 +501,14 @@ export async function downloadProjectJson(
   )
   const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
   // 真实字节：浏览器端是 blob.size；原生端是回读校验过的落盘字节
-  const written = await downloadBlob(blob, jsonExportFileName())
+  const saved = await downloadBlob(blob, jsonExportFileName())
   return {
     filteredImages,
     reencodedImages: prepared.reencodedImages,
-    totalBytes: written || blob.size,
+    totalBytes: saved.bytes || blob.size,
+    path: saved.path,
+    uri: saved.uri,
+    revealed: saved.revealed,
   }
 }
 

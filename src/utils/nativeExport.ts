@@ -49,6 +49,15 @@ interface SaveFilePluginLike {
   saveFile?: (opts: { fileName: string; base64: string; mime?: string }) => Promise<{
     canceled?: boolean
     path?: string
+    uri?: string
+    bytes?: number
+    public?: boolean
+    location?: string
+  }>
+  /** 保存完成后跳到文件管理器（安卓本地实现；没有就返回 ok:false，不抛错） */
+  revealFile?: (opts: { uri?: string; path?: string; mime?: string }) => Promise<{
+    ok?: boolean
+    via?: string
   }>
   share?: (opts: { uri?: string; path?: string; mime?: string }) => Promise<{ ok?: boolean }>
 }
@@ -69,9 +78,19 @@ function isCapacitorNative(): boolean {
   return isNative()
 }
 
-async function getPlugin(): Promise<SaveFilePluginLike | null> {
-  if (!isCapacitorNative()) return null
-  return SaveFilePlugin
+/**
+ * 拿插件代理（同步！）。
+ *
+ * ⚠️⚠️ 这个函数**绝不能是 async**，调用处也**绝不能 `await` 它的返回值**。
+ * registerPlugin 返回的是 Proxy，它对任何属性（包括 `then`）都返回一个函数 ——
+ * 于是 `await plugin` 会被 JS 当成 "thenable" 去调 `SaveFile.then(resolve, reject)`，
+ * 原生侧直接抛 `"SaveFile.then()" is not implemented on android`，而那个 await
+ * 永远不会 settle：界面就永久停在「导出中…」（2026-11-09 真机抓到的根因，
+ * 连 120 秒超时都触发不了，因为根本没走到加超时的那一步）。
+ */
+function getPlugin(): SaveFilePluginLike | null {
+  // 统一走 utils/platform（内部用 getPlatform()，只有 android/ios 才算原生）
+  return isCapacitorNative() ? SaveFilePlugin : null
 }
 
 /** 插件自检结果（前端用它决定"能不能走分块导出"） */
@@ -93,6 +112,10 @@ const BEGIN_TIMEOUT_MS = 12_000
 const APPEND_TIMEOUT_MS = 20_000
 const FINISH_TIMEOUT_MS = 180_000
 const PROBE_TIMEOUT_MS = 4_000
+/** 整包保存（≤2MB）的兜底超时：写盘 + 校验，120 秒还没回话一定是出问题了 */
+const SAVE_FILE_TIMEOUT_MS = 120_000
+/** 跳文件管理器的兜底超时：只是个 startActivity，8 秒没回话就当失败 */
+const REVEAL_TIMEOUT_MS = 8_000
 
 /**
  * 每一步 await 都必须有上限：安卓 WebView 上压缩、base64 拼接、SAF 保存都可能不返回，
@@ -166,7 +189,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 export async function probePlugin(): Promise<PluginProbe> {
   if (probePromise) return probePromise
   probePromise = (async (): Promise<PluginProbe> => {
-    const p = await getPlugin()
+    const p = getPlugin()
     if (!p) return { available: false, chunked: false, reason: '非原生平台或插件未挂载' }
     let declared = true
     try {
@@ -222,7 +245,7 @@ export function isNativeAndroid(): boolean {
 
 /** 是否具备旧的单次保存接口（老 APK 只有这个） */
 export async function hasLegacySave(): Promise<boolean> {
-  const p = await getPlugin()
+  const p = getPlugin()
   return !!p && typeof p.saveFile === 'function'
 }
 
@@ -440,13 +463,56 @@ export function base64ToBytes(b64: string): Uint8Array {
   return out
 }
 
-/** 统一保存导出文件（ZIP / JSON 共用）；via 区分整包过桥与分块写入 */
+/** 一次保存的落地信息（界面用它显示「已保存到 …」并再打开文件夹） */
+export interface SavedFileInfo {
+  /** 给人看的落点（「下载/Baker AI/xxx.zip」）；浏览器端为空串 */
+  path: string
+  /** 原生 uri（再次打开用） */
+  uri: string
+  /** 是否落在公共目录（文件管理器直接可见） */
+  isPublic: boolean
+  /** 真实落盘字节 */
+  bytes: number
+  /** 保存后是否成功跳到了文件管理器 */
+  revealed: boolean
+}
+
+/**
+ * 保存完成后自动跳到文件管理器（安卓）。
+ *
+ * 不抛错：界面已经显示了落点，用户还能点「打开所在文件夹」再试一次；
+ * 这里抛错只会把一次成功的导出变成一次失败提示。
+ */
+export async function revealSavedFile(opts: {
+  path?: string
+  uri?: string
+  mime?: string
+}): Promise<boolean> {
+  const plugin = getPlugin()
+  if (!plugin) return false
+  try {
+    const res = await withTimeout(
+      plugin.revealFile
+        ? plugin.revealFile({ uri: opts.uri ?? '', path: opts.path ?? '', mime: opts.mime })
+        : Promise.resolve({ ok: false }),
+      REVEAL_TIMEOUT_MS,
+      '打开文件管理器',
+    )
+    return res?.ok === true
+  } catch {
+    return false
+  }
+}
+
+/** 统一保存导出文件（ZIP / JSON / 截图共用）；via 区分整包过桥与分块写入 */
 export async function saveExportFileSmart(opts: {
   fileName: string
   base64: string
   mime?: string
+  /** 保存成功后是否自动跳文件管理器（默认 true；安卓以外无效） */
+  autoReveal?: boolean
   onProgress?: (p: ExportProgress) => void
-}): Promise<{ via: 'legacy' | 'chunked'; bytes: number }> {
+}): Promise<SavedFileInfo & { via: 'legacy' | 'chunked' }> {
   const mime = opts.mime ?? 'application/octet-stream'
   const b64 = opts.base64 ?? ''
   // 空内容守卫：以前这种情况会"成功"导出一个 0 字节文件，用户以为数据丢了
@@ -468,18 +534,42 @@ export async function saveExportFileSmart(opts: {
     if (electronSave) {
       const r = await electronSave({ fileName: opts.fileName, base64: b64 })
       if (r && r.canceled) throw new Error('已取消导出')
-      return { via: 'legacy', bytes: estBytes }
+      return { via: 'legacy', bytes: estBytes, path: '', uri: '', isPublic: false, revealed: false }
     }
-    const plugin = (await getPlugin()) as unknown as {
+    const plugin = getPlugin() as unknown as {
       saveFile?: (o: { fileName: string; base64: string; mime?: string }) =>
-        Promise<{ canceled?: boolean } | void>
+        Promise<{
+          canceled?: boolean
+          path?: string
+          uri?: string
+          bytes?: number
+          public?: boolean
+        } | void>
     } | null
     if (!plugin || typeof plugin.saveFile !== 'function') {
       throw new Error('未找到系统保存组件（SaveFile）')
     }
-    const res = await plugin.saveFile({ fileName: opts.fileName, base64: b64, mime })
+    // ⚠️ 必须带超时：插件方法没应答时 Promise 永不 settle，按钮就永远停在「保存中…」
+    const res = await withTimeout(
+      plugin.saveFile({ fileName: opts.fileName, base64: b64, mime }),
+      SAVE_FILE_TIMEOUT_MS,
+      '保存文件',
+    )
     if (res && res.canceled) throw new Error('已取消导出')
-    return { via: 'legacy', bytes: estBytes }
+    const bytes = Number(res?.bytes ?? 0) || estBytes
+    const path = res?.path ?? ''
+    const uri = res?.uri ?? ''
+    const revealed = opts.autoReveal !== false
+      ? await revealSavedFile({ path, uri, mime })
+      : false
+    return {
+      via: 'legacy',
+      bytes,
+      path,
+      uri,
+      isPublic: res?.public === true,
+      revealed,
+    }
   }
 
   // ---- 大文件：分块写入 ----
@@ -509,7 +599,19 @@ export async function saveExportFileSmart(opts: {
     if (result?.sizeOk === false || written <= 0) {
       throw new Error(`分块写入校验失败（写入 ${written} 字节），已保留中间文件供排查`)
     }
-    return { via: 'chunked', bytes: written }
+    const path = result?.path || session.path || ''
+    const uri = result?.uri || session.uri || ''
+    const revealed = opts.autoReveal !== false
+      ? await revealSavedFile({ path, uri, mime })
+      : false
+    return {
+      via: 'chunked',
+      bytes: written,
+      path,
+      uri,
+      isPublic: session.isPublic === true,
+      revealed,
+    }
   } catch (err) {
     // 失败时删掉半截文件，避免用户拿到一个"看着有、其实不完整"的包
     try { await session.abort() } catch { /* 忽略 */ }
@@ -527,7 +629,7 @@ export async function beginExportWrite(opts: {
   probe?: PluginProbe
 }): Promise<ChunkWriteSession> {
   const probe = opts.probe ?? (await probePlugin())
-  const plugin = await getPlugin()
+  const plugin = getPlugin()
   const canNative = !!plugin && typeof plugin.beginWrite === 'function' && probe.chunked
 
   // 应急导出：自研插件不可用（老包/注册失败/自检超时）就直接走官方 filesystem 兜底，

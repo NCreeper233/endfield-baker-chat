@@ -69,9 +69,6 @@ export const GROUP_CONTINUE_EVERY = 20
 // 响应上下文在 stores/chat/aiResponse.ts，这里 re-export 兼容旧 import
 export type { AiResponseCtx } from './chat/aiResponse'
 
-/** 删除模式下删什么：整段对话 / 只清聊天记录 / 只清 AI 上下文 */
-export type DeleteKind = 'conversation' | 'history' | 'context'
-
 export const useChatStore = defineStore('chat', () => {
   /** 依赖方向是 chat → settings，settings 不反向依赖 chat */
   const settingsStore = useSettingsStore()
@@ -541,6 +538,37 @@ export const useChatStore = defineStore('chat', () => {
     conversations.value.forEach((_, i) => clearContextAt(i))
   }
 
+  // ---- 按主卡聚合的动作（卡片长按菜单用） ----
+
+  /** 某张主卡下所有子对话的全局下标（扁平 conversations 下标） */
+  function subIndexesOfCard(cardIndex: number): number[] {
+    const range = cardSubRanges.value[cardIndex]
+    if (!range || range.count <= 0) return []
+    return Array.from({ length: range.count }, (_, i) => range.start + i)
+  }
+
+  /**
+   * 在指定主卡下新建一段对话
+   *
+   * 菜单是长按打开的，长按不会选中卡片，所以这里先选中再建 ——
+   * createChildConversation 依赖 activeCardIndex，直接调用会建到上次选中的卡上。
+   */
+  function createChildConversationAt(cardIndex: number): boolean {
+    if (cardIndex < 0 || cardIndex >= cards.value.length) return false
+    selectCard(cardIndex)
+    return createChildConversation()
+  }
+
+  /** 清空某张主卡下所有对话的上下文（不动可见消息） */
+  function clearContextOfCard(cardIndex: number): void {
+    subIndexesOfCard(cardIndex).forEach((sub) => clearContextAt(sub))
+  }
+
+  /** 删除某张主卡下的全部对话；内置角色最后一段会按 deleteConversationsAt 的规则退化为清空 */
+  function deleteConversationsOfCard(cardIndex: number): number {
+    return deleteConversationsAt(subIndexesOfCard(cardIndex))
+  }
+
   /**
    * 摘要必须**冻结**到下一次压缩才更新：两次请求的前缀逐字节一致，缓存才命中。
    * 只改 contextHistory，不动 messages —— 压缩的是发给 AI 的记忆，不是看到的记录。
@@ -561,97 +589,6 @@ export const useChatStore = defineStore('chat', () => {
       conv.contextHistory = kept
     }
     return drop
-  }
-
-  // ---- 删除模式（纯 UI，不持久化）----
-  // 放 store 是因为勾选态要被三处读取：列表项画不画黄条、底部条数量、
-  // 以及点击分流（删除模式下点卡片是勾选，不是切会话）。
-
-  /** 是否处于删除模式 */
-  const deleteMode = ref(false)
-
-  /** 已勾选的子卡(全局下标) */
-  const deleteSelection = ref<number[]>([])
-
-  /** 删除对象:整段对话 / 可见历史 / AI 上下文 */
-  const deleteKind = ref<DeleteKind>('conversation')
-
-  /** 删除历史 / 上下文时的连带清除勾选；对「删除对话」无效 */
-  const deleteLinked = ref(false)
-
-  /** 已勾选数量(底部条显示"已选 N 段") */
-  const deleteCount = computed(() => deleteSelection.value.length)
-
-  /** 某一段对话是否已勾选(列表项据此画悬浮黄条) */
-  function isDeleteSelected(sub: number): boolean {
-    return deleteSelection.value.indexOf(sub) !== -1
-  }
-
-  /**
-   * 进入 / 退出删除模式
-   *
-   * 进入时默认勾上当前这段（点删除多半就是想删它），并把删除对象复位为「删除对话」：
-   * 沿用上次的选择会让按钮名与实际动作不符，很容易误删。
-   */
-  function toggleDeleteMode(): void {
-    if (deleteMode.value) {
-      exitDeleteMode()
-      return
-    }
-    deleteMode.value = true
-    deleteKind.value = 'conversation'
-    deleteLinked.value = false
-    deleteSelection.value = activeSub.value === null ? [] : [activeSub.value]
-  }
-
-  /** 退出删除模式并清空勾选 */
-  function exitDeleteMode(): void {
-    deleteMode.value = false
-    deleteSelection.value = []
-    deleteLinked.value = false
-  }
-
-  /** 勾选 / 取消勾选一段对话 */
-  function toggleDeleteSelect(sub: number): void {
-    const i = deleteSelection.value.indexOf(sub)
-    if (i === -1) deleteSelection.value.push(sub)
-    else deleteSelection.value.splice(i, 1)
-  }
-
-  /** 切换删除对象；顺手复位「连带清除」—— 留着上次的勾选容易误删 */
-  function setDeleteKind(kind: DeleteKind): void {
-    deleteKind.value = kind
-    deleteLinked.value = false
-  }
-
-  /** 勾选 / 取消「连带清除」 */
-  function setDeleteLinked(value: boolean): void {
-    deleteLinked.value = value
-  }
-
-  /**
-   * 执行删除(底部条的「删除」按钮)
-   *
-   * @returns 实际处理了几段对话(用于提示)
-   */
-  function runDelete(): number {
-    const subs = deleteSelection.value.slice()
-    if (subs.length === 0) return 0
-    const linked = deleteLinked.value
-    let done = subs.length
-    if (deleteKind.value === 'conversation') {
-      done = deleteConversationsAt(subs)
-    } else if (deleteKind.value === 'history') {
-      subs.forEach((s) => clearMessagesAt(s))
-      // 连带:同时清掉 AI 记忆
-      if (linked) subs.forEach((s) => clearContextAt(s))
-    } else {
-      subs.forEach((s) => clearContextAt(s))
-      // 连带:同时清掉聊天记录
-      if (linked) subs.forEach((s) => clearMessagesAt(s))
-    }
-    exitDeleteMode()
-    return done
   }
 
   // ---- 选中消息导出（纯 UI，不持久化）----
@@ -1432,20 +1369,6 @@ export const useChatStore = defineStore('chat', () => {
     clearConversationSuggestions,
     sendImage,
     addTopicLine,
-    // 删除模式(多选 + 批量删除 / 清空)
-    deleteMode,
-    deleteSelection,
-    deleteKind,
-    deleteCount,
-    // 删除历史/上下文时的「连带清除」勾选
-    deleteLinked,
-    isDeleteSelected,
-    toggleDeleteMode,
-    exitDeleteMode,
-    toggleDeleteSelect,
-    setDeleteKind,
-    setDeleteLinked,
-    runDelete,
     deleteConversationsAt,
     // 选中消息导出(纯 UI)
     msgSelectMode,
@@ -1459,6 +1382,11 @@ export const useChatStore = defineStore('chat', () => {
     clearAllConversations,
     clearMessagesAt,
     clearContextAt,
+    // 按主卡聚合（卡片长按菜单）
+    subIndexesOfCard,
+    createChildConversationAt,
+    clearContextOfCard,
+    deleteConversationsOfCard,
     applyCompaction,
     clearAllMessages,
     clearAllContext,

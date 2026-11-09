@@ -28,20 +28,15 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   /**
-   * 点击操作带的加号
+   * 点击操作带左侧的加号
    *
-   * 群聊模式下语义是"创建群聊",单聊模式下是"新建对话"。
-   * 本组件不判断该做什么,统一上抛,由 App 按当前模式分发。
+   * 两种模式都渲染、位置相同，语义交给父级按当前模式分流：
+   *   群聊 → 新建群聊（打开建群弹窗）
+   *   单聊 → 在**选中的主卡**下新建一段子会话
    */
   (e: 'add'): void
   /** 点击群聊卡「⋯」:请求打开群聊设置弹窗 */
   (e: 'group-settings', cardIndex: number): void
-  /** 点击操作带的设置按钮:请求打开设置弹窗 */
-  (e: 'open-settings'): void
-  /** 点击操作带的公告按钮:请求打开公告页 */
-  (e: 'open-announce'): void
-  /** 点击操作带的删除按钮:请求打开删除确认弹窗 */
-  (e: 'open-delete'): void
   /** 点击操作带的用量按钮:请求开关 Token 用量 / 缓存命中面板 */
   (e: 'open-usage'): void
 }>()
@@ -57,9 +52,6 @@ const { collapsed, cards, chatMode } = storeToRefs(chatStore)
  * 本地既算不出预算也拿不到服务商的 usage 字段。
  */
 const showUsageButton = computed(() => settingsStore.apiConfig.apiMode === 'custom')
-
-/** 加号的无障碍标签:随模式变化(群聊 = 创建群聊,单聊 = 新建对话) */
-const addLabel = computed(() => (chatMode.value === 'group' ? '创建群聊' : '新建对话'))
 
 /** 搜索框内容(本地筛选,不发请求、不落盘) */
 const searchQuery = ref('')
@@ -236,35 +228,27 @@ const groupListEmpty = computed(
 </script>
 
 <template>
-  <!-- 顶部操作带:左组(新建 / 删除) + 中间搜索框 + 右组(公告 / 用量 / 设置)
-       位于角色列表上方、不随列表滚动 -->
+  <!-- 顶部操作带：与主卡**同宽**（458.28px）的一排独立圆角盒子 ——
+       [＋]  6px  [搜索框]  6px  [用量]
+       三者各自是带描边的圆角矩形、互不相连；整排左右边与主卡左右边对齐。
+       设置入口在顶栏页签右侧（AppHeader），公告页已移除（更新日志并入「设置 → 关于」）。 -->
   <div class="mode-switch-host">
-    <!-- 左组 -->
-    <div class="mode-switch-host__side">
-      <button
-        class="mode-switch-host__action"
-        type="button"
-        :aria-label="addLabel"
-        :title="addLabel"
-        @click="emit('add')"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" aria-hidden="true">
-          <path d="M12 5.5v13M5.5 12h13" />
-        </svg>
-      </button>
-      <button
-        class="mode-switch-host__action"
-        type="button"
-        aria-label="删除对话"
-        title="删除对话"
-        @click="emit('open-delete')"
-      >
-        <img :src="MATERIALS.editBtnDeleteIndeed" alt="" />
-      </button>
-    </div>
+    <!-- 左：加号。两种模式都在同一位置，语义由父级按模式分流
+         （群聊 = 新建群聊；单聊 = 在选中的主卡下新建一段子会话） -->
+    <button
+      class="mode-switch-host__action"
+      type="button"
+      :aria-label="chatMode === 'group' ? '新建群聊' : '新建对话'"
+      :title="chatMode === 'group' ? '新建群聊' : '新建对话'"
+      @click="emit('add')"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" aria-hidden="true">
+        <path d="M12 5.5v13M5.5 12h13" />
+      </svg>
+    </button>
 
-    <!-- 中间:角色 / 群聊搜索(实时筛选,不发请求) -->
+    <!-- 中：角色 / 群聊搜索（实时筛选，不发请求）。吃掉剩余宽度，右缘贴在主卡右缘 -->
     <div class="mode-switch-host__search">
       <input
         v-model="searchQuery"
@@ -285,41 +269,17 @@ const groupListEmpty = computed(
       >×</button>
     </div>
 
-    <!-- 右组 -->
-    <div class="mode-switch-host__side">
-      <button
-        class="mode-switch-host__action"
-        type="button"
-        aria-label="公告"
-        title="公告"
-        @click="emit('open-announce')"
-      >
-        <!-- 公告:铃铛外框 + 底部小锤,与相邻的图片图标同为纯白、同透明度 -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M6 9a6 6 0 1 1 12 0c0 4 1.2 5.4 2 6H4c.8-.6 2-2 2-6Z" />
-          <path d="M10 19a2 2 0 0 0 4 0" />
-        </svg>
-      </button>
-      <button
-        v-if="showUsageButton"
-        class="mode-switch-host__action"
-        type="button"
-        aria-label="Token 用量与缓存命中"
-        title="Token 用量与缓存命中"
-        @click="emit('open-usage')"
-      >
-        <img :src="MATERIALS.iconUsageStats" alt="" />
-      </button>
-      <button
-        class="mode-switch-host__action"
-        type="button"
-        aria-label="设置"
-        title="设置"
-        @click="emit('open-settings')"
-      >
-        <img :src="MATERIALS.loginBtnSetting" alt="" />
-      </button>
-    </div>
+    <!-- 右：用量（仅自定义 API 模式）。公告页已移除，公告内容改到「设置 → 关于」的更新日志 -->
+    <button
+      v-if="showUsageButton"
+      class="mode-switch-host__action"
+      type="button"
+      aria-label="Token 用量与缓存命中"
+      title="Token 用量与缓存命中"
+      @click="emit('open-usage')"
+    >
+      <img :src="MATERIALS.iconUsageStats" alt="" />
+    </button>
   </div>
 
   <!-- 列表滚动容器。只在窗口内的卡片才会挂载（见脚本的 winStart / winEnd） -->
@@ -368,47 +328,60 @@ const groupListEmpty = computed(
 @use '../../styles/variables' as *;
 @use '../../styles/mixins' as *;
 
-// 顶部操作带宿主:绝对定位于画布坐标,高度 40px,位于列表上方。
-// 排布:左组(新建 / 删除) — 中间搜索框(吃掉剩余宽) — 右组(公告 / 用量 / 设置)。
-//
-// 几何:左边缘与主卡对齐(同为 47.42px),宽度与主卡等宽(同为 458.28px)。
+// 顶部操作带宿主：绝对定位于画布坐标、高 40px，位于列表上方。
+// 三个**各自独立**的圆角盒子 + 6px 间隙：[＋] gap [搜索框] gap [用量]，
+// 整排左右边与主卡对齐（同为 47.42px → 505.7px，宽 458.28px）。
+// 设置键不在这条带里：它上移到了顶栏「单聊 / 群聊」页签的右侧（AppHeader）。
 .mode-switch-host {
   position: absolute;
   left: 47.42px;
   // 顶栏(AppHeader,高 80)接管了标题与模式页签后,这条操作带整体下移一点点:
-  // 76 让按钮视觉上紧贴顶栏下沿,底边 116 距首卡(≈132.57)仍有余量
+  // 76 让这排盒子视觉上紧贴顶栏下沿,底边 116 距首卡(≈132.57)仍有余量
   top: 76px;
   width: 458.28px;
   height: 40px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 6px;
   z-index: 2;
-  // 宿主是一整块实体盒子(只有按钮 / 输入框本身占宽)。不关掉命中测试,
-  // 它会像一块透明玻璃一样吃掉整条上的点击。
-  pointer-events: none;
 
-  > * {
-    pointer-events: auto;
-  }
+  // ---- 独立的方按钮（加号 / 用量）----------------------------------------
+  // 与列表里其它操作按钮共用同一个 mixin，尺寸/描边/圆角/悬停完全一致；
+  // 搜索框只吃剩余宽度，所以右侧有没有按钮都不会把整排顶出主卡宽度。
+  &__action {
+    @include list-action-btn;
 
-  // ---- 左右两组按钮 ------------------------------------------------------
-  &__side {
-    display: flex;
-    align-items: center;
-    gap: 10px;
     flex: none;
+
+    img {
+      display: block;
+      width: 20px;
+      height: 20px;
+      object-fit: contain;
+      opacity: 0.55;
+      transition: opacity 0.15s ease;
+    }
+
+    svg {
+      display: block;
+      width: 20px;
+      height: 20px;
+      opacity: 0.55;
+      transition: opacity 0.15s ease;
+    }
+
+    &:hover img,
+    &:hover svg {
+      opacity: 1;
+    }
   }
 
-  // ---- 中间搜索框 --------------------------------------------------------
+  // ---- 搜索框本体（第二个独立圆角矩形）----------------------------------
   &__search {
     position: relative;
     flex: 1 1 auto;
     min-width: 0;
     height: 40px;
-    display: flex;
-    align-items: center;
   }
 
   &__input {
@@ -458,38 +431,11 @@ const groupListEmpty = computed(
     line-height: 16px;
     text-align: center;
     cursor: pointer;
+    z-index: 1;
 
     &:hover {
       background: rgba(255, 255, 255, 0.28);
       color: #fff;
-    }
-  }
-
-  // 操作按钮(新建 / 删除 / 公告 / 用量 / 设置):外壳与加号共用同一个 mixin
-  &__action {
-    @include list-action-btn;
-
-    img {
-      display: block;
-      width: 20px;
-      height: 20px;
-      object-fit: contain;
-      opacity: 0.55;
-      transition: opacity 0.15s ease;
-    }
-
-    // 自绘图标(公告铃铛):与图片图标同样的 20px / 55% 白,视觉上不分彼此
-    svg {
-      display: block;
-      width: 20px;
-      height: 20px;
-      opacity: 0.55;
-      transition: opacity 0.15s ease;
-    }
-
-    &:hover img,
-    &:hover svg {
-      opacity: 1;
     }
   }
 }
